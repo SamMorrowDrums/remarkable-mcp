@@ -1,11 +1,29 @@
 name: Publish to PyPI and MCP Registry
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - uses: actions/checkout@v6
+      
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -29,7 +47,7 @@ jobs:
         run: uv run ruff check .
 
   build:
-    needs: test
+    needs: [create-release, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
