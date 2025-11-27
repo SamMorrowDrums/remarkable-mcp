@@ -21,7 +21,7 @@ classifiers = [
 
 dependencies = [
     "mcp>=1.0.0",
-    "rmapy>=0.4.0",
+    "rmapy>=0.3.0",
 ]
 
 [project.optional-dependencies]
