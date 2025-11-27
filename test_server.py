@@ -474,31 +474,41 @@ class TestRemarkableRead:
 class TestRegistration:
     """Test registration functionality."""
 
-    @patch("rmapy.api.Client")
-    @patch("pathlib.Path.exists")
-    @patch("pathlib.Path.read_text")
-    def test_register_and_get_token(self, mock_read_text, mock_exists, mock_client_class):
+    @patch("requests.post")
+    @patch("pathlib.Path.write_text")
+    def test_register_and_get_token(self, mock_write_text, mock_post):
         """Test registration process."""
-        mock_client = Mock()
-        mock_client_class.return_value = mock_client
-        mock_exists.return_value = True
-        mock_read_text.return_value = "test_token_12345"
+        # Mock successful API response
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = "test_device_token_12345"
+        mock_post.return_value = mock_response
 
         token = register_and_get_token("test_code")
 
-        assert token == "test_token_12345"
-        mock_client.register_device.assert_called_once_with("test_code")
+        # Should return JSON with devicetoken
+        import json
 
-    @patch("rmapy.api.Client")
-    @patch("pathlib.Path.exists")
-    def test_register_token_not_found(self, mock_exists, mock_client_class):
-        """Test registration when token file is not created."""
-        mock_client = Mock()
-        mock_client_class.return_value = mock_client
-        mock_exists.return_value = False
+        token_data = json.loads(token)
+        assert token_data["devicetoken"] == "test_device_token_12345"
+        assert "usertoken" in token_data
 
-        with pytest.raises(RuntimeError, match="token file not found"):
-            register_and_get_token("test_code")
+        # Verify API was called
+        mock_post.assert_called_once()
+        call_args = mock_post.call_args
+        assert "webapp-prod.cloud.remarkable.engineering" in call_args[0][0]
+
+    @patch("requests.post")
+    def test_register_invalid_code(self, mock_post):
+        """Test registration with invalid/expired code."""
+        # Mock 400 response (invalid code)
+        mock_response = Mock()
+        mock_response.status_code = 400
+        mock_response.text = ""
+        mock_post.return_value = mock_response
+
+        with pytest.raises(RuntimeError, match="Registration failed"):
+            register_and_get_token("invalid_code")
 
 
 # =============================================================================
