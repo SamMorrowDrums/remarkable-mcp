@@ -163,7 +163,26 @@ class RemarkableClient:
         # Get root hash
         response = self._request(ROOT_URL)
         response.raise_for_status()
-        root_data = response.json()
+
+        # Handle empty or invalid JSON response
+        if not response.text or not response.text.strip():
+            raise RuntimeError(
+                "Empty response from reMarkable API. Your token may have expired.\n"
+                "Try re-registering: uvx remarkable-mcp --register <code>"
+            )
+
+        try:
+            root_data = response.json()
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"Invalid JSON from reMarkable API: {e}\nResponse was: {response.text[:200]}"
+            )
+
+        if "hash" not in root_data:
+            raise RuntimeError(
+                f"Unexpected API response format: {root_data}\nThe reMarkable API may have changed."
+            )
+
         root_hash = root_data["hash"]
 
         # Get root index
@@ -301,22 +320,40 @@ def register_device(one_time_code: str) -> Dict[str, str]:
     )
 
 
-def load_client_from_token(token_json: str) -> RemarkableClient:
+def load_client_from_token(token_data: str) -> RemarkableClient:
     """
-    Create a client from a JSON token string.
+    Create a client from a token string.
 
     Args:
-        token_json: JSON string with devicetoken and optional usertoken
+        token_data: Either:
+            - JSON string with devicetoken and optional usertoken
+            - Raw JWT device token (legacy format from rmapy)
 
     Returns:
         Configured RemarkableClient
     """
-    token_data = json.loads(token_json)
-    client = RemarkableClient(
-        device_token=token_data.get("devicetoken", ""),
-        user_token=token_data.get("usertoken", ""),
+    token_data = token_data.strip()
+
+    # Try to parse as JSON first
+    if token_data.startswith("{"):
+        try:
+            data = json.loads(token_data)
+            return RemarkableClient(
+                device_token=data.get("devicetoken", ""),
+                user_token=data.get("usertoken", ""),
+            )
+        except json.JSONDecodeError:
+            pass
+
+    # Treat as raw device token (legacy rmapy format - just the JWT)
+    # JWT tokens start with "eyJ" (base64 encoded '{"')
+    if token_data.startswith("eyJ"):
+        return RemarkableClient(device_token=token_data, user_token="")
+
+    raise ValueError(
+        f"Invalid token format. Expected JSON or JWT token.\n"
+        f"Token starts with: {token_data[:20]}..."
     )
-    return client
 
 
 def load_client_from_file(token_file: Path = Path.home() / ".rmapi") -> RemarkableClient:

@@ -38,17 +38,19 @@ uv run python server.py --register YOUR_ONE_TIME_CODE
 
 ## Setup
 
-### 1. Get a One-Time Code
+### Cloud API (Default)
+
+#### 1. Get a One-Time Code
 
 Go to [my.remarkable.com/device/desktop/connect](https://my.remarkable.com/device/desktop/connect) and generate a code.
 
-### 2. Convert to Token
+#### 2. Convert to Token
 
 ```bash
 uvx remarkable-mcp --register YOUR_CODE
 ```
 
-### 3. Configure MCP
+#### 3. Configure MCP
 
 **VS Code** — Add to `.vscode/mcp.json`:
 
@@ -90,6 +92,60 @@ Your token is stored securely using VS Code's input system with `password: true`
     }
   }
 }
+```
+
+### SSH Mode (Alternative)
+
+Connect directly to your reMarkable via USB — no cloud authentication needed.
+
+#### Requirements
+
+- reMarkable connected via USB cable
+- SSH access enabled (Settings → Storage → USB web interface)
+- Your tablet must be on and unlocked
+
+#### Configure MCP for SSH
+
+**VS Code** — Add to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--ssh"]
+    }
+  }
+}
+```
+
+That's it! Default connection is `root@10.11.99.1` (standard USB IP).
+
+#### Custom SSH Host
+
+If you've set up an SSH config alias for your reMarkable:
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--ssh"],
+      "env": {
+        "REMARKABLE_SSH_HOST": "remarkable"
+      }
+    }
+  }
+}
+```
+
+#### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REMARKABLE_SSH_HOST` | `10.11.99.1` | SSH hostname or IP |
+| `REMARKABLE_SSH_USER` | `root` | SSH username |
+| `REMARKABLE_SSH_PORT` | `22` | SSH port |
 ```
 
 ## Tools
