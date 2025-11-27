@@ -21,11 +21,11 @@ classifiers = [
 
 dependencies = [
     "mcp>=1.0.0",
-    "rmapy>=0.3.0",
     "rmscene>=0.6.0",
     "pytesseract>=0.3.10",
     "Pillow>=10.0.0",
     "rmc>=0.3.0",
+    "requests>=2.28.0",
 ]
 
 [project.optional-dependencies]
