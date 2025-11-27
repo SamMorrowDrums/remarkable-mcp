@@ -4,10 +4,19 @@ reMarkable MCP Server
 
 An MCP server that provides access to reMarkable tablet data through the reMarkable Cloud API.
 Uses rmapy for authentication and file access.
+
+Usage:
+    # As MCP server (default)
+    python server.py
+    
+    # Convert one-time code to token (run once)
+    python server.py --register <one-time-code>
 """
 
 import os
+import sys
 import json
+import argparse
 import tempfile
 import shutil
 from pathlib import Path
@@ -19,7 +28,8 @@ from mcp.server.fastmcp import FastMCP
 # Initialize FastMCP server
 mcp = FastMCP("remarkable")
 
-# Configuration
+# Configuration - check env var first, then fall back to file
+REMARKABLE_TOKEN = os.environ.get("REMARKABLE_TOKEN")
 REMARKABLE_CONFIG_DIR = Path.home() / ".remarkable"
 REMARKABLE_TOKEN_FILE = REMARKABLE_CONFIG_DIR / "token"
 CACHE_DIR = REMARKABLE_CONFIG_DIR / "cache"
@@ -29,14 +39,17 @@ def get_rmapi():
     """Get or initialize the reMarkable API client."""
     try:
         from rmapy.api import Client
-        from rmapy.document import Document
-        from rmapy.folder import Folder
         
         client = Client()
         
-        # Check if we have a valid token
-        if REMARKABLE_TOKEN_FILE.exists():
-            client.renew_token()
+        # If token is provided via environment, use it
+        if REMARKABLE_TOKEN:
+            # rmapy stores token in ~/.rmapi, we need to write it there
+            rmapi_file = Path.home() / ".rmapi"
+            rmapi_file.write_text(REMARKABLE_TOKEN)
+        
+        # Renew/validate the token
+        client.renew_token()
         
         return client
     except ImportError:
@@ -51,69 +64,47 @@ def ensure_config_dir():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def register_and_get_token(one_time_code: str) -> str:
+    """
+    Register with reMarkable using a one-time code and return the token.
+    
+    This is meant to be run once from the command line to get a token
+    that can then be stored in the MCP config.
+    """
+    from rmapy.api import Client
+    
+    client = Client()
+    client.register_device(one_time_code)
+    
+    # rmapy stores the token in ~/.rmapi
+    rmapi_file = Path.home() / ".rmapi"
+    if rmapi_file.exists():
+        return rmapi_file.read_text().strip()
+    else:
+        raise RuntimeError("Registration succeeded but token file not found")
+
+
 @mcp.tool()
 def remarkable_auth_status() -> str:
     """
     Check the authentication status with reMarkable Cloud.
-    Returns whether you're authenticated and token expiry info.
+    Returns whether you're authenticated and token info.
     """
-    ensure_config_dir()
-    
-    if not REMARKABLE_TOKEN_FILE.exists():
-        return json.dumps({
-            "authenticated": False,
-            "message": "Not authenticated. Use remarkable_register with a one-time code from https://my.remarkable.com/device/browser/connect"
-        }, indent=2)
+    token_source = "environment variable" if REMARKABLE_TOKEN else "file (~/.rmapi)"
     
     try:
         client = get_rmapi()
-        # Try to refresh token to verify it's valid
-        client.renew_token()
         return json.dumps({
             "authenticated": True,
             "message": "Successfully authenticated with reMarkable Cloud",
-            "config_dir": str(REMARKABLE_CONFIG_DIR)
+            "token_source": token_source
         }, indent=2)
     except Exception as e:
         return json.dumps({
             "authenticated": False,
             "error": str(e),
-            "message": "Token may be expired. Use remarkable_register to re-authenticate."
-        }, indent=2)
-
-
-@mcp.tool()
-def remarkable_register(one_time_code: str) -> str:
-    """
-    Register this device with reMarkable Cloud using a one-time code.
-    
-    Get a code from: https://my.remarkable.com/device/browser/connect
-    
-    Args:
-        one_time_code: The 8-character one-time code from reMarkable
-    """
-    ensure_config_dir()
-    
-    try:
-        from rmapy.api import Client
-        
-        client = Client()
-        client.register_device(one_time_code)
-        
-        return json.dumps({
-            "success": True,
-            "message": "Successfully registered with reMarkable Cloud!",
-            "config_dir": str(REMARKABLE_CONFIG_DIR)
-        }, indent=2)
-    except ImportError:
-        return json.dumps({
-            "success": False,
-            "error": "rmapy not installed. Run: pip install rmapy"
-        }, indent=2)
-    except Exception as e:
-        return json.dumps({
-            "success": False,
-            "error": str(e)
+            "token_source": token_source,
+            "hint": "Run: python server.py --register <one-time-code> to get a token"
         }, indent=2)
 
 
@@ -472,5 +463,60 @@ def remarkable_download_pdf(document_name: str, output_path: Optional[str] = Non
         }, indent=2)
 
 
+def main():
+    """Main entry point - handle CLI args or run MCP server."""
+    parser = argparse.ArgumentParser(
+        description="reMarkable MCP Server",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Register and get token (run once)
+  python server.py --register abcd1234
+  
+  # Run as MCP server
+  python server.py
+  
+  # Run with token from environment
+  REMARKABLE_TOKEN="your-token" python server.py
+"""
+    )
+    parser.add_argument(
+        "--register",
+        metavar="CODE",
+        help="Register with reMarkable using a one-time code and print the token"
+    )
+    
+    args = parser.parse_args()
+    
+    if args.register:
+        # Registration mode - convert one-time code to token
+        try:
+            print(f"Registering with reMarkable using code: {args.register}")
+            token = register_and_get_token(args.register)
+            print("\n✅ Successfully registered!\n")
+            print("Your token (add to mcp.json env):")
+            print("-" * 50)
+            print(token)
+            print("-" * 50)
+            print("\nAdd to your .vscode/mcp.json:")
+            print(json.dumps({
+                "servers": {
+                    "remarkable": {
+                        "command": "python",
+                        "args": ["/path/to/server.py"],
+                        "env": {
+                            "REMARKABLE_TOKEN": token
+                        }
+                    }
+                }
+            }, indent=2))
+        except Exception as e:
+            print(f"❌ Registration failed: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        # MCP server mode
+        mcp.run()
+
+
 if __name__ == "__main__":
-    mcp.run()
+    main()
