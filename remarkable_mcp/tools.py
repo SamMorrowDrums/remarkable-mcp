@@ -31,7 +31,7 @@ READ_ONLY_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
     idempotentHint=True,
-    openWorldHint=True,  # Interacts with external reMarkable Cloud
+    openWorldHint=False,  # Private cloud account, not open world
 )
 
 
