@@ -2,7 +2,7 @@
 MCP Resources for reMarkable tablet access.
 
 Provides:
-- remarkable://doc/{name} - template for any document by name
+- remarkable://{path}.txt - template for any document by path
 - Individual resources loaded at startup (SSH) or in background batches (cloud)
 """
 
@@ -12,13 +12,15 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Optional, Set
+from urllib.parse import quote, unquote
 
 from remarkable_mcp.server import mcp
 
 logger = logging.getLogger(__name__)
 
 # Background loader state
-_registered_docs: Set[str] = set()
+_registered_docs: Set[str] = set()  # Track document IDs
+_registered_uris: Set[str] = set()  # Track URIs for collision detection
 
 
 def _is_ssh_mode() -> bool:
@@ -27,29 +29,35 @@ def _is_ssh_mode() -> bool:
 
 
 @mcp.resource(
-    "remarkable://doc/{name}",
-    name="Document by Name",
-    description="Read a reMarkable document by name. Use remarkable_browse() to find documents.",
+    "remarkable://{path}.txt",
+    name="Document by Path",
+    description="Read a reMarkable document by path. Use remarkable_browse() to find documents.",
     mime_type="text/plain",
 )
-def document_resource(name: str) -> str:
-    """Return document content by name (fetched on demand)."""
+def document_resource(path: str) -> str:
+    """Return document content by path (fetched on demand)."""
     try:
-        from remarkable_mcp.api import get_rmapi
+        from remarkable_mcp.api import get_item_path, get_items_by_id, get_rmapi
         from remarkable_mcp.extract import extract_text_from_document_zip
+
+        # URL-decode the path (spaces are encoded as %20, etc.)
+        decoded_path = unquote(path)
 
         client = get_rmapi()
         collection = client.get_meta_items()
+        items_by_id = get_items_by_id(collection)
 
-        # Find document by name
+        # Find document by path
         target_doc = None
         for item in collection:
-            if not item.is_folder and item.VissibleName == name:
-                target_doc = item
-                break
+            if not item.is_folder:
+                item_path = get_item_path(item, items_by_id).lstrip("/")
+                if item_path == decoded_path:
+                    target_doc = item
+                    break
 
         if not target_doc:
-            return f"Document not found: '{name}'"
+            return f"Document not found: '{decoded_path}'"
 
         # Download and extract
         raw_doc = client.download(target_doc)
@@ -79,37 +87,42 @@ def document_resource(name: str) -> str:
         return f"Error reading document: {e}"
 
 
-# Completions handler for document names
+# Completions handler for document paths
 @mcp.completion()
-async def complete_document_name(ref, argument, context):
-    """Provide completions for document names."""
+async def complete_document_path(ref, argument, context):
+    """Provide completions for document paths."""
     from mcp.types import Completion, ResourceTemplateReference
 
     # Only handle our document template
     if not isinstance(ref, ResourceTemplateReference):
         return None
-    if ref.uri_template != "remarkable://doc/{name}":
+    if ref.uri_template != "remarkable://{path}.txt":
         return None
-    if argument.name != "name":
+    if argument.name != "path":
         return None
 
     try:
-        from remarkable_mcp.api import get_rmapi
+        from remarkable_mcp.api import get_item_path, get_items_by_id, get_rmapi
 
         client = get_rmapi()
         collection = client.get_meta_items()
+        items_by_id = get_items_by_id(collection)
 
-        # Get all document names
-        doc_names = [item.VissibleName for item in collection if not item.is_folder]
+        # Get all document paths (without leading slash)
+        doc_paths = []
+        for item in collection:
+            if not item.is_folder:
+                path = get_item_path(item, items_by_id).lstrip("/")
+                doc_paths.append(path)
 
         # Filter by partial value if provided
         partial = argument.value or ""
         if partial:
             partial_lower = partial.lower()
-            doc_names = [n for n in doc_names if partial_lower in n.lower()]
+            doc_paths = [p for p in doc_paths if partial_lower in p.lower()]
 
         # Return up to 50 matches, sorted
-        return Completion(values=sorted(doc_names)[:50])
+        return Completion(values=sorted(doc_paths)[:50])
 
     except Exception:
         return Completion(values=[])
@@ -154,7 +167,7 @@ def _make_doc_resource(client, document):
 
 def _register_document(client, doc, items_by_id=None) -> bool:
     """Register a single document as a resource."""
-    global _registered_docs
+    global _registered_docs, _registered_uris
 
     doc_id = doc.ID
 
@@ -162,7 +175,7 @@ def _register_document(client, doc, items_by_id=None) -> bool:
     if doc_id in _registered_docs:
         return False
 
-    # Get the full path for display
+    # Get the full path
     doc_name = doc.VissibleName
     if items_by_id:
         from remarkable_mcp.api import get_item_path
@@ -171,17 +184,33 @@ def _register_document(client, doc, items_by_id=None) -> bool:
     else:
         full_path = f"/{doc_name}"
 
-    # Use ID in URI for uniqueness, path for display
-    uri = f"remarkable://doc/{doc_id}"
+    # URL-encode the path for valid URI (spaces -> %20, etc.)
+    # Use safe="" to encode all special chars including slashes initially,
+    # then we'll handle slashes specially
+    uri_path = full_path.lstrip("/")
+    encoded_path = quote(uri_path, safe="/")  # Keep slashes unencoded for paths
+    base_uri = f"remarkable://{encoded_path}.txt"
+
+    # Handle duplicate paths by appending counter
+    counter = 1
+    final_uri = base_uri
+    display_name = f"{full_path}.txt"
+    while final_uri in _registered_uris:
+        # Increment counter for each collision
+        final_uri = f"remarkable://{encoded_path}_{counter}.txt"
+        display_name = f"{full_path} ({counter}).txt"
+        counter += 1
+
     desc = f"Content from '{full_path}'"
     if doc.ModifiedClient:
         desc += f" (modified: {doc.ModifiedClient})"
 
-    mcp.resource(uri, name=full_path, description=desc, mime_type="text/plain")(
+    mcp.resource(final_uri, name=display_name, description=desc, mime_type="text/plain")(
         _make_doc_resource(client, doc)
     )
 
     _registered_docs.add(doc_id)
+    _registered_uris.add(final_uri)
     return True
 
 
