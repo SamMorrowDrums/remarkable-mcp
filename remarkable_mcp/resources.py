@@ -169,6 +169,8 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
     """
     batch_size = 10
     offset = 0
+    consecutive_errors = 0
+    max_consecutive_errors = 3
 
     try:
         from remarkable_mcp.api import get_rmapi
@@ -187,9 +189,19 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
                 items = await loop.run_in_executor(
                     None, lambda: client.get_meta_items(limit=offset + batch_size)
                 )
+                consecutive_errors = 0  # Reset on success
             except Exception as e:
-                logger.warning(f"Error fetching documents: {e}")
-                break
+                consecutive_errors += 1
+                logger.warning(f"Error fetching documents (attempt {consecutive_errors}): {e}")
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.error(
+                        f"Background loader stopping after {max_consecutive_errors} "
+                        "consecutive errors"
+                    )
+                    break
+                # Wait before retry
+                await asyncio.sleep(2**consecutive_errors)
+                continue
 
             # Get documents from this batch (skip folders and already-fetched)
             documents = [item for item in items if not item.is_folder]
@@ -207,8 +219,11 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
             for doc in batch_docs:
                 if shutdown_event.is_set():
                     break
-                if _register_document(client, doc):
-                    registered_count += 1
+                try:
+                    if _register_document(client, doc):
+                        registered_count += 1
+                except Exception as e:
+                    logger.debug(f"Failed to register document '{doc.VissibleName}': {e}")
 
             if registered_count > 0:
                 logger.debug(

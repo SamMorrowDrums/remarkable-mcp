@@ -387,7 +387,26 @@ def remarkable_status() -> str:
     - remarkable_status()
     </examples>
     """
-    token_source = "environment variable" if REMARKABLE_TOKEN else "file (~/.rmapi)"
+    import os
+
+    from remarkable_mcp.api import REMARKABLE_USE_SSH
+
+    # Determine transport mode
+    if REMARKABLE_USE_SSH:
+        from remarkable_mcp.ssh import (
+            DEFAULT_SSH_HOST,
+            DEFAULT_SSH_PORT,
+            DEFAULT_SSH_USER,
+        )
+
+        transport = "ssh"
+        ssh_host = os.environ.get("REMARKABLE_SSH_HOST", DEFAULT_SSH_HOST)
+        ssh_user = os.environ.get("REMARKABLE_SSH_USER", DEFAULT_SSH_USER)
+        ssh_port = int(os.environ.get("REMARKABLE_SSH_PORT", str(DEFAULT_SSH_PORT)))
+        connection_info = f"SSH to {ssh_user}@{ssh_host}:{ssh_port}"
+    else:
+        transport = "cloud"
+        connection_info = "environment variable" if REMARKABLE_TOKEN else "file (~/.rmapi)"
 
     try:
         client = get_rmapi()
@@ -398,15 +417,16 @@ def remarkable_status() -> str:
 
         result = {
             "authenticated": True,
-            "token_source": token_source,
-            "cloud_status": "connected",
+            "transport": transport,
+            "connection": connection_info,
+            "status": "connected",
             "document_count": doc_count,
         }
 
         return make_response(
             result,
             (
-                f"Connected successfully. Found {doc_count} documents. "
+                f"Connected successfully via {transport}. Found {doc_count} documents. "
                 "Use remarkable_browse() to see your files, "
                 "or remarkable_recent() for recent documents."
             ),
@@ -415,14 +435,29 @@ def remarkable_status() -> str:
     except Exception as e:
         error_msg = str(e)
 
-        result = {"authenticated": False, "error": error_msg, "token_source": token_source}
+        result = {
+            "authenticated": False,
+            "transport": transport,
+            "connection": connection_info,
+            "error": error_msg,
+        }
 
-        hint = (
-            "To authenticate: "
-            "1) Go to https://my.remarkable.com/device/browser/connect "
-            "2) Get a one-time code "
-            "3) Run: uv run python server.py --register YOUR_CODE "
-            "4) Add REMARKABLE_TOKEN to your MCP config."
-        )
+        if REMARKABLE_USE_SSH:
+            hint = (
+                "SSH connection failed. Make sure:\n"
+                "1) Your reMarkable tablet is connected via USB\n"
+                "2) SSH is enabled on the tablet (Settings > Storage > USB web interface)\n"
+                "3) You can run: ssh root@10.11.99.1\n\n"
+                "Or use cloud mode instead (remove --ssh flag)."
+            )
+        else:
+            hint = (
+                "To authenticate: "
+                "1) Go to https://my.remarkable.com/device/browser/connect "
+                "2) Get a one-time code "
+                "3) Run: uv run python server.py --register YOUR_CODE "
+                "4) Add REMARKABLE_TOKEN to your MCP config.\n\n"
+                "Or use SSH mode: uvx remarkable-mcp --ssh"
+            )
 
         return make_response(result, hint)

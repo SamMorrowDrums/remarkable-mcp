@@ -3,8 +3,11 @@
 CLI entry point for reMarkable MCP Server.
 
 Usage:
-    # As MCP server (default)
+    # As MCP server (default, uses cloud API)
     remarkable-mcp
+
+    # Use SSH transport (direct connection via USB)
+    remarkable-mcp --ssh
 
     # Convert one-time code to token (run once)
     remarkable-mcp --register <one-time-code>
@@ -12,6 +15,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 
 
@@ -25,17 +29,33 @@ Examples:
   # Register and get token (run once)
   uvx remarkable-mcp --register abcd1234
 
-  # Run as MCP server
+  # Run as MCP server (cloud API)
   uvx remarkable-mcp
 
   # Run with token from environment
   REMARKABLE_TOKEN="your-token" uvx remarkable-mcp
+
+  # Run with SSH transport (direct USB connection)
+  uvx remarkable-mcp --ssh
+
+  # SSH with custom host (e.g., using SSH config)
+  REMARKABLE_SSH_HOST="remarkable" uvx remarkable-mcp --ssh
+
+SSH Environment Variables:
+  REMARKABLE_SSH_HOST  SSH host (default: 10.11.99.1 for USB)
+  REMARKABLE_SSH_USER  SSH user (default: root)
+  REMARKABLE_SSH_PORT  SSH port (default: 22)
 """,
     )
     parser.add_argument(
         "--register",
         metavar="CODE",
         help="Register with reMarkable using a one-time code and print the token",
+    )
+    parser.add_argument(
+        "--ssh",
+        action="store_true",
+        help="Use SSH transport instead of cloud API (for USB connection)",
     )
 
     args = parser.parse_args()
@@ -71,6 +91,12 @@ Examples:
         except Exception as e:
             print(f"❌ Registration failed: {e}", file=sys.stderr)
             sys.exit(1)
+    elif args.ssh:
+        # SSH mode - set environment variable and run server
+        os.environ["REMARKABLE_USE_SSH"] = "1"
+        from remarkable_mcp.server import run
+
+        run()
     else:
         # MCP server mode - only now import the full server
         from remarkable_mcp.server import run

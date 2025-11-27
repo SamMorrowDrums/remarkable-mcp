@@ -175,14 +175,12 @@ class RemarkableClient:
             root_data = response.json()
         except json.JSONDecodeError as e:
             raise RuntimeError(
-                f"Invalid JSON from reMarkable API: {e}\n"
-                f"Response was: {response.text[:200]}"
+                f"Invalid JSON from reMarkable API: {e}\nResponse was: {response.text[:200]}"
             )
 
         if "hash" not in root_data:
             raise RuntimeError(
-                f"Unexpected API response format: {root_data}\n"
-                "The reMarkable API may have changed."
+                f"Unexpected API response format: {root_data}\nThe reMarkable API may have changed."
             )
 
         root_hash = root_data["hash"]

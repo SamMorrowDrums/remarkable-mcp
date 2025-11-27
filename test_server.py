@@ -269,9 +269,9 @@ class TestRemarkableStatus:
         data = json.loads(result[0][0].text)
 
         assert data["authenticated"] is True
-        assert "token_source" in data
-        assert "cloud_status" in data
-        assert data["cloud_status"] == "connected"
+        assert "transport" in data
+        assert "connection" in data
+        assert data["status"] == "connected"
         assert "_hint" in data
 
     @pytest.mark.asyncio
@@ -286,8 +286,8 @@ class TestRemarkableStatus:
         assert data["authenticated"] is False
         assert "error" in data
         assert "_hint" in data
-        # Hint should include registration instructions
-        assert "register" in data["_hint"].lower()
+        # Hint should include registration instructions or SSH mode
+        assert "register" in data["_hint"].lower() or "ssh" in data["_hint"].lower()
 
 
 # =============================================================================

@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 
 # Configuration - check env var first, then fall back to file
 REMARKABLE_TOKEN = os.environ.get("REMARKABLE_TOKEN")
+REMARKABLE_USE_SSH = os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
 REMARKABLE_CONFIG_DIR = Path.home() / ".remarkable"
 REMARKABLE_TOKEN_FILE = REMARKABLE_CONFIG_DIR / "token"
 CACHE_DIR = REMARKABLE_CONFIG_DIR / "cache"
@@ -18,8 +19,16 @@ def get_rmapi():
     """
     Get or initialize the reMarkable API client.
 
-    Uses our custom sync client since rmapy is broken (uses deprecated endpoints).
+    Uses SSH transport if REMARKABLE_USE_SSH=1, otherwise cloud API.
+    Returns either RemarkableClient or SSHClient (both have compatible interfaces).
     """
+    # Check if SSH mode is enabled
+    if REMARKABLE_USE_SSH:
+        from remarkable_mcp.ssh import create_ssh_client
+
+        return create_ssh_client()
+
+    # Cloud API mode
     from remarkable_mcp.sync import load_client_from_token
 
     # If token is provided via environment, use it
@@ -35,7 +44,9 @@ def get_rmapi():
         raise RuntimeError(
             "No reMarkable token found. Register first:\n"
             "  uvx remarkable-mcp --register <code>\n\n"
-            "Get a code from: https://my.remarkable.com/device/desktop/connect"
+            "Get a code from: https://my.remarkable.com/device/desktop/connect\n\n"
+            "Or use SSH mode (requires USB connection):\n"
+            "  uvx remarkable-mcp --ssh"
         )
 
     try:
