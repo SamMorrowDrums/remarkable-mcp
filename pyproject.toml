@@ -37,7 +37,7 @@ dev = [
 ]
 
 [project.scripts]
-remarkable-mcp = "remarkable_mcp.server:run"
+remarkable-mcp = "server:main"
 
 [build-system]
 requires = ["hatchling"]

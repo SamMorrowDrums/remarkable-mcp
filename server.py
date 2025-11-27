@@ -19,9 +19,6 @@ import argparse
 import json
 import sys
 
-from remarkable_mcp.api import register_and_get_token
-from remarkable_mcp.server import mcp, run
-
 
 def main():
     """Main entry point - handle CLI args or run MCP server."""
@@ -31,13 +28,13 @@ def main():
         epilog="""
 Examples:
   # Register and get token (run once)
-  uv run python server.py --register abcd1234
+  uvx remarkable-mcp --register abcd1234
 
   # Run as MCP server
-  uv run python server.py
+  uvx remarkable-mcp
 
   # Run with token from environment
-  REMARKABLE_TOKEN="your-token" uv run python server.py
+  REMARKABLE_TOKEN="your-token" uvx remarkable-mcp
 """,
     )
     parser.add_argument(
@@ -50,6 +47,9 @@ Examples:
 
     if args.register:
         # Registration mode - convert one-time code to token
+        # Only import what's needed for registration
+        from remarkable_mcp.api import register_and_get_token
+
         try:
             print(f"Registering with reMarkable using code: {args.register}")
             token = register_and_get_token(args.register)
@@ -77,12 +77,11 @@ Examples:
             print(f"❌ Registration failed: {e}", file=sys.stderr)
             sys.exit(1)
     else:
-        # MCP server mode
+        # MCP server mode - only now import the full server
+        from remarkable_mcp.server import run
+
         run()
 
-
-# Keep the mcp object accessible for testing
-__all__ = ["mcp", "main"]
 
 if __name__ == "__main__":
     main()
