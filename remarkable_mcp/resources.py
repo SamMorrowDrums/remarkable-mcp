@@ -3,11 +3,12 @@ MCP Resources for reMarkable tablet access.
 
 Provides:
 - remarkable://doc/{name} - template for any document by name
-- Individual resources lazily loaded in background (batches of 10)
+- Individual resources loaded at startup (SSH) or in background batches (cloud)
 """
 
 import asyncio
 import logging
+import os
 import tempfile
 from pathlib import Path
 from typing import Optional, Set
@@ -18,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 # Background loader state
 _registered_docs: Set[str] = set()
+
+
+def _is_ssh_mode() -> bool:
+    """Check if SSH transport is enabled (evaluated at runtime)."""
+    return os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
 
 
 @mcp.resource(
@@ -162,20 +168,47 @@ def _register_document(client, doc) -> bool:
 
 async def _load_documents_background(shutdown_event: asyncio.Event):
     """
-    Background task to lazily load all documents in batches of 10.
+    Background task to load and register all documents as resources.
 
-    Runs asynchronously, yielding control between batches to keep
-    the server responsive. Cancels gracefully on shutdown.
+    For SSH mode: loads all documents at once (fast, local metadata)
+    For Cloud mode: loads in batches of 10 to avoid blocking
     """
-    batch_size = 10
-    offset = 0
-    consecutive_errors = 0
-    max_consecutive_errors = 3
-
     try:
         from remarkable_mcp.api import get_rmapi
 
         client = get_rmapi()
+        loop = asyncio.get_event_loop()
+
+        if _is_ssh_mode():
+            # SSH mode: load all documents at once (it's fast!)
+            logger.info("SSH mode: loading all documents at once...")
+            try:
+                items = await loop.run_in_executor(None, client.get_meta_items)
+                documents = [item for item in items if not item.is_folder]
+
+                logger.info(f"Found {len(documents)} documents via SSH")
+
+                # Register all documents
+                for doc in documents:
+                    if shutdown_event.is_set():
+                        break
+                    try:
+                        _register_document(client, doc)
+                    except Exception as e:
+                        logger.debug(f"Failed to register '{doc.VissibleName}': {e}")
+
+                logger.info(
+                    f"Background loader complete: {len(_registered_docs)} documents registered"
+                )
+            except Exception as e:
+                logger.error(f"Failed to load documents via SSH: {e}")
+            return
+
+        # Cloud mode: load in batches to avoid blocking
+        batch_size = 10
+        offset = 0
+        consecutive_errors = 0
+        max_consecutive_errors = 3
 
         while True:
             # Check for shutdown
@@ -184,7 +217,6 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
                 break
 
             # Fetch next batch - run sync code in executor to not block
-            loop = asyncio.get_event_loop()
             try:
                 items = await loop.run_in_executor(
                     None, lambda: client.get_meta_items(limit=offset + batch_size)
