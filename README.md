@@ -13,8 +13,17 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server for a
 - Read typed text directly from notebooks (v3+ software, no OCR needed)
 - Browse and search your document library
 - Access recent files with content previews
-- OCR for handwritten content via pytesseract
+- OCR for handwritten content (Google Vision API recommended)
 - MCP resources and prompts for deeper integration
+
+## ⚡ Recommended: SSH Mode + Google Vision
+
+For the best experience, we strongly recommend:
+
+1. **SSH Mode** — 10-100x faster than Cloud API, works offline, no subscription needed
+2. **Google Vision API** — Far superior handwriting recognition compared to Tesseract
+
+See [SSH Mode Setup](#ssh-mode-recommended) and [OCR Configuration](#ocr-configuration) below.
 
 ## Installation
 
@@ -38,7 +47,87 @@ uv run python server.py --register YOUR_ONE_TIME_CODE
 
 ## Setup
 
-### Cloud API (Default)
+### SSH Mode (Recommended)
+
+Connect directly to your reMarkable via USB — **10-100x faster** than Cloud API, works offline, and doesn't require a Connect subscription.
+
+#### Requirements
+
+1. **Developer Mode enabled** on your reMarkable tablet
+   - Go to Settings → General → Software → Developer mode
+   - This is required even if you have a Connect subscription
+   - ⚠️ Enabling developer mode will factory reset your device (back up first!)
+
+2. **USB connection** to your computer
+   - Connect via the USB-C cable
+   - Your tablet must be on and unlocked
+
+3. **SSH access** (automatic with developer mode)
+   - Default IP over USB: `10.11.99.1`
+   - Password shown in Settings → General → Software → Developer mode
+
+#### Configure MCP for SSH
+
+**VS Code** — Add to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--ssh"],
+      "env": {
+        "GOOGLE_VISION_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+That's it! Default connection is `root@10.11.99.1` (standard USB IP).
+
+#### Custom SSH Host
+
+Set up passwordless SSH for convenience:
+
+```bash
+# Copy your SSH key to the tablet
+ssh-copy-id root@10.11.99.1
+
+# Or add to ~/.ssh/config:
+Host remarkable
+    HostName 10.11.99.1
+    User root
+```
+
+Then use the alias:
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--ssh"],
+      "env": {
+        "REMARKABLE_SSH_HOST": "remarkable",
+        "GOOGLE_VISION_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+#### SSH Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REMARKABLE_SSH_HOST` | `10.11.99.1` | SSH hostname or IP |
+| `REMARKABLE_SSH_USER` | `root` | SSH username |
+| `REMARKABLE_SSH_PORT` | `22` | SSH port |
+
+### Cloud API (Alternative)
+
+If you can't enable developer mode, you can use the Cloud API. This is slower and requires a reMarkable Connect subscription.
 
 #### 1. Get a One-Time Code
 
@@ -69,7 +158,8 @@ uvx remarkable-mcp --register YOUR_CODE
       "command": "uvx",
       "args": ["remarkable-mcp"],
       "env": {
-        "REMARKABLE_TOKEN": "${input:remarkable-token}"
+        "REMARKABLE_TOKEN": "${input:remarkable-token}",
+        "GOOGLE_VISION_API_KEY": "your-api-key"
       }
     }
   }
@@ -87,65 +177,12 @@ Your token is stored securely using VS Code's input system with `password: true`
       "command": "uvx",
       "args": ["remarkable-mcp"],
       "env": {
-        "REMARKABLE_TOKEN": "your-token-from-step-2"
+        "REMARKABLE_TOKEN": "your-token-from-step-2",
+        "GOOGLE_VISION_API_KEY": "your-api-key"
       }
     }
   }
 }
-```
-
-### SSH Mode (Alternative)
-
-Connect directly to your reMarkable via USB — no cloud authentication needed.
-
-#### Requirements
-
-- reMarkable connected via USB cable
-- SSH access enabled (Settings → Storage → USB web interface)
-- Your tablet must be on and unlocked
-
-#### Configure MCP for SSH
-
-**VS Code** — Add to `.vscode/mcp.json`:
-
-```json
-{
-  "servers": {
-    "remarkable": {
-      "command": "uvx",
-      "args": ["remarkable-mcp", "--ssh"]
-    }
-  }
-}
-```
-
-That's it! Default connection is `root@10.11.99.1` (standard USB IP).
-
-#### Custom SSH Host
-
-If you've set up an SSH config alias for your reMarkable:
-
-```json
-{
-  "servers": {
-    "remarkable": {
-      "command": "uvx",
-      "args": ["remarkable-mcp", "--ssh"],
-      "env": {
-        "REMARKABLE_SSH_HOST": "remarkable"
-      }
-    }
-  }
-}
-```
-
-#### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `REMARKABLE_SSH_HOST` | `10.11.99.1` | SSH hostname or IP |
-| `REMARKABLE_SSH_USER` | `root` | SSH username |
-| `REMARKABLE_SSH_PORT` | `22` | SSH port |
 ```
 
 ## Tools
@@ -187,25 +224,50 @@ remarkable_recent(limit=5, include_preview=True)
 
 **Handwritten content** uses OCR. Two backends are supported:
 
-### Google Cloud Vision (Recommended for handwriting)
+### Google Cloud Vision (Strongly Recommended)
 
-Best quality for handwriting recognition. Requires a Google Cloud account with Vision API enabled.
+**Google Vision is far superior to Tesseract for handwriting recognition.** Unless your handwriting is exceptionally clear and print-like, Tesseract will produce mostly gibberish. Google Vision handles cursive, messy handwriting, and mixed text/drawings much better.
+
+#### Quick Setup with API Key (Easiest)
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a project (or select existing)
+3. Enable the [Cloud Vision API](https://console.cloud.google.com/apis/library/vision.googleapis.com)
+4. Go to [Credentials](https://console.cloud.google.com/apis/credentials) → Create Credentials → API Key
+5. Add the key to your MCP config:
+
+```json
+{
+  "env": {
+    "GOOGLE_VISION_API_KEY": "your-api-key"
+  }
+}
+```
+
+**Cost:** Vision API offers 1,000 free requests/month. After that, ~$1.50 per 1,000 images.
+
+#### Alternative: Service Account Credentials
+
+For production use or tighter security:
 
 ```bash
-# Install the optional dependency
-pip install remarkable-mcp[ocr]
-
 # Set up credentials (one of these methods):
 # 1. Set GOOGLE_APPLICATION_CREDENTIALS to your service account JSON file
 # 2. Run `gcloud auth application-default login` for development
 # 3. Use a GCP environment with default credentials (Cloud Run, GKE, etc.)
+
+# Install the optional SDK dependency
+pip install remarkable-mcp[ocr]
 ```
 
-The server will automatically use Google Vision when available.
+### Tesseract (Fallback — Not Recommended for Handwriting)
 
-### Tesseract (Fallback)
+Tesseract is designed for **printed text**, not handwriting. It will be used as a fallback if Google Vision is not configured, but expect poor results on handwritten notes.
 
-Basic OCR using pytesseract. Works offline but struggles with cursive handwriting.
+Only use Tesseract if:
+- You have very clear, print-like handwriting
+- You need fully offline OCR
+- You're only processing printed documents
 
 ```bash
 # macOS
@@ -222,7 +284,8 @@ sudo pacman -S tesseract
 
 | Environment Variable | Values | Description |
 |---------------------|--------|-------------|
-| `REMARKABLE_OCR_BACKEND` | `auto`, `google`, `tesseract` | Force a specific OCR backend. Default: `auto` (uses Google if available) |
+| `GOOGLE_VISION_API_KEY` | API key string | Google Vision API key (recommended) |
+| `REMARKABLE_OCR_BACKEND` | `auto`, `google`, `tesseract` | Force a specific backend. Default: `auto` (uses Google if configured) |
 
 PDF highlights and annotations are also extracted automatically.
 
