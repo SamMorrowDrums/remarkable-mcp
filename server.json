@@ -1,10 +1,10 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
-  "name": "io.github.sammorrowdrums/remarkable",
+  "name": "io.github.SamMorrowDrums/remarkable",
   "title": "reMarkable MCP Server",
   "description": "Access your reMarkable tablet - read documents, browse files, extract text and OCR",
   "repository": {
-    "url": "https://github.com/sammorrowdrums/remarkable-mcp",
+    "url": "https://github.com/SamMorrowDrums/remarkable-mcp",
     "source": "github"
   },
   "version": "0.1.0",
