@@ -21,7 +21,6 @@ import subprocess
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -178,64 +177,106 @@ class SSHClient:
 
         Returns a list of Document objects.
         """
-        # List all .metadata files
-        try:
-            output = self._ssh_command(f"ls -1 {XOCHITL_PATH}/*.metadata 2>/dev/null || true")
-        except Exception as e:
-            raise RuntimeError(f"Failed to list documents: {e}")
+        # Return cached documents if available and no limit specified
+        if self._documents and limit is None:
+            return self._documents
 
-        metadata_files = [f.strip() for f in output.strip().split("\n") if f.strip()]
+        # If we have cached docs and limit is within cache, return slice
+        if self._documents and limit is not None and len(self._documents) >= limit:
+            return self._documents[:limit]
+
+        # Read all metadata files in a single SSH command for efficiency
+        # Output format: filename<TAB>content (JSON)
+        try:
+            # Use a single command to read all metadata files at once
+            # This is MUCH faster than individual cat commands
+            output = self._ssh_command(
+                f"for f in {XOCHITL_PATH}/*.metadata; do "
+                f'echo "===FILE===$(basename $f .metadata)"; cat "$f" 2>/dev/null; '
+                f"done",
+                timeout=60,
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to read metadata: {e}")
 
         documents = []
 
-        for meta_path in metadata_files:
-            if limit is not None and len(documents) >= limit:
-                break
+        # Parse the output - split by our delimiter
+        current_id = None
+        current_content = []
 
-            try:
-                # Extract UUID from path
-                doc_id = Path(meta_path).stem  # removes .metadata
+        for line in output.split("\n"):
+            if line.startswith("===FILE==="):
+                # Save previous document if we have one
+                if current_id and current_content:
+                    self._parse_and_add_document(
+                        current_id, "\n".join(current_content), documents, limit
+                    )
+                    if limit is not None and len(documents) >= limit:
+                        break
+                # Start new document
+                current_id = line.replace("===FILE===", "").strip()
+                current_content = []
+            else:
+                current_content.append(line)
 
-                # Read metadata
-                meta_content = self._ssh_command(f"cat '{meta_path}'")
-                metadata = json.loads(meta_content)
-
-                # Skip deleted documents
-                if metadata.get("deleted", False):
-                    continue
-
-                # Parse last modified timestamp
-                last_modified = None
-                if "lastModified" in metadata:
-                    try:
-                        ts = int(metadata["lastModified"]) / 1000
-                        last_modified = datetime.fromtimestamp(ts)
-                    except (ValueError, TypeError):
-                        pass
-
-                doc = Document(
-                    id=doc_id,
-                    hash=doc_id,  # Use ID as hash for SSH
-                    name=metadata.get("visibleName", doc_id),
-                    doc_type=metadata.get("type", "DocumentType"),
-                    parent=metadata.get("parent", ""),
-                    deleted=metadata.get("deleted", False),
-                    pinned=metadata.get("pinned", False),
-                    last_modified=last_modified,
-                    size=0,
-                    local_path=f"{XOCHITL_PATH}/{doc_id}",
+        # Don't forget the last document
+        if current_id and current_content:
+            if limit is None or len(documents) < limit:
+                self._parse_and_add_document(
+                    current_id, "\n".join(current_content), documents, limit
                 )
-
-                documents.append(doc)
-
-            except Exception as e:
-                logger.debug(f"Failed to parse metadata {meta_path}: {e}")
-                continue
 
         self._documents = documents
         self._documents_by_id = {d.id: d for d in documents}
 
+        logger.info(f"Loaded {len(documents)} documents via SSH")
         return documents
+
+    def _parse_and_add_document(
+        self,
+        doc_id: str,
+        content: str,
+        documents: List[Document],
+        limit: Optional[int],
+    ) -> None:
+        """Parse metadata JSON and add document to list."""
+        if limit is not None and len(documents) >= limit:
+            return
+
+        try:
+            metadata = json.loads(content.strip())
+
+            # Skip deleted documents
+            if metadata.get("deleted", False):
+                return
+
+            # Parse last modified timestamp
+            last_modified = None
+            if "lastModified" in metadata:
+                try:
+                    ts = int(metadata["lastModified"]) / 1000
+                    last_modified = datetime.fromtimestamp(ts)
+                except (ValueError, TypeError):
+                    pass
+
+            doc = Document(
+                id=doc_id,
+                hash=doc_id,  # Use ID as hash for SSH
+                name=metadata.get("visibleName", doc_id),
+                doc_type=metadata.get("type", "DocumentType"),
+                parent=metadata.get("parent", ""),
+                deleted=metadata.get("deleted", False),
+                pinned=metadata.get("pinned", False),
+                last_modified=last_modified,
+                size=0,
+                local_path=f"{XOCHITL_PATH}/{doc_id}",
+            )
+
+            documents.append(doc)
+
+        except Exception as e:
+            logger.debug(f"Failed to parse metadata for {doc_id}: {e}")
 
     def get_doc(self, doc_id: str) -> Optional[Document]:
         """Get a document by ID."""
