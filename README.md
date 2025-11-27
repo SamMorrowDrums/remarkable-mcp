@@ -51,6 +51,8 @@ uv run python server.py --register YOUR_ONE_TIME_CODE
 
 Connect directly to your reMarkable via USB — **10-100x faster** than Cloud API, works offline, and doesn't require a Connect subscription.
 
+> 📖 **Detailed SSH setup guide:** [remarkable.guide/guide/access/ssh.html](https://remarkable.guide/guide/access/ssh.html)
+
 #### Requirements
 
 1. **Developer Mode enabled** on your reMarkable tablet
@@ -189,12 +191,48 @@ Your token is stored securely using VS Code's input system with `password: true`
 
 | Tool | Description |
 |------|-------------|
-| `remarkable_read` | Extract text from a document |
+| `remarkable_read` | Extract text from a document (with pagination and search) |
 | `remarkable_browse` | List files or search by name |
 | `remarkable_recent` | Get recently modified documents |
 | `remarkable_status` | Check connection status |
 
 All tools are read-only and return structured JSON with hints for next actions.
+
+### `remarkable_read` Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `document` | string | *required* | Document name or path |
+| `content_type` | string | `"all"` | `"all"`, `"annotations"`, or `"raw"` |
+| `page` | int | `1` | Page number for pagination |
+| `grep` | string | `None` | Search for keywords (returns matches with context) |
+| `include_ocr` | bool | `False` | Enable OCR for handwritten content |
+
+**Content Types:**
+- `"all"` — Raw document text plus annotations/highlights (default)
+- `"annotations"` — Only typed text, highlights, and OCR content from notebooks
+- `"raw"` — Only raw PDF/EPUB text (no annotations)
+
+**Pagination Output:**
+```json
+{
+  "content": "...",
+  "page": 1,
+  "total_pages": 42,
+  "more": true,
+  "next_page": 2
+}
+```
+
+**Grep Output:**
+```json
+{
+  "content": "...context around matches...",
+  "grep_term": "search term",
+  "grep_matches": 15,
+  "page": 1
+}
+```
 
 ## Resources
 
@@ -223,7 +261,22 @@ Returns the original PDF or EPUB file as base64-encoded data. Only available in 
 ## Usage
 
 ```python
+# Read first page of a document
 remarkable_read("Meeting Notes - Nov 2025")
+
+# Read page 3 of a long document
+remarkable_read("My Book.epub", page=3)
+
+# Search for keywords in a document
+remarkable_read("Project Plan", grep="deadline")
+
+# Only get annotations (typed text, highlights, OCR)
+remarkable_read("November journal 2025", content_type="annotations", include_ocr=True)
+
+# Only get raw PDF/EPUB text (no annotations)
+remarkable_read("Research Paper.pdf", content_type="raw")
+
+# Browse and search
 remarkable_browse("/")
 remarkable_browse(query="meeting")
 remarkable_recent(limit=5, include_preview=True)
