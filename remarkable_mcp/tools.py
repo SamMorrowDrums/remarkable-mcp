@@ -58,7 +58,6 @@ def remarkable_read(
     document: str,
     content_type: Literal["text", "raw", "annotations"] = "text",
     page: int = 1,
-    page_size: int = DEFAULT_PAGE_SIZE,
     grep: Optional[str] = None,
     include_ocr: bool = False,
 ) -> str:
@@ -82,8 +81,7 @@ def remarkable_read(
     <parameters>
     - document: Document name or path (use remarkable_browse to find documents)
     - content_type: "text" (full), "raw" (PDF/EPUB only), "annotations" (notes only)
-    - page: Page number for pagination (default: 1)
-    - page_size: Characters per page (default: 8000, max: 50000)
+    - page: Page number (default: 1). For notebooks, this is the notebook page.
     - grep: Optional regex pattern to filter content (searches current page)
     - include_ocr: Enable handwriting OCR for annotations (default: False)
     </parameters>
@@ -102,7 +100,8 @@ def remarkable_read(
 
         # Validate parameters
         page = max(1, page)
-        page_size = min(max(1000, page_size), 50000)
+        # Internal page size for PDF/EPUB character-based pagination
+        page_size = DEFAULT_PAGE_SIZE
 
         # Find the document by name or path (case-insensitive, not folders)
         documents = [item for item in collection if not item.is_folder]
@@ -342,7 +341,6 @@ def remarkable_read(
                 "content": "",
                 "page": 1,
                 "total_pages": 1,
-                "page_size": page_size,
                 "total_chars": 0,
                 "more": False,
                 "modified": (
@@ -376,7 +374,6 @@ def remarkable_read(
             "content": page_content,
             "page": page,
             "total_pages": total_pages,
-            "page_size": page_size,
             "total_chars": total_chars,
             "more": has_more,
             "modified": (
