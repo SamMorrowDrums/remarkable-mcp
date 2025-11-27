@@ -94,12 +94,19 @@ def remarkable_read(
         page = max(1, page)
         page_size = min(max(1000, page_size), 50000)
 
-        # Find the document by name (not folders)
+        # Find the document by name or path (case-insensitive, not folders)
         documents = [item for item in collection if not item.is_folder]
         target_doc = None
+        document_lower = document.lower().strip("/")
 
         for doc in documents:
-            if doc.VissibleName == document:
+            # Match by name (case-insensitive)
+            if doc.VissibleName.lower() == document_lower:
+                target_doc = doc
+                break
+            # Also try matching by full path (case-insensitive)
+            doc_path = get_item_path(doc, items_by_id).lower().strip("/")
+            if doc_path == document_lower:
                 target_doc = doc
                 break
 
@@ -365,14 +372,15 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
         if path == "/" or path == "":
             target_parent = ""
         else:
-            # Navigate to the folder
+            # Navigate to the folder (case-insensitive)
             path_parts = [p for p in path.strip("/").split("/") if p]
             current_parent = ""
 
             for part in path_parts:
+                part_lower = part.lower()
                 found = False
                 for item in items_by_parent.get(current_parent, []):
-                    if item.VissibleName == part and item.is_folder:
+                    if item.VissibleName.lower() == part_lower and item.is_folder:
                         current_parent = item.ID
                         found = True
                         break
