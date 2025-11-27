@@ -1,6 +1,6 @@
 # reMarkable MCP Server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that provides access to your reMarkable tablet data through the reMarkable Cloud API.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server for accessing your reMarkable tablet data through the reMarkable Cloud.
 
 <!-- mcp-name: io.github.sammorrowdrums/remarkable -->
 
@@ -8,71 +8,49 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that 
 
 [![Install with UVX in VS Code](https://img.shields.io/badge/VS_Code-UVX-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22token%22%2C%22description%22%3A%22reMarkable%20API%20token%20(run%20uvx%20remarkable-mcp%20--register%20CODE%20to%20get%20one)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%5D%2C%22env%22%3A%7B%22REMARKABLE_TOKEN%22%3A%22%24%7Binput%3Atoken%7D%22%7D%7D) [![Install with UVX in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-UVX-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22token%22%2C%22description%22%3A%22reMarkable%20API%20token%20(run%20uvx%20remarkable-mcp%20--register%20CODE%20to%20get%20one)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%5D%2C%22env%22%3A%7B%22REMARKABLE_TOKEN%22%3A%22%24%7Binput%3Atoken%7D%22%7D%7D&quality=insiders)
 
-## Features
+## What It Does
 
-- 🔐 **Secure Authentication** - Token stored safely via VS Code's input system
-- 📖 **Read Documents** - Extract typed text directly from reMarkable notebooks (v3+ software)
-- 📁 **Browse Files** - List and navigate your reMarkable folders and documents
-- 🔍 **Search** - Search for documents by name
-- ⏰ **Recent Files** - Get recently modified documents with content previews
-- 📚 **MCP Resources** - Automatic access to recent documents and folder structure
-- 💡 **MCP Prompts** - Pre-built prompts for common workflows
-- 🔤 **OCR Support** - Optional handwriting recognition via pytesseract
+- Read typed text directly from notebooks (v3+ software, no OCR needed)
+- Browse and search your document library
+- Access recent files with content previews
+- OCR for handwritten content via pytesseract
+- MCP resources and prompts for deeper integration
 
 ## Installation
 
-### Option 1: Using uvx (Recommended)
-
-The easiest way to use this server is with `uvx`, which runs the package directly from PyPI:
+### Using uvx (Recommended)
 
 ```bash
-# First, get your reMarkable token
+# Get your reMarkable token
 uvx remarkable-mcp --register YOUR_ONE_TIME_CODE
 ```
 
-Then click the **Quick Install** badges above, or manually configure VS Code.
+Click the **Quick Install** badges above, or configure manually.
 
-### Option 2: From Source (for Development)
+### From Source
 
 ```bash
-# Clone the repository
 git clone https://github.com/SamMorrowDrums/remarkable-mcp.git
 cd remarkable-mcp
-
-# Install dependencies
 uv sync
-
-# Or with OCR support for handwriting
-uv sync --extra ocr
-
-# Get your token
 uv run python server.py --register YOUR_ONE_TIME_CODE
 ```
 
 ## Setup
 
-### Step 1: Get a One-Time Code
+### 1. Get a One-Time Code
 
-1. Go to https://my.remarkable.com/device/browser/connect
-2. Generate a one-time code (8 characters like `abcd1234`)
+Go to [my.remarkable.com/device/browser/connect](https://my.remarkable.com/device/browser/connect) and generate a code.
 
-### Step 2: Convert to Token
+### 2. Convert to Token
 
 ```bash
-# Using uvx (recommended)
 uvx remarkable-mcp --register YOUR_CODE
-
-# Or from source
-uv run python server.py --register YOUR_CODE
 ```
 
-This outputs your token and shows how to configure it.
+### 3. Configure MCP
 
-### Step 3: Configure MCP
-
-#### VS Code (Recommended)
-
-Add to your `.vscode/mcp.json` or use `MCP: Open User Configuration`:
+**VS Code** — Add to `.vscode/mcp.json`:
 
 ```json
 {
@@ -96,11 +74,9 @@ Add to your `.vscode/mcp.json` or use `MCP: Open User Configuration`:
 }
 ```
 
-> **Security Note**: Using `inputs` with `password: true` ensures your token is stored securely and prompted on first use, rather than being stored in plain text.
+Your token is stored securely using VS Code's input system with `password: true`.
 
-#### Claude Desktop
-
-Add to your `claude_desktop_config.json`:
+**Claude Desktop** — Add to `claude_desktop_config.json`:
 
 ```json
 {
@@ -116,160 +92,94 @@ Add to your `claude_desktop_config.json`:
 }
 ```
 
-## Available Tools
+## Tools
 
-| Tool | Description | When to Use |
-|------|-------------|-------------|
-| `remarkable_read` | Extract text content from a document | "Read my meeting notes", "Get text from X" |
-| `remarkable_browse` | List files or search by name | "Show my folders", "Find documents about X" |
-| `remarkable_recent` | Get recently modified documents | "What did I work on recently?" |
-| `remarkable_status` | Check authentication and connection | "Am I connected?", debugging |
+| Tool | Description |
+|------|-------------|
+| `remarkable_read` | Extract text from a document |
+| `remarkable_browse` | List files or search by name |
+| `remarkable_recent` | Get recently modified documents |
+| `remarkable_status` | Check connection status |
 
-### Tool Annotations
+All tools are read-only and return structured JSON with hints for next actions.
 
-All tools are marked with MCP annotations:
-- `readOnlyHint: true` - Tools only read data, never modify
-- `idempotentHint: true` - Safe to retry
-- `openWorldHint: true` - Interacts with reMarkable Cloud
+## Resources
 
-### Tool Response Format
+Recent documents are automatically registered as MCP resources on startup (if authenticated). Each document becomes available at `remarkable://doc/{name}`.
 
-All tools return structured JSON with:
-- **Data** - The requested information
-- **`_hint`** - Suggested next actions for the AI model
-- **`_error`** - Educational error messages with recovery suggestions
+| URI | Description |
+|-----|-------------|
+| `remarkable://doc/{name}` | Content of a recent document |
+| `remarkable://folders` | Complete folder hierarchy |
 
-## Available Resources
+## Prompts
 
-| Resource | Description |
-|----------|-------------|
-| `remarkable://recent` | Your 10 most recently modified documents |
-| `remarkable://folders` | Your complete folder hierarchy |
-| `remarkable://document/{name}` | Content of a specific document |
+`summarize_recent` · `find_notes` · `daily_review` · `export_document` · `organize_library` · `meeting_notes`
 
-## Available Prompts
-
-| Prompt | Description |
-|--------|-------------|
-| `summarize_recent` | Get an AI summary of recent notes |
-| `find_notes` | Search for notes on a specific topic |
-| `daily_review` | Review what you worked on today |
-| `export_document` | Extract and format a document as markdown |
-| `organize_library` | Get suggestions for organizing your library |
-| `meeting_notes` | Find and extract meeting notes |
-
-## Example Usage
+## Usage
 
 ```python
-# Read text from a specific document
 remarkable_read("Meeting Notes - Nov 2025")
-# Returns: typed text, highlights, metadata + hints for next steps
-
-# Browse your library
-remarkable_browse("/")  # List root folder
-remarkable_browse("/Work")  # List specific folder
-remarkable_browse(query="meeting")  # Search by name
-
-# Get recent documents
+remarkable_browse("/")
+remarkable_browse(query="meeting")
 remarkable_recent(limit=5, include_preview=True)
-
-# Check connection status
-remarkable_status()
 ```
 
 ## Text Extraction
 
-The server can extract:
-- ✅ **Typed text** - Native extraction from reMarkable v3+ notebooks (via `rmscene`)
-- ✅ **PDF highlights and annotations** - From annotated PDFs
-- ✅ **Document metadata** - Names, dates, folder structure
-- 🔤 **Handwritten content** - Optional OCR via pytesseract
+**Typed text** from v3+ notebooks is extracted natively via `rmscene` — no OCR required.
 
-### How Text Extraction Works
+**Handwritten content** uses pytesseract for OCR. Make sure Tesseract is installed on your system:
 
-reMarkable tablets running software v3+ store typed text (from Type Folio keyboard or on-screen keyboard) in a structured format that can be read directly - no OCR needed! The server uses `rmscene` to parse these files natively.
+```bash
+# macOS
+brew install tesseract
 
-For handwritten content, you can optionally enable OCR by installing the `ocr` extras.
+# Ubuntu/Debian
+sudo apt-get install tesseract-ocr
 
-## MCP Design Philosophy
+# Arch
+sudo pacman -S tesseract
+```
 
-This server follows modern MCP design principles:
+PDF highlights and annotations are also extracted.
 
-- **Intent-based tools** - Tools designed around what users want to accomplish, not API endpoints
-- **Guided responses** - Every response includes hints for logical next steps
-- **Educational errors** - Error messages explain what went wrong and how to fix it
-- **Minimal tool count** - Focused set of 4 tools that cover 95% of use cases
-- **Resources & Prompts** - Additional MCP capabilities for richer integration
+## Design
+
+Intent-based tools that map to what you actually want to do. Responses include hints for logical next steps. Errors explain what went wrong and how to fix it. Four tools cover most use cases.
 
 ## Authentication
 
-The server supports two authentication methods:
-
-1. **Environment Variable** (recommended): Set `REMARKABLE_TOKEN` in your MCP config
-2. **File-based**: Token stored in `~/.rmapi` (created by `--register`)
-
-The environment variable takes precedence if both are present.
+Set `REMARKABLE_TOKEN` in your MCP config (recommended), or the server will fall back to `~/.rmapi`.
 
 ## Development
 
 ```bash
-# Install all dependencies (including dev)
 uv sync --all-extras
-
-# Run tests
 uv run pytest test_server.py -v
-
-# Lint
 uv run ruff check .
-
-# Format
 uv run ruff format .
-
-# Fix lint issues
-uv run ruff check . --fix
 ```
 
 ### Project Structure
 
 ```
 remarkable-mcp/
-├── server.py              # Entry point (backwards compatible)
-├── remarkable_mcp/        # Main package
-│   ├── __init__.py
-│   ├── server.py          # FastMCP server initialization
-│   ├── api.py             # reMarkable Cloud API helpers
-│   ├── extract.py         # Text extraction utilities
-│   ├── responses.py       # Response formatting
-│   ├── tools.py           # MCP tools with annotations
-│   ├── resources.py       # MCP resources
-│   └── prompts.py         # MCP prompts
-├── test_server.py         # Test suite
-└── pyproject.toml         # Project configuration
+├── server.py           # Entry point
+├── remarkable_mcp/     # Main package
+│   ├── server.py       # FastMCP server
+│   ├── api.py          # Cloud API helpers
+│   ├── extract.py      # Text extraction
+│   ├── tools.py        # MCP tools
+│   ├── resources.py    # MCP resources
+│   └── prompts.py      # MCP prompts
+└── test_server.py      # Tests
 ```
-
-### Testing
-
-The project includes comprehensive tests using FastMCP's testing capabilities:
-
-- **Unit tests** - Test individual tool functionality with mocked API calls
-- **E2E tests** - Test server initialization and tool listing
-- **Integration tests** - Test error handling and edge cases
-
-Run the test suite:
-
-```bash
-uv run pytest test_server.py -v
-```
-
-All tests use async/await with pytest-asyncio and mock the reMarkable API to avoid requiring actual credentials during testing.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT
 
-## Acknowledgments
+---
 
-- [rmapy](https://github.com/subutux/rmapy) - Python client for reMarkable Cloud
-- [rmscene](https://github.com/ricklupton/rmscene) - Native .rm file parser
-- [rmapi](https://github.com/ddvk/rmapi) - Go client for reMarkable Cloud
-- [Scrybble](https://github.com/Scrybbling-together/scrybble) - Inspiration for this project
+Built with [rmapy](https://github.com/subutux/rmapy), [rmscene](https://github.com/ricklupton/rmscene), and inspiration from [Scrybble](https://github.com/Scrybbling-together/scrybble).

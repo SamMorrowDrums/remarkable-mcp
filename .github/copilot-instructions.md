@@ -12,9 +12,6 @@ This is an MCP (Model Context Protocol) server that provides access to reMarkabl
 # Install dependencies
 uv sync
 
-# Install with optional OCR support
-uv sync --extra ocr
-
 # Install with dev dependencies
 uv sync --extra dev
 
@@ -23,9 +20,6 @@ uv add <package>
 
 # Add a dev dependency
 uv add --dev <package>
-
-# Add an optional dependency to a group
-uv add --optional ocr <package>
 ```
 
 **Never use:**
@@ -76,10 +70,10 @@ uv run remarkable-mcp
 # 1. Lint code (REQUIRED - CI will fail without this)
 uv run ruff check .
 
-# 2. Format code
-uv run ruff format .
+# 2. Check formatting (REQUIRED - CI will fail without this)
+uv run ruff format --check .
 
-# 3. Run tests
+# 3. Run tests (REQUIRED - CI will fail without this)
 uv run pytest test_server.py -v
 ```
 
@@ -92,7 +86,7 @@ uv run ruff check . --fix
 uv run ruff format .
 ```
 
-**All three checks must pass before any commit or PR.**
+**All three checks must pass before any commit or PR. CI runs on all PRs and must pass before merging.**
 
 ## Project Structure
 
@@ -166,8 +160,8 @@ def remarkable_example(param: str) -> str:
 - `mcp` - Model Context Protocol SDK
 - `rmapy` - reMarkable Cloud API client
 - `rmscene` - Native .rm file parser for text extraction (v3+ format)
-- `pytesseract` (optional) - OCR for handwritten content
-- `rmc` (optional) - reMarkable file conversion utilities
+- `pytesseract` - OCR for handwritten content
+- `rmc` - reMarkable file conversion utilities
 
 ## Environment Variables
 
