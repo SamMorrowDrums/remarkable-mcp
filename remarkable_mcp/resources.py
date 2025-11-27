@@ -126,43 +126,62 @@ def _make_doc_resource(client, document):
                 tmp.write(raw)
                 tmp_path = Path(tmp.name)
             try:
+                # First try without OCR (faster)
                 content = extract_text_from_document_zip(tmp_path, include_ocr=False)
+
+                text_parts = []
+                if content["typed_text"]:
+                    text_parts.extend(content["typed_text"])
+                if content["highlights"]:
+                    text_parts.append("\n--- Highlights ---")
+                    text_parts.extend(content["highlights"])
+
+                # If no text found and document has pages, try OCR
+                if not text_parts and content["pages"] > 0:
+                    content = extract_text_from_document_zip(tmp_path, include_ocr=True)
+                    if content["handwritten_text"]:
+                        text_parts.append("--- Handwritten (OCR) ---")
+                        text_parts.extend(content["handwritten_text"])
+
+                return "\n\n".join(text_parts) if text_parts else "(No text content)"
             finally:
                 tmp_path.unlink(missing_ok=True)
-
-            text_parts = []
-            if content["typed_text"]:
-                text_parts.extend(content["typed_text"])
-            if content["highlights"]:
-                text_parts.append("\n--- Highlights ---")
-                text_parts.extend(content["highlights"])
-            return "\n\n".join(text_parts) if text_parts else "(No text content)"
         except Exception as e:
             return f"Error: {e}"
 
     return doc_resource
 
 
-def _register_document(client, doc) -> bool:
+def _register_document(client, doc, items_by_id=None) -> bool:
     """Register a single document as a resource."""
     global _registered_docs
 
-    doc_name = doc.VissibleName
+    doc_id = doc.ID
 
-    # Skip if already registered
-    if doc_name in _registered_docs:
+    # Skip if already registered (by ID)
+    if doc_id in _registered_docs:
         return False
 
-    uri = f"remarkable://doc/{doc_name}"
-    desc = f"Content from '{doc_name}'"
+    # Get the full path for display
+    doc_name = doc.VissibleName
+    if items_by_id:
+        from remarkable_mcp.api import get_item_path
+
+        full_path = get_item_path(doc, items_by_id)
+    else:
+        full_path = f"/{doc_name}"
+
+    # Use ID in URI for uniqueness, path for display
+    uri = f"remarkable://doc/{doc_id}"
+    desc = f"Content from '{full_path}'"
     if doc.ModifiedClient:
         desc += f" (modified: {doc.ModifiedClient})"
 
-    mcp.resource(uri, name=doc_name, description=desc, mime_type="text/plain")(
+    mcp.resource(uri, name=full_path, description=desc, mime_type="text/plain")(
         _make_doc_resource(client, doc)
     )
 
-    _registered_docs.add(doc_name)
+    _registered_docs.add(doc_id)
     return True
 
 
@@ -174,17 +193,18 @@ def load_all_documents_sync() -> int:
     """
     global _registered_docs
 
-    from remarkable_mcp.api import get_rmapi
+    from remarkable_mcp.api import get_items_by_id, get_rmapi
 
     client = get_rmapi()
     items = client.get_meta_items()
+    items_by_id = get_items_by_id(items)
     documents = [item for item in items if not item.is_folder]
 
     logger.info(f"Found {len(documents)} documents")
 
     for doc in documents:
         try:
-            _register_document(client, doc)
+            _register_document(client, doc, items_by_id)
         except Exception as e:
             logger.debug(f"Failed to register '{doc.VissibleName}': {e}")
 
@@ -198,7 +218,7 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
     Used for Cloud mode only - SSH mode uses load_all_documents_sync().
     """
     try:
-        from remarkable_mcp.api import get_rmapi
+        from remarkable_mcp.api import get_items_by_id, get_rmapi
 
         client = get_rmapi()
         loop = asyncio.get_event_loop()
@@ -207,6 +227,7 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
         offset = 0
         consecutive_errors = 0
         max_consecutive_errors = 3
+        items_by_id = {}  # Build incrementally
 
         while True:
             # Check for shutdown
@@ -219,6 +240,8 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
                 items = await loop.run_in_executor(
                     None, lambda: client.get_meta_items(limit=offset + batch_size)
                 )
+                # Update items_by_id with all items for path resolution
+                items_by_id = get_items_by_id(items)
                 consecutive_errors = 0  # Reset on success
             except Exception as e:
                 consecutive_errors += 1
@@ -250,7 +273,7 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
                 if shutdown_event.is_set():
                     break
                 try:
-                    if _register_document(client, doc):
+                    if _register_document(client, doc, items_by_id):
                         registered_count += 1
                 except Exception as e:
                     logger.debug(f"Failed to register document '{doc.VissibleName}': {e}")

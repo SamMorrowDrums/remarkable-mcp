@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastMCP) -> AsyncIterator[None]:
     """Lifespan context manager for the MCP server."""
+    import asyncio
+    import os
+
     # Import here to avoid circular imports
     from remarkable_mcp.resources import (
         _is_ssh_mode,
@@ -23,13 +26,19 @@ async def lifespan(app: FastMCP) -> AsyncIterator[None]:
     )
 
     task = None
+    ssh_mode = _is_ssh_mode()
+    logger.info(f"REMARKABLE_USE_SSH env: {os.environ.get('REMARKABLE_USE_SSH')}")
+    logger.info(f"SSH mode detected: {ssh_mode}")
 
-    if _is_ssh_mode():
-        # SSH mode: load all documents synchronously (fast over USB)
-        logger.info("SSH mode: loading documents synchronously...")
-        load_all_documents_sync()
+    if ssh_mode:
+        # SSH mode: load all documents in executor to not block event loop
+        logger.info("SSH mode: loading documents...")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, load_all_documents_sync)
+        logger.info("SSH mode: documents loaded")
     else:
         # Cloud mode: load in background to not block startup
+        logger.info("Cloud mode: starting background loader...")
         task = start_background_loader()
 
     try:

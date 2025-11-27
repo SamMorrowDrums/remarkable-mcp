@@ -132,32 +132,34 @@ class SSHClient:
             raise RuntimeError("SSH client not found. Install openssh-client.")
 
     def _scp_download(self, remote_path: str, timeout: int = 60) -> bytes:
-        """Download a file from the tablet via SCP."""
-        scp_args = [
-            "scp",
+        """Download a file from the tablet via SSH cat (more reliable than SCP)."""
+        # Use SSH + cat instead of SCP for binary file transfer
+        # This avoids issues with /dev/stdout on various platforms
+        ssh_args = [
+            "ssh",
             "-o",
             "BatchMode=yes",
             "-o",
             "ConnectTimeout=5",
             "-o",
             "StrictHostKeyChecking=accept-new",
-            "-P",
+            "-p",
             str(self.port),
-            f"{self.user}@{self.host}:{remote_path}",
-            "/dev/stdout",
+            f"{self.user}@{self.host}",
+            f"cat '{remote_path}'",
         ]
 
         try:
             result = subprocess.run(
-                scp_args,
+                ssh_args,
                 capture_output=True,
                 timeout=timeout,
             )
             if result.returncode != 0:
-                raise RuntimeError(f"SCP failed: {result.stderr.decode()}")
+                raise RuntimeError(f"SSH cat failed: {result.stderr.decode()}")
             return result.stdout
         except subprocess.TimeoutExpired:
-            raise RuntimeError(f"SCP timed out after {timeout}s")
+            raise RuntimeError(f"SSH cat timed out after {timeout}s")
 
     def check_connection(self) -> bool:
         """Check if SSH connection to tablet is available."""

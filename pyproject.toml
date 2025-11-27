@@ -26,6 +26,7 @@ dependencies = [
     "Pillow>=10.0.0",
     "rmc>=0.3.0",
     "requests>=2.28.0",
+    "cairosvg>=2.8.2",
 ]
 
 [project.optional-dependencies]

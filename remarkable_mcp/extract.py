@@ -144,7 +144,7 @@ def extract_text_from_document_zip(zip_path: Path, include_ocr: bool = False) ->
 def extract_handwriting_ocr(rm_files: List[Path]) -> Optional[List[str]]:
     """
     Extract handwritten text using OCR.
-    Requires optional OCR dependencies (pytesseract, rmc).
+    Requires optional OCR dependencies (pytesseract, rmc, cairosvg).
     """
     try:
         import subprocess
@@ -155,26 +155,66 @@ def extract_handwriting_ocr(rm_files: List[Path]) -> Optional[List[str]]:
         ocr_results = []
 
         for rm_file in rm_files:
-            # Use rmc to convert .rm to PNG
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
+            tmp_svg_path = None
+            tmp_png_path = None
+            try:
+                # Create temp files
+                with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
+                    tmp_svg_path = Path(tmp_svg.name)
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
+                    tmp_png_path = Path(tmp_png.name)
+
+                # Convert .rm to SVG using rmc
+                result = subprocess.run(
+                    ["rmc", "-t", "svg", "-o", str(tmp_svg_path), str(rm_file)],
+                    capture_output=True,
+                    timeout=30,
+                )
+                if result.returncode != 0:
+                    continue
+
+                # Convert SVG to PNG using cairosvg or inkscape
                 try:
+                    import cairosvg
+
+                    cairosvg.svg2png(
+                        url=str(tmp_svg_path),
+                        write_to=str(tmp_png_path),
+                        output_width=1404,  # reMarkable width
+                        output_height=1872,  # reMarkable height
+                    )
+                except ImportError:
+                    # Fall back to inkscape if cairosvg not available
                     result = subprocess.run(
-                        ["rmc", "-t", "png", "-o", tmp_png.name, str(rm_file)],
+                        [
+                            "inkscape",
+                            str(tmp_svg_path),
+                            "--export-filename",
+                            str(tmp_png_path),
+                        ],
                         capture_output=True,
                         timeout=30,
                     )
-                    if result.returncode == 0:
-                        img = Image.open(tmp_png.name)
-                        text = pytesseract.image_to_string(img)
-                        if text.strip():
-                            ocr_results.append(text.strip())
-                except subprocess.TimeoutExpired:
-                    pass
-                except FileNotFoundError:
-                    # rmc not installed
-                    return None
-                finally:
-                    Path(tmp_png.name).unlink(missing_ok=True)
+                    if result.returncode != 0:
+                        continue
+
+                # Run OCR on the PNG
+                img = Image.open(tmp_png_path)
+                text = pytesseract.image_to_string(img)
+                if text.strip():
+                    ocr_results.append(text.strip())
+
+            except subprocess.TimeoutExpired:
+                pass
+            except FileNotFoundError:
+                # rmc not installed
+                return None
+            finally:
+                # Clean up temp files
+                if tmp_svg_path:
+                    tmp_svg_path.unlink(missing_ok=True)
+                if tmp_png_path:
+                    tmp_png_path.unlink(missing_ok=True)
 
         return ocr_results if ocr_results else None
 
