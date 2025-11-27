@@ -173,7 +173,7 @@ def remarkable_example(param: str) -> str:
 ## Key Dependencies
 
 - `mcp` - Model Context Protocol SDK
-- `rmapy` - reMarkable Cloud API client
+- `requests` - HTTP client for reMarkable Cloud API
 - `rmscene` - Native .rm file parser for text extraction (v3+ format)
 - `pytesseract` - OCR for handwritten content
 - `rmc` - reMarkable file conversion utilities

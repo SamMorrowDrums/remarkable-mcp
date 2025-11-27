@@ -3,7 +3,7 @@
 reMarkable MCP Server
 
 An MCP server that provides access to reMarkable tablet data through the reMarkable Cloud API.
-Uses rmapy for cloud sync and rmscene for native text extraction.
+Uses rmscene for native text extraction.
 
 Usage:
     # As MCP server (default)

@@ -2,6 +2,7 @@
 reMarkable Cloud API client helpers.
 """
 
+import json as json_module
 import os
 from pathlib import Path
 from typing import Any, Dict, List
@@ -14,24 +15,32 @@ CACHE_DIR = REMARKABLE_CONFIG_DIR / "cache"
 
 
 def get_rmapi():
-    """Get or initialize the reMarkable API client."""
+    """
+    Get or initialize the reMarkable API client.
+
+    Uses our custom sync client since rmapy is broken (uses deprecated endpoints).
+    """
+    from remarkable_mcp.sync import load_client_from_token
+
+    # If token is provided via environment, use it
+    if REMARKABLE_TOKEN:
+        # Also save to ~/.rmapi for compatibility
+        rmapi_file = Path.home() / ".rmapi"
+        rmapi_file.write_text(REMARKABLE_TOKEN)
+        return load_client_from_token(REMARKABLE_TOKEN)
+
+    # Load from file
+    rmapi_file = Path.home() / ".rmapi"
+    if not rmapi_file.exists():
+        raise RuntimeError(
+            "No reMarkable token found. Register first:\n"
+            "  uvx remarkable-mcp --register <code>\n\n"
+            "Get a code from: https://my.remarkable.com/device/desktop/connect"
+        )
+
     try:
-        from rmapy.api import Client
-
-        client = Client()
-
-        # If token is provided via environment, use it
-        if REMARKABLE_TOKEN:
-            # rmapy stores token in ~/.rmapi, we need to write it there
-            rmapi_file = Path.home() / ".rmapi"
-            rmapi_file.write_text(REMARKABLE_TOKEN)
-
-        # Renew/validate the token
-        client.renew_token()
-
-        return client
-    except ImportError:
-        raise RuntimeError("rmapy not installed. Run: uv add rmapy")
+        token_json = rmapi_file.read_text()
+        return load_client_from_token(token_json)
     except Exception as e:
         raise RuntimeError(f"Failed to initialize reMarkable client: {e}")
 
@@ -48,45 +57,19 @@ def register_and_get_token(one_time_code: str) -> str:
 
     Get a code from: https://my.remarkable.com/device/desktop/connect
     """
-    import json as json_module
-    from uuid import uuid4
-
-    import requests
-
-    # Use the current remarkable API endpoint
-    # (rmapy uses an outdated one, this is from ddvk/rmapi)
-    device_token_url = "https://webapp-prod.cloud.remarkable.engineering/token/json/2/device/new"
-    uuid = str(uuid4())
-    body = {
-        "code": one_time_code,
-        "deviceDesc": "desktop-linux",
-        "deviceID": uuid,
-    }
+    from remarkable_mcp.sync import register_device
 
     try:
-        response = requests.post(device_token_url, json=body)
+        token_data = register_device(one_time_code)
 
-        if response.status_code == 200 and response.text:
-            # Got a device token, save it in rmapy format
-            device_token = response.text.strip()
+        # Save to ~/.rmapi for compatibility
+        rmapi_file = Path.home() / ".rmapi"
+        token_json = json_module.dumps(token_data)
+        rmapi_file.write_text(token_json)
 
-            # rmapy expects a JSON file with devicetoken and usertoken
-            rmapi_file = Path.home() / ".rmapi"
-            token_data = {"devicetoken": device_token, "usertoken": ""}
-            rmapi_file.write_text(json_module.dumps(token_data))
-
-            return json_module.dumps(token_data)
-        else:
-            raise RuntimeError(
-                f"Registration failed (HTTP {response.status_code})\n\n"
-                "This usually means:\n"
-                "  1. The code has expired (codes are single-use and expire quickly)\n"
-                "  2. The code was already used\n"
-                "  3. The code was typed incorrectly\n\n"
-                "Get a new code from: https://my.remarkable.com/device/desktop/connect"
-            )
-    except requests.RequestException as e:
-        raise RuntimeError(f"Network error during registration: {e}")
+        return token_json
+    except Exception as e:
+        raise RuntimeError(str(e))
 
 
 def get_items_by_id(collection) -> Dict[str, Any]:

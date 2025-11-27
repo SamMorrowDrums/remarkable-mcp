@@ -182,4 +182,4 @@ MIT
 
 ---
 
-Built with [rmapy](https://github.com/subutux/rmapy), [rmscene](https://github.com/ricklupton/rmscene), and inspiration from [Scrybble](https://github.com/Scrybbling-together/scrybble).
+Built with [rmscene](https://github.com/ricklupton/rmscene), inspiration from [ddvk/rmapi](https://github.com/ddvk/rmapi) for the sync protocol, and [Scrybble](https://github.com/Scrybbling-together/scrybble) for text extraction ideas.
