@@ -39,8 +39,18 @@ READ_ONLY_ANNOTATIONS = ToolAnnotations(
     openWorldHint=False,  # Private cloud account, not open world
 )
 
-# Default page size for pagination (characters)
+# Default page size for pagination (characters) - used for PDFs/EPUBs
 DEFAULT_PAGE_SIZE = 8000
+
+
+def _is_cloud_archived(item) -> bool:
+    """Check if an item is cloud-archived (not available on device)."""
+    # SSH mode: check is_cloud_archived property
+    if hasattr(item, "is_cloud_archived"):
+        return item.is_cloud_archived
+    # Cloud mode: check parent == "trash"
+    parent = item.Parent if hasattr(item, "Parent") else getattr(item, "parent", "")
+    return parent == "trash"
 
 
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
@@ -161,6 +171,7 @@ def remarkable_read(
                 )
 
         # Get annotations/typed text (for "text" or "annotations" mode)
+        notebook_pages = []  # List of page content for notebook pagination
         if content_type in ("text", "annotations"):
             raw_doc = client.download(target_doc)
             with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
@@ -172,21 +183,107 @@ def remarkable_read(
             finally:
                 tmp_path.unlink(missing_ok=True)
 
-            # Add annotations section
-            annotation_parts = []
-            if content["typed_text"]:
-                annotation_parts.extend(content["typed_text"])
-            if content["highlights"]:
-                annotation_parts.append("\n--- Highlights ---")
-                annotation_parts.extend(content["highlights"])
-            if content["handwritten_text"]:
-                annotation_parts.append("\n--- Handwritten (OCR) ---")
-                annotation_parts.extend(content["handwritten_text"])
+            # For notebooks (no PDF/EPUB), use page-based pagination
+            is_notebook = file_type not in ("pdf", "epub")
 
-            if annotation_parts:
-                if text_parts and content_type == "text":
-                    text_parts.append("\n\n=== Annotations ===\n")
-                text_parts.extend(annotation_parts)
+            if is_notebook and content["handwritten_text"]:
+                # Each item in handwritten_text is one notebook page
+                notebook_pages = content["handwritten_text"]
+            else:
+                # Add annotations section
+                annotation_parts = []
+                if content["typed_text"]:
+                    annotation_parts.extend(content["typed_text"])
+                if content["highlights"]:
+                    annotation_parts.append("\n--- Highlights ---")
+                    annotation_parts.extend(content["highlights"])
+                if content["handwritten_text"]:
+                    annotation_parts.append("\n--- Handwritten (OCR) ---")
+                    annotation_parts.extend(content["handwritten_text"])
+
+                if annotation_parts:
+                    if text_parts and content_type == "text":
+                        text_parts.append("\n\n=== Annotations ===\n")
+                    text_parts.extend(annotation_parts)
+
+        # For notebooks with OCR: use page-based pagination
+        if notebook_pages:
+            total_pages = len(notebook_pages)
+
+            if page > total_pages:
+                return make_error(
+                    error_type="page_out_of_range",
+                    message=f"Page {page} does not exist. "
+                    f"Document has {total_pages} notebook page(s).",
+                    suggestion=f"Use page=1 to {total_pages} to read different pages.",
+                )
+
+            page_content = notebook_pages[page - 1]
+            has_more = page < total_pages
+
+            # Apply grep filter if specified
+            grep_matches = 0
+            if grep:
+                try:
+                    pattern = re.compile(grep, re.IGNORECASE | re.MULTILINE)
+                    if not pattern.search(page_content):
+                        # No match on this page, search all pages
+                        matching_pages = []
+                        for i, pg in enumerate(notebook_pages, 1):
+                            if pattern.search(pg):
+                                matching_pages.append(i)
+                        if matching_pages:
+                            return make_error(
+                                error_type="no_match_on_page",
+                                message=f"No match for '{grep}' on page {page}.",
+                                suggestion=f"Matches found on page(s): {matching_pages}. "
+                                f"Try remarkable_read('{document}', "
+                                f"page={matching_pages[0]}, grep='{grep}').",
+                            )
+                        else:
+                            return make_error(
+                                error_type="no_grep_matches",
+                                message=f"No matches for '{grep}' in document.",
+                                suggestion="Try a different search term.",
+                            )
+                    grep_matches = len(pattern.findall(page_content))
+                except re.error as e:
+                    return make_error(
+                        error_type="invalid_grep",
+                        message=f"Invalid regex pattern: {e}",
+                        suggestion="Use a valid regex pattern or simple text string.",
+                    )
+
+            result = {
+                "document": target_doc.VissibleName,
+                "path": doc_path,
+                "file_type": "notebook",
+                "content_type": content_type,
+                "content": page_content,
+                "page": page,
+                "total_pages": total_pages,
+                "page_type": "notebook",
+                "total_chars": len(page_content),
+                "more": has_more,
+                "modified": (
+                    target_doc.ModifiedClient if hasattr(target_doc, "ModifiedClient") else None
+                ),
+            }
+
+            if grep:
+                result["grep"] = grep
+                result["grep_matches"] = grep_matches
+
+            hint_parts = [f"Notebook page {page}/{total_pages}."]
+            if has_more:
+                doc_name = target_doc.VissibleName
+                hint_parts.append(f"Next: remarkable_read('{doc_name}', page={page + 1}).")
+            else:
+                hint_parts.append("(last page)")
+            if grep_matches:
+                hint_parts.insert(0, f"Found {grep_matches} match(es) for '{grep}'.")
+
+            return make_response(result, " ".join(hint_parts))
 
         # Combine all content
         full_text = "\n\n".join(text_parts) if text_parts else ""
@@ -361,6 +458,9 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
             matches = []
 
             for item in collection:
+                # Skip cloud-archived items
+                if _is_cloud_archived(item):
+                    continue
                 if query_lower in item.VissibleName.lower():
                     matches.append(
                         {
@@ -437,6 +537,9 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
         documents = []
 
         for item in sorted(items, key=lambda x: x.VissibleName.lower()):
+            # Skip cloud-archived items
+            if _is_cloud_archived(item):
+                continue
             if item.is_folder:
                 folders.append({"name": item.VissibleName, "id": item.ID})
             else:
@@ -500,8 +603,10 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
         # Clamp limit
         limit = min(max(1, limit), 50)
 
-        # Get documents sorted by modified date
-        documents = [item for item in collection if not item.is_folder]
+        # Get documents sorted by modified date (excluding archived)
+        documents = [
+            item for item in collection if not item.is_folder and not _is_cloud_archived(item)
+        ]
         documents.sort(
             key=lambda x: (
                 x.ModifiedClient if hasattr(x, "ModifiedClient") and x.ModifiedClient else ""
