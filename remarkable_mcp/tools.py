@@ -5,14 +5,17 @@ All tools are read-only and idempotent - they only retrieve data from the
 reMarkable Cloud and do not modify any documents.
 """
 
+import re
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from mcp.types import ToolAnnotations
 
 from remarkable_mcp.api import (
     REMARKABLE_TOKEN,
+    download_raw_file,
+    get_file_type,
     get_item_path,
     get_items_by_id,
     get_items_by_parent,
@@ -20,6 +23,8 @@ from remarkable_mcp.api import (
 )
 from remarkable_mcp.extract import (
     extract_text_from_document_zip,
+    extract_text_from_epub,
+    extract_text_from_pdf,
     find_similar_documents,
 )
 from remarkable_mcp.responses import make_error, make_response
@@ -34,32 +39,60 @@ READ_ONLY_ANNOTATIONS = ToolAnnotations(
     openWorldHint=False,  # Private cloud account, not open world
 )
 
+# Default page size for pagination (characters)
+DEFAULT_PAGE_SIZE = 8000
+
 
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
-def remarkable_read(document: str, include_ocr: bool = False) -> str:
+def remarkable_read(
+    document: str,
+    content_type: Literal["text", "raw", "annotations"] = "text",
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    grep: Optional[str] = None,
+    include_ocr: bool = False,
+) -> str:
     """
     <usecase>Read and extract text content from a reMarkable document.</usecase>
     <instructions>
-    Extracts all readable text from a document:
-    - Typed text from Type Folio or on-screen keyboard (automatic)
-    - PDF/EPUB highlights and annotations (automatic)
-    - Handwritten text via OCR (if include_ocr=True, slower)
+    Extracts content from a document with pagination to preserve context window.
 
-    This is the recommended tool for getting document content.
+    Content types:
+    - "text" (default): Full extracted text (PDF/EPUB content + annotations)
+    - "raw": Original PDF/EPUB text only (no annotations). SSH mode only.
+    - "annotations": Only annotations, highlights, and handwritten notes
+
+    Use pagination to read large documents without overwhelming context:
+    - Start with page=1 (default)
+    - Check "more" field - if true, there's more content
+    - Use "next_page" value to get the next page
+
+    Use grep to search for specific content on the current page.
     </instructions>
     <parameters>
     - document: Document name or path (use remarkable_browse to find documents)
-    - include_ocr: Enable handwriting OCR (default: False, requires OCR extras)
+    - content_type: "text" (full), "raw" (PDF/EPUB only), "annotations" (notes only)
+    - page: Page number for pagination (default: 1)
+    - page_size: Characters per page (default: 8000, max: 50000)
+    - grep: Optional regex pattern to filter content (searches current page)
+    - include_ocr: Enable handwriting OCR for annotations (default: False)
     </parameters>
     <examples>
-    - remarkable_read("Meeting Notes")
-    - remarkable_read("Work/Project Plan", include_ocr=True)
+    - remarkable_read("Meeting Notes")  # Get first page of text
+    - remarkable_read("Book.pdf", content_type="raw")  # Get raw PDF text
+    - remarkable_read("Notes", content_type="annotations")  # Only annotations
+    - remarkable_read("Report", page=2)  # Get second page
+    - remarkable_read("Manual", grep="installation")  # Search for keyword
     </examples>
     """
     try:
         client = get_rmapi()
         collection = client.get_meta_items()
         items_by_id = get_items_by_id(collection)
+
+        # Validate parameters
+        page = max(1, page)
+        page_size = min(max(1000, page_size), 50000)
 
         # Find the document by name (not folders)
         documents = [item for item in collection if not item.is_folder]
@@ -84,47 +117,166 @@ def remarkable_read(document: str, include_ocr: bool = False) -> str:
                 did_you_mean=similar if similar else None,
             )
 
-        # Download the document
-        raw_doc = client.download(target_doc)
-
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-            tmp.write(raw_doc)
-            tmp_path = Path(tmp.name)
-
-        try:
-            # Extract text content
-            content = extract_text_from_document_zip(tmp_path, include_ocr=include_ocr)
-        finally:
-            tmp_path.unlink(missing_ok=True)
-
         doc_path = get_item_path(target_doc, items_by_id)
+        file_type = get_file_type(client, target_doc)
+
+        # Collect content based on content_type
+        text_parts = []
+        raw_available = False
+
+        # Get raw PDF/EPUB content if requested or for "text" mode
+        if content_type in ("text", "raw") and file_type in ("pdf", "epub"):
+            raw_data = download_raw_file(client, target_doc, file_type)
+            if raw_data:
+                raw_available = True
+                with tempfile.NamedTemporaryFile(suffix=f".{file_type}", delete=False) as tmp:
+                    tmp.write(raw_data)
+                    tmp_path = Path(tmp.name)
+                try:
+                    if file_type == "pdf":
+                        raw_text = extract_text_from_pdf(tmp_path)
+                    else:
+                        raw_text = extract_text_from_epub(tmp_path)
+                    if raw_text:
+                        text_parts.append(raw_text)
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+            elif content_type == "raw":
+                # Raw requested but not available (likely cloud mode)
+                return make_error(
+                    error_type="raw_not_available",
+                    message="Raw file download only available in SSH mode",
+                    suggestion=(
+                        "Use content_type='text' for extracted content, "
+                        "or switch to SSH mode for raw file access. "
+                        "See: https://remarkable.guide/guide/access/ssh.html"
+                    ),
+                )
+
+        # Get annotations/typed text (for "text" or "annotations" mode)
+        if content_type in ("text", "annotations"):
+            raw_doc = client.download(target_doc)
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                tmp.write(raw_doc)
+                tmp_path = Path(tmp.name)
+
+            try:
+                content = extract_text_from_document_zip(tmp_path, include_ocr=include_ocr)
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+            # Add annotations section
+            annotation_parts = []
+            if content["typed_text"]:
+                annotation_parts.extend(content["typed_text"])
+            if content["highlights"]:
+                annotation_parts.append("\n--- Highlights ---")
+                annotation_parts.extend(content["highlights"])
+            if content["handwritten_text"]:
+                annotation_parts.append("\n--- Handwritten (OCR) ---")
+                annotation_parts.extend(content["handwritten_text"])
+
+            if annotation_parts:
+                if text_parts and content_type == "text":
+                    text_parts.append("\n\n=== Annotations ===\n")
+                text_parts.extend(annotation_parts)
+
+        # Combine all content
+        full_text = "\n\n".join(text_parts) if text_parts else ""
+        total_chars = len(full_text)
+
+        # Apply grep filter if specified
+        grep_matches = 0
+        if grep and full_text:
+            try:
+                pattern = re.compile(grep, re.IGNORECASE | re.MULTILINE)
+                # Find all matches and include context
+                matches = []
+                for match in pattern.finditer(full_text):
+                    start = max(0, match.start() - 100)
+                    end = min(len(full_text), match.end() + 100)
+                    context = full_text[start:end]
+                    # Add ellipsis if truncated
+                    if start > 0:
+                        context = "..." + context
+                    if end < len(full_text):
+                        context = context + "..."
+                    matches.append(context)
+                    grep_matches += 1
+
+                if matches:
+                    full_text = "\n\n---\n\n".join(matches)
+                    total_chars = len(full_text)
+                else:
+                    full_text = ""
+                    total_chars = 0
+            except re.error as e:
+                return make_error(
+                    error_type="invalid_grep",
+                    message=f"Invalid regex pattern: {e}",
+                    suggestion="Use a valid regex pattern or simple text string.",
+                )
+
+        # Apply pagination
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+
+        if start_idx >= total_chars:
+            # Page out of range
+            total_pages = max(1, (total_chars + page_size - 1) // page_size)
+            return make_error(
+                error_type="page_out_of_range",
+                message=f"Page {page} does not exist. Document has {total_pages} page(s).",
+                suggestion="Use page=1 to start from the beginning.",
+            )
+
+        page_content = full_text[start_idx:end_idx]
+        has_more = end_idx < total_chars
+        total_pages = max(1, (total_chars + page_size - 1) // page_size)
 
         result = {
             "document": target_doc.VissibleName,
             "path": doc_path,
-            "content": {
-                "typed_text": content["typed_text"],
-                "highlights": content["highlights"],
-                "handwritten_text": content["handwritten_text"],
-            },
-            "pages": content["pages"],
+            "file_type": file_type or "notebook",
+            "content_type": content_type,
+            "content": page_content,
+            "page": page,
+            "total_pages": total_pages,
+            "page_size": page_size,
+            "total_chars": total_chars,
+            "more": has_more,
             "modified": (
                 target_doc.ModifiedClient if hasattr(target_doc, "ModifiedClient") else None
             ),
         }
 
+        if has_more:
+            result["next_page"] = page + 1
+
+        if grep:
+            result["grep"] = grep
+            result["grep_matches"] = grep_matches
+
         # Build contextual hint
-        folder_path = "/".join(doc_path.split("/")[:-1]) or "/"
-        hint_parts = ["Text extracted."]
+        hint_parts = []
 
-        if content["typed_text"]:
-            hint_parts.append(f"Found {len(content['typed_text'])} text segments.")
+        if grep:
+            if grep_matches > 0:
+                hint_parts.append(f"Found {grep_matches} match(es) for '{grep}'.")
+            else:
+                hint_parts.append(f"No matches for '{grep}' on this page.")
+                if has_more:
+                    hint_parts.append("Try searching other pages.")
+
+        if has_more:
+            hint_parts.append(
+                f"Page {page}/{total_pages}. Next: remarkable_read('{document}', page={page + 1})"
+            )
         else:
-            hint_parts.append("No typed text found.")
-            if not include_ocr:
-                hint_parts.append("Try include_ocr=True for handwritten content.")
+            hint_parts.append(f"Page {page}/{total_pages} (complete).")
 
-        hint_parts.append(f"To see other files: remarkable_browse('{folder_path}').")
+        if content_type == "text" and not raw_available and file_type in ("pdf", "epub"):
+            hint_parts.append("Raw content requires SSH mode.")
 
         return make_response(result, " ".join(hint_parts))
 
@@ -441,9 +593,10 @@ def remarkable_status() -> str:
         if REMARKABLE_USE_SSH:
             hint = (
                 "SSH connection failed. Make sure:\n"
-                "1) Your reMarkable tablet is connected via USB\n"
-                "2) SSH is enabled on the tablet (Settings > Storage > USB web interface)\n"
+                "1) Developer mode is enabled on your tablet\n"
+                "2) Your reMarkable is connected via USB\n"
                 "3) You can run: ssh root@10.11.99.1\n\n"
+                "See: https://remarkable.guide/guide/access/ssh.html\n\n"
                 "Or use cloud mode instead (remove --ssh flag)."
             )
         else:
@@ -453,7 +606,8 @@ def remarkable_status() -> str:
                 "2) Get a one-time code "
                 "3) Run: uv run python server.py --register YOUR_CODE "
                 "4) Add REMARKABLE_TOKEN to your MCP config.\n\n"
-                "Or use SSH mode: uvx remarkable-mcp --ssh"
+                "Or use SSH mode (faster, recommended): uvx remarkable-mcp --ssh\n"
+                "SSH setup guide: https://remarkable.guide/guide/access/ssh.html"
             )
 
         return make_response(result, hint)
