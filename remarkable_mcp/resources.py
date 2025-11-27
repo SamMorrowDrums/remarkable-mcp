@@ -2,12 +2,9 @@
 MCP Resources for reMarkable tablet access.
 
 Provides:
-- remarkable://folders - folder hierarchy (lazy)
-- remarkable://recent - 10 most recent docs (lazy)
 - remarkable://doc/{name} - template for any document by name
 """
 
-import json
 import logging
 import tempfile
 from pathlib import Path
@@ -18,82 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 @mcp.resource(
-    "remarkable://folders",
-    name="Folder Structure",
-    description="Your reMarkable folder hierarchy",
-    mime_type="application/json",
-)
-def folders_resource() -> str:
-    """Return folder structure (fetched on demand)."""
-    try:
-        from remarkable_mcp.api import get_item_path, get_items_by_id, get_rmapi
-
-        client = get_rmapi()
-        collection = client.get_meta_items()
-        items_by_id = get_items_by_id(collection)
-
-        folders = []
-        for item in collection:
-            if item.is_folder:
-                folders.append(
-                    {
-                        "name": item.VissibleName,
-                        "path": get_item_path(item, items_by_id),
-                        "id": item.ID,
-                    }
-                )
-
-        folders.sort(key=lambda x: x["path"])
-        return json.dumps({"folders": folders}, indent=2)
-
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-
-@mcp.resource(
-    "remarkable://recent",
-    name="Recent Documents",
-    description="Your 10 most recently modified reMarkable documents",
-    mime_type="application/json",
-)
-def recent_documents_resource() -> str:
-    """Return recent documents list (fetched on demand)."""
-    try:
-        from remarkable_mcp.api import get_item_path, get_items_by_id, get_rmapi
-
-        client = get_rmapi()
-        collection = client.get_meta_items()
-        items_by_id = get_items_by_id(collection)
-
-        documents = [item for item in collection if not item.is_folder]
-        documents.sort(
-            key=lambda x: (
-                x.ModifiedClient if hasattr(x, "ModifiedClient") and x.ModifiedClient else ""
-            ),
-            reverse=True,
-        )
-
-        results = []
-        for doc in documents[:10]:
-            results.append(
-                {
-                    "name": doc.VissibleName,
-                    "path": get_item_path(doc, items_by_id),
-                    "id": doc.ID,
-                    "modified": str(doc.ModifiedClient) if doc.ModifiedClient else None,
-                }
-            )
-
-        return json.dumps({"documents": results}, indent=2)
-
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-
-@mcp.resource(
     "remarkable://doc/{name}",
     name="Document by Name",
-    description="Read a reMarkable document by name. Use remarkable://recent for list.",
+    description="Read a reMarkable document by name. Use remarkable_browse() to find documents.",
     mime_type="text/plain",
 )
 def document_resource(name: str) -> str:
@@ -145,7 +69,7 @@ def document_resource(name: str) -> str:
 
 # Completions handler for document names
 @mcp.completion()
-async def complete_document_name(ref, argument, context) -> list[str]:
+async def complete_document_name(ref, argument, context):
     """Provide completions for document names."""
     from mcp.types import Completion, ResourceTemplateReference
 
