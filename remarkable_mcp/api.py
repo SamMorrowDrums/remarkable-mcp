@@ -48,27 +48,45 @@ def register_and_get_token(one_time_code: str) -> str:
 
     Get a code from: https://my.remarkable.com/device/desktop/connect
     """
-    from rmapy.api import Client
-    from rmapy.exceptions import AuthError
+    import json as json_module
+    from uuid import uuid4
 
-    client = Client()
+    import requests
+
+    # Use the current remarkable API endpoint
+    # (rmapy uses an outdated one, this is from ddvk/rmapi)
+    device_token_url = "https://webapp-prod.cloud.remarkable.engineering/token/json/2/device/new"
+    uuid = str(uuid4())
+    body = {
+        "code": one_time_code,
+        "deviceDesc": "desktop-linux",
+        "deviceID": uuid,
+    }
+
     try:
-        client.register_device(one_time_code)
-    except AuthError as e:
-        raise RuntimeError(
-            f"Registration failed: {e}\n\n"
-            "This usually means:\n"
-            "  1. The code has expired (codes are single-use and expire quickly)\n"
-            "  2. The code was already used\n"
-            "  3. The code was typed incorrectly\n\n"
-            "Get a new code from: https://my.remarkable.com/device/desktop/connect"
-        )
+        response = requests.post(device_token_url, json=body)
 
-    rmapi_file = Path.home() / ".rmapi"
-    if rmapi_file.exists():
-        return rmapi_file.read_text().strip()
-    else:
-        raise RuntimeError("Registration succeeded but token file not found")
+        if response.status_code == 200 and response.text:
+            # Got a device token, save it in rmapy format
+            device_token = response.text.strip()
+
+            # rmapy expects a JSON file with devicetoken and usertoken
+            rmapi_file = Path.home() / ".rmapi"
+            token_data = {"devicetoken": device_token, "usertoken": ""}
+            rmapi_file.write_text(json_module.dumps(token_data))
+
+            return json_module.dumps(token_data)
+        else:
+            raise RuntimeError(
+                f"Registration failed (HTTP {response.status_code})\n\n"
+                "This usually means:\n"
+                "  1. The code has expired (codes are single-use and expire quickly)\n"
+                "  2. The code was already used\n"
+                "  3. The code was typed incorrectly\n\n"
+                "Get a new code from: https://my.remarkable.com/device/desktop/connect"
+            )
+    except requests.RequestException as e:
+        raise RuntimeError(f"Network error during registration: {e}")
 
 
 def get_items_by_id(collection) -> Dict[str, Any]:
