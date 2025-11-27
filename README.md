@@ -236,23 +236,24 @@ All tools are read-only and return structured JSON with hints for next actions.
 
 ## Resources
 
-Documents are automatically registered as MCP resources on startup. Each document becomes available at `remarkable://{path}.txt`.
+Documents are automatically registered as MCP resources on startup.
 
-| URI Pattern | Description |
-|-------------|-------------|
+| URI Scheme | Description |
+|------------|-------------|
 | `remarkable://{path}.txt` | Extracted text content from any document |
-| `remarkable-raw://{path}` | Raw PDF/EPUB file download (SSH mode only) |
+| `remarkable-raw://{path}.pdf` | Raw PDF file (SSH mode only) |
+| `remarkable-raw://{path}.epub` | Raw EPUB file (SSH mode only) |
 
 ### Text Resources (`remarkable://`)
 
-Returns extracted text content:
+Each document is registered with its full path. Returns extracted text content:
 - **PDF/EPUB**: Full text content extracted from the source file
 - **Notebooks**: Typed text (Type Folio), highlights, and annotations
 - Handwritten content via OCR (if enabled)
 
 ### Raw Resources (`remarkable-raw://`)
 
-Returns the original PDF or EPUB file as base64-encoded data. Only available in SSH mode since the Cloud API doesn't provide access to source files.
+PDF and EPUB files are also registered as raw resources in SSH mode. Returns the original file as base64-encoded data. Cloud API doesn't provide access to source files, so raw resources are only available in SSH mode.
 
 ## Prompts
 
