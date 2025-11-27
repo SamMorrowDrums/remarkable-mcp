@@ -15,15 +15,27 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastMCP) -> AsyncIterator[None]:
     """Lifespan context manager for the MCP server."""
     # Import here to avoid circular imports
-    from remarkable_mcp.resources import start_background_loader, stop_background_loader
+    from remarkable_mcp.resources import (
+        _is_ssh_mode,
+        load_all_documents_sync,
+        start_background_loader,
+        stop_background_loader,
+    )
 
-    # Start background document loader
-    task = start_background_loader()
+    task = None
+
+    if _is_ssh_mode():
+        # SSH mode: load all documents synchronously (fast over USB)
+        logger.info("SSH mode: loading documents synchronously...")
+        load_all_documents_sync()
+    else:
+        # Cloud mode: load in background to not block startup
+        task = start_background_loader()
 
     try:
         yield
     finally:
-        # Stop background loader on shutdown
+        # Stop background loader on shutdown (if running)
         await stop_background_loader(task)
 
 

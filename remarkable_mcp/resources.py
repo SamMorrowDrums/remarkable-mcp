@@ -166,12 +166,36 @@ def _register_document(client, doc) -> bool:
     return True
 
 
+def load_all_documents_sync() -> int:
+    """
+    Load and register all documents synchronously.
+    Used for SSH mode where loading is fast.
+    Returns the number of documents registered.
+    """
+    global _registered_docs
+
+    from remarkable_mcp.api import get_rmapi
+
+    client = get_rmapi()
+    items = client.get_meta_items()
+    documents = [item for item in items if not item.is_folder]
+
+    logger.info(f"Found {len(documents)} documents")
+
+    for doc in documents:
+        try:
+            _register_document(client, doc)
+        except Exception as e:
+            logger.debug(f"Failed to register '{doc.VissibleName}': {e}")
+
+    logger.info(f"Registered {len(_registered_docs)} document resources")
+    return len(_registered_docs)
+
+
 async def _load_documents_background(shutdown_event: asyncio.Event):
     """
-    Background task to load and register all documents as resources.
-
-    For SSH mode: loads all documents at once (fast, local metadata)
-    For Cloud mode: loads in batches of 10 to avoid blocking
+    Background task to load and register documents in batches.
+    Used for Cloud mode only - SSH mode uses load_all_documents_sync().
     """
     try:
         from remarkable_mcp.api import get_rmapi
@@ -179,32 +203,6 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
         client = get_rmapi()
         loop = asyncio.get_event_loop()
 
-        if _is_ssh_mode():
-            # SSH mode: load all documents at once (it's fast!)
-            logger.info("SSH mode: loading all documents at once...")
-            try:
-                items = await loop.run_in_executor(None, client.get_meta_items)
-                documents = [item for item in items if not item.is_folder]
-
-                logger.info(f"Found {len(documents)} documents via SSH")
-
-                # Register all documents
-                for doc in documents:
-                    if shutdown_event.is_set():
-                        break
-                    try:
-                        _register_document(client, doc)
-                    except Exception as e:
-                        logger.debug(f"Failed to register '{doc.VissibleName}': {e}")
-
-                logger.info(
-                    f"Background loader complete: {len(_registered_docs)} documents registered"
-                )
-            except Exception as e:
-                logger.error(f"Failed to load documents via SSH: {e}")
-            return
-
-        # Cloud mode: load in batches to avoid blocking
         batch_size = 10
         offset = 0
         consecutive_errors = 0
