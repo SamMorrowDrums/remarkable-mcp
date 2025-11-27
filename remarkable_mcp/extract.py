@@ -121,10 +121,11 @@ def extract_text_from_document_zip(zip_path: Path, include_ocr: bool = False) ->
 
     Returns:
         {
-            "typed_text": [...],      # From rmscene parsing
+            "typed_text": [...],      # From rmscene parsing (list of strings)
             "highlights": [...],       # From PDF annotations
-            "handwritten_text": [...], # From OCR (if enabled)
-            "pages": int
+            "handwritten_text": [...], # From OCR (if enabled) - one per page, in order
+            "pages": int,
+            "page_ids": [...],         # Page UUIDs in order
         }
     """
     result: Dict[str, Any] = {
@@ -132,6 +133,7 @@ def extract_text_from_document_zip(zip_path: Path, include_ocr: bool = False) ->
         "highlights": [],
         "handwritten_text": None,
         "pages": 0,
+        "page_ids": [],
     }
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -140,7 +142,43 @@ def extract_text_from_document_zip(zip_path: Path, include_ocr: bool = False) ->
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(tmpdir_path)
 
+        # Get page order from .content file
+        page_order = []
+        for content_file in tmpdir_path.glob("*.content"):
+            try:
+                data = json.loads(content_file.read_text())
+                # New format: cPages.pages array
+                if "cPages" in data and "pages" in data["cPages"]:
+                    page_order = [p["id"] for p in data["cPages"]["pages"]]
+                # Fallback: pages array directly
+                elif "pages" in data and isinstance(data["pages"], list):
+                    page_order = data["pages"]
+            except Exception:
+                pass
+            break  # Only process first .content file
+
         rm_files = list(tmpdir_path.glob("**/*.rm"))
+
+        # If we have page order, sort rm_files accordingly
+        if page_order:
+            # Create mapping of page_id -> rm_file
+            rm_by_id = {}
+            for rm_file in rm_files:
+                page_id = rm_file.stem  # filename without extension
+                rm_by_id[page_id] = rm_file
+
+            # Sort rm_files by page order
+            ordered_rm_files = []
+            for page_id in page_order:
+                if page_id in rm_by_id:
+                    ordered_rm_files.append(rm_by_id[page_id])
+            # Add any remaining files not in page order
+            for rm_file in rm_files:
+                if rm_file not in ordered_rm_files:
+                    ordered_rm_files.append(rm_file)
+            rm_files = ordered_rm_files
+            result["page_ids"] = [f.stem for f in rm_files]
+
         result["pages"] = len(rm_files)
 
         # Extract typed text from .rm files using rmscene

@@ -45,6 +45,7 @@ class Document:
     parent: str = ""
     deleted: bool = False
     pinned: bool = False
+    synced: bool = True  # False means cloud-archived (not on device)
     last_modified: Optional[datetime] = None
     size: int = 0
     files: List[Dict[str, Any]] = field(default_factory=list)
@@ -54,6 +55,11 @@ class Document:
     @property
     def is_folder(self) -> bool:
         return self.doc_type == "CollectionType"
+
+    @property
+    def is_cloud_archived(self) -> bool:
+        """True if document is archived to cloud (not on device)."""
+        return not self.synced or self.parent == "trash"
 
     @property
     def VissibleName(self) -> str:
@@ -270,6 +276,7 @@ class SSHClient:
                 parent=metadata.get("parent", ""),
                 deleted=metadata.get("deleted", False),
                 pinned=metadata.get("pinned", False),
+                synced=metadata.get("synced", True),
                 last_modified=last_modified,
                 size=0,
                 local_path=f"{XOCHITL_PATH}/{doc_id}",

@@ -3,13 +3,12 @@ MCP Resources for reMarkable tablet access.
 
 Provides:
 - remarkable:///{path}.txt - extracted text from any document
-- remarkableraw:///{path} - raw PDF/EPUB file download (SSH mode only, enumerated)
+- remarkableraw:///{path}.txt - raw PDF/EPUB text content (SSH mode only, enumerated)
 
 Resources are loaded at startup (SSH) or in background batches (cloud).
 """
 
 import asyncio
-import base64
 import logging
 import os
 import tempfile
@@ -29,15 +28,6 @@ _registered_uris: Set[str] = set()  # Track URIs for collision detection
 def _is_ssh_mode() -> bool:
     """Check if SSH transport is enabled (evaluated at runtime)."""
     return os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
-
-
-def _get_mime_type(file_type: str) -> str:
-    """Get MIME type for file extension."""
-    mime_types = {
-        "pdf": "application/pdf",
-        "epub": "application/epub+zip",
-    }
-    return mime_types.get(file_type, "application/octet-stream")
 
 
 def _make_doc_resource(client, document):
@@ -116,8 +106,9 @@ def _make_doc_resource(client, document):
 
 
 def _make_raw_resource(client, document, file_type: str):
-    """Create a resource function for raw PDF/EPUB download."""
+    """Create a resource function for raw PDF/EPUB text extraction."""
     from remarkable_mcp.api import download_raw_file
+    from remarkable_mcp.extract import extract_text_from_epub, extract_text_from_pdf
 
     def raw_resource() -> str:
         try:
@@ -129,9 +120,22 @@ def _make_raw_resource(client, document, file_type: str):
             if not raw_data:
                 return f"Raw {file_type.upper()} file not found"
 
-            # Return base64 encoded with data URI
-            encoded = base64.b64encode(raw_data).decode("ascii")
-            return f"data:{_get_mime_type(file_type)};base64,{encoded}"
+            # Extract text from the raw file
+            with tempfile.NamedTemporaryFile(suffix=f".{file_type}", delete=False) as tmp:
+                tmp.write(raw_data)
+                tmp_path = Path(tmp.name)
+
+            try:
+                if file_type == "pdf":
+                    text = extract_text_from_pdf(tmp_path)
+                elif file_type == "epub":
+                    text = extract_text_from_epub(tmp_path)
+                else:
+                    text = f"Unsupported file type: {file_type}"
+
+                return text if text else f"(No text content in {file_type.upper()} file)"
+            finally:
+                tmp_path.unlink(missing_ok=True)
         except Exception as e:
             return f"Error: {e}"
 
@@ -146,6 +150,10 @@ def _register_document(client, doc, items_by_id=None, file_types: dict = None) -
 
     # Skip if already registered (by ID)
     if doc_id in _registered_docs:
+        return False
+
+    # Skip cloud-archived documents (not available on device)
+    if hasattr(doc, "is_cloud_archived") and doc.is_cloud_archived:
         return False
 
     # Get the full path
@@ -187,16 +195,17 @@ def _register_document(client, doc, items_by_id=None, file_types: dict = None) -
         # Use pre-loaded file types (fast)
         file_type = file_types.get(doc_id)
         if file_type in ("pdf", "epub"):
-            raw_uri = f"remarkableraw:///{uri_path}.{file_type}"
+            # Raw resources now return extracted text, use .txt extension
+            raw_uri = f"remarkableraw:///{uri_path}.{file_type}.txt"
             raw_counter = 1
             final_raw_uri = raw_uri
-            raw_display = f"{full_path}.{file_type}"
+            raw_display = f"{full_path} (raw {file_type.upper()}).txt"
             while final_raw_uri in _registered_uris:
-                final_raw_uri = f"remarkableraw:///{uri_path}_{raw_counter}.{file_type}"
-                raw_display = f"{full_path} ({raw_counter}).{file_type}"
+                final_raw_uri = f"remarkableraw:///{uri_path}_{raw_counter}.{file_type}.txt"
+                raw_display = f"{full_path} (raw {file_type.upper()}) ({raw_counter}).txt"
                 raw_counter += 1
 
-            raw_desc = f"Raw {file_type.upper()} file: '{full_path}'"
+            raw_desc = f"Raw {file_type.upper()} text content: '{full_path}'"
             if doc.ModifiedClient:
                 raw_desc += f" (modified: {doc.ModifiedClient})"
 
@@ -204,7 +213,7 @@ def _register_document(client, doc, items_by_id=None, file_types: dict = None) -
                 final_raw_uri,
                 name=raw_display,
                 description=raw_desc,
-                mime_type=_get_mime_type(file_type),
+                mime_type="text/plain",
             )(_make_raw_resource(client, doc, file_type))
 
             _registered_raw.add(doc_id)
