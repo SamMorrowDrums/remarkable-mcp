@@ -27,6 +27,57 @@ def find_similar_documents(query: str, documents: List, limit: int = 5) -> List[
     return [name for name, score in scored[:limit] if score > 0.3]
 
 
+def extract_text_from_pdf(pdf_path: Path) -> str:
+    """
+    Extract text from a PDF file using PyMuPDF.
+
+    Returns the full text content of the PDF.
+    """
+    try:
+        import fitz  # PyMuPDF
+
+        text_parts = []
+        with fitz.open(pdf_path) as doc:
+            for page_num, page in enumerate(doc, 1):
+                page_text = page.get_text()
+                if page_text.strip():
+                    text_parts.append(f"--- Page {page_num} ---\n{page_text.strip()}")
+
+        return "\n\n".join(text_parts) if text_parts else ""
+    except ImportError:
+        return ""
+    except Exception:
+        return ""
+
+
+def extract_text_from_epub(epub_path: Path) -> str:
+    """
+    Extract text from an EPUB file.
+
+    Returns the full text content of the EPUB.
+    """
+    try:
+        from bs4 import BeautifulSoup
+        from ebooklib import ITEM_DOCUMENT, epub
+
+        book = epub.read_epub(str(epub_path), options={"ignore_ncx": True})
+        text_parts = []
+
+        for item in book.get_items():
+            if item.get_type() == ITEM_DOCUMENT:
+                soup = BeautifulSoup(item.get_content(), "html.parser")
+                # Get text, preserving some structure
+                text = soup.get_text(separator="\n", strip=True)
+                if text:
+                    text_parts.append(text)
+
+        return "\n\n".join(text_parts) if text_parts else ""
+    except ImportError:
+        return ""
+    except Exception:
+        return ""
+
+
 def extract_text_from_rm_file(rm_file_path: Path) -> List[str]:
     """
     Extract typed text from a .rm file using rmscene.

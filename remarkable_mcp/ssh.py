@@ -329,6 +329,43 @@ class SSHClient:
         zip_buffer.seek(0)
         return zip_buffer.read()
 
+    def download_raw_file(self, doc: Document, extension: str) -> Optional[bytes]:
+        """
+        Download a raw file (PDF or EPUB) for a document.
+
+        Args:
+            doc: The document to download
+            extension: File extension without dot (e.g., 'pdf', 'epub')
+
+        Returns:
+            Raw file bytes, or None if file doesn't exist
+        """
+        file_path = f"{XOCHITL_PATH}/{doc.id}.{extension}"
+
+        try:
+            # Check if file exists first
+            self._ssh_command(f"test -f '{file_path}'", timeout=5)
+            # Download the file
+            return self._scp_download(file_path, timeout=120)
+        except Exception as e:
+            logger.debug(f"Raw file not found: {file_path}: {e}")
+            return None
+
+    def get_file_type(self, doc: Document) -> Optional[str]:
+        """
+        Get the file type (pdf, epub, etc.) for a document.
+
+        Returns the extension without dot, or None if not a file-based document.
+        """
+        content_file = f"{XOCHITL_PATH}/{doc.id}.content"
+
+        try:
+            content = self._scp_download(content_file, timeout=10)
+            data = json.loads(content.decode("utf-8"))
+            return data.get("fileType")
+        except Exception:
+            return None
+
 
 def check_ssh_available(
     host: str = DEFAULT_SSH_HOST,
