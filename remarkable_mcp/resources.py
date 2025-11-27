@@ -1,7 +1,10 @@
 """
 MCP Resources for reMarkable tablet access.
 
-Dynamically registers recent documents as resources on startup.
+Provides:
+- remarkable://folders - folder hierarchy (lazy)
+- remarkable://recent - 10 most recent docs (lazy)
+- remarkable://doc/{name} - template for any document by name
 """
 
 import json
@@ -14,24 +17,55 @@ from remarkable_mcp.server import mcp
 logger = logging.getLogger(__name__)
 
 
-def register_document_resources():
-    """
-    Dynamically register recent documents as MCP resources.
-
-    Called on startup if API connection exists. Each recent document
-    becomes its own resource with URI like remarkable://doc/{name}.
-    """
+@mcp.resource(
+    "remarkable://folders",
+    name="Folder Structure",
+    description="Your reMarkable folder hierarchy",
+    mime_type="application/json",
+)
+def folders_resource() -> str:
+    """Return folder structure (fetched on demand)."""
     try:
         from remarkable_mcp.api import get_item_path, get_items_by_id, get_rmapi
-        from remarkable_mcp.extract import extract_text_from_document_zip
-        from remarkable_mcp.sync import Document
 
         client = get_rmapi()
         collection = client.get_meta_items()
         items_by_id = get_items_by_id(collection)
 
-        # Get documents sorted by modified date
-        documents = [item for item in collection if isinstance(item, Document)]
+        folders = []
+        for item in collection:
+            if item.is_folder:
+                folders.append(
+                    {
+                        "name": item.VissibleName,
+                        "path": get_item_path(item, items_by_id),
+                        "id": item.ID,
+                    }
+                )
+
+        folders.sort(key=lambda x: x["path"])
+        return json.dumps({"folders": folders}, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.resource(
+    "remarkable://recent",
+    name="Recent Documents",
+    description="Your 10 most recently modified reMarkable documents",
+    mime_type="application/json",
+)
+def recent_documents_resource() -> str:
+    """Return recent documents list (fetched on demand)."""
+    try:
+        from remarkable_mcp.api import get_item_path, get_items_by_id, get_rmapi
+
+        client = get_rmapi()
+        collection = client.get_meta_items()
+        items_by_id = get_items_by_id(collection)
+
+        documents = [item for item in collection if not item.is_folder]
         documents.sort(
             key=lambda x: (
                 x.ModifiedClient if hasattr(x, "ModifiedClient") and x.ModifiedClient else ""
@@ -39,91 +73,107 @@ def register_document_resources():
             reverse=True,
         )
 
-        # Register each recent document as a resource
+        results = []
         for doc in documents[:10]:
-            doc_name = doc.VissibleName
-            doc_modified = doc.ModifiedClient if hasattr(doc, "ModifiedClient") else None
+            results.append(
+                {
+                    "name": doc.VissibleName,
+                    "path": get_item_path(doc, items_by_id),
+                    "id": doc.ID,
+                    "modified": str(doc.ModifiedClient) if doc.ModifiedClient else None,
+                }
+            )
 
-            # Create a closure to capture the document
-            def make_resource_fn(document):
-                def resource_fn() -> str:
-                    try:
-                        raw_doc = client.download(document)
-
-                        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                            tmp.write(raw_doc.content)
-                            tmp_path = Path(tmp.name)
-
-                        try:
-                            content = extract_text_from_document_zip(tmp_path, include_ocr=False)
-                        finally:
-                            tmp_path.unlink(missing_ok=True)
-
-                        # Combine all text content
-                        text_parts = []
-
-                        if content["typed_text"]:
-                            text_parts.extend(content["typed_text"])
-
-                        if content["highlights"]:
-                            text_parts.append("\n--- Highlights ---")
-                            text_parts.extend(content["highlights"])
-
-                        return "\n\n".join(text_parts) if text_parts else "(No text content found)"
-
-                    except Exception as e:
-                        return f"Error reading document: {e}"
-
-                return resource_fn
-
-            # Register the resource
-            resource_uri = f"remarkable://doc/{doc_name}"
-            description = f"Content from '{doc_name}'"
-            if doc_modified:
-                description += f" (modified: {doc_modified})"
-
-            mcp.resource(
-                resource_uri,
-                name=doc_name,
-                description=description,
-                mime_type="text/plain",
-            )(make_resource_fn(doc))
-
-        logger.info(f"Registered {min(len(documents), 10)} document resources")
-
-        # Also register a folder structure resource
-        @mcp.resource(
-            "remarkable://folders",
-            name="Folder Structure",
-            description="Your reMarkable folder hierarchy",
-            mime_type="application/json",
-        )
-        def folders_resource() -> str:
-            """Return folder structure as a resource."""
-            from remarkable_mcp.sync import Folder
-
-            try:
-                folders = []
-                for item in collection:
-                    if isinstance(item, Folder):
-                        folders.append(
-                            {
-                                "name": item.VissibleName,
-                                "path": get_item_path(item, items_by_id),
-                                "id": item.ID,
-                            }
-                        )
-
-                folders.sort(key=lambda x: x["path"])
-                return json.dumps({"folders": folders}, indent=2)
-
-            except Exception as e:
-                return json.dumps({"error": str(e)})
+        return json.dumps({"documents": results}, indent=2)
 
     except Exception as e:
-        logger.warning(f"Could not register document resources: {e}")
-        logger.info("Resources will be available after authentication via remarkable_status()")
+        return json.dumps({"error": str(e)})
 
 
-# Register resources on module load (if API is available)
-register_document_resources()
+@mcp.resource(
+    "remarkable://doc/{name}",
+    name="Document by Name",
+    description="Read a reMarkable document by name. Use remarkable://recent for list.",
+    mime_type="text/plain",
+)
+def document_resource(name: str) -> str:
+    """Return document content by name (fetched on demand)."""
+    try:
+        from remarkable_mcp.api import get_rmapi
+        from remarkable_mcp.extract import extract_text_from_document_zip
+
+        client = get_rmapi()
+        collection = client.get_meta_items()
+
+        # Find document by name
+        target_doc = None
+        for item in collection:
+            if not item.is_folder and item.VissibleName == name:
+                target_doc = item
+                break
+
+        if not target_doc:
+            return f"Document not found: '{name}'"
+
+        # Download and extract
+        raw_doc = client.download(target_doc)
+
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(raw_doc)
+            tmp_path = Path(tmp.name)
+
+        try:
+            content = extract_text_from_document_zip(tmp_path, include_ocr=False)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        # Combine all text content
+        text_parts = []
+
+        if content["typed_text"]:
+            text_parts.extend(content["typed_text"])
+
+        if content["highlights"]:
+            text_parts.append("\n--- Highlights ---")
+            text_parts.extend(content["highlights"])
+
+        return "\n\n".join(text_parts) if text_parts else "(No text content found)"
+
+    except Exception as e:
+        return f"Error reading document: {e}"
+
+
+# Completions handler for document names
+@mcp.completion()
+async def complete_document_name(ref, argument, context) -> list[str]:
+    """Provide completions for document names."""
+    from mcp.types import Completion, ResourceTemplateReference
+
+    # Only handle our document template
+    if not isinstance(ref, ResourceTemplateReference):
+        return None
+    if ref.uri_template != "remarkable://doc/{name}":
+        return None
+    if argument.name != "name":
+        return None
+
+    try:
+        from remarkable_mcp.api import get_rmapi
+
+        client = get_rmapi()
+        collection = client.get_meta_items()
+
+        # Get all document names
+        doc_names = [item.VissibleName for item in collection if not item.is_folder]
+
+        # Filter by partial value if provided
+        partial = argument.value or ""
+        if partial:
+            partial_lower = partial.lower()
+            doc_names = [n for n in doc_names if partial_lower in n.lower()]
+
+        # Return up to 50 matches, sorted
+        return Completion(values=sorted(doc_names)[:50])
+
+    except Exception:
+        return Completion(values=[])
