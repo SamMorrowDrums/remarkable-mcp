@@ -228,6 +228,36 @@ def remarkable_read(
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
 
+        # Handle empty content case - page 1 should still work
+        if total_chars == 0:
+            if page > 1:
+                return make_error(
+                    error_type="page_out_of_range",
+                    message=f"Page {page} does not exist. Document has 1 page(s).",
+                    suggestion="Use page=1 to start from the beginning.",
+                )
+            # Return empty result for page 1
+            result = {
+                "document": target_doc.VissibleName,
+                "path": doc_path,
+                "file_type": file_type or "notebook",
+                "content_type": content_type,
+                "content": "",
+                "page": 1,
+                "total_pages": 1,
+                "page_size": page_size,
+                "total_chars": 0,
+                "more": False,
+                "modified": (
+                    target_doc.ModifiedClient if hasattr(target_doc, "ModifiedClient") else None
+                ),
+            }
+            hint = (
+                f"Document '{target_doc.VissibleName}' has no extractable text content. "
+                "This may be a handwritten notebook - try include_ocr=True for OCR extraction."
+            )
+            return make_response(result, hint)
+
         if start_idx >= total_chars:
             # Page out of range
             total_pages = max(1, (total_chars + page_size - 1) // page_size)
