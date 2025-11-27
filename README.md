@@ -185,7 +185,27 @@ remarkable_recent(limit=5, include_preview=True)
 
 **Typed text** from v3+ notebooks is extracted natively via `rmscene` — no OCR required.
 
-**Handwritten content** uses pytesseract for OCR. Make sure Tesseract is installed on your system:
+**Handwritten content** uses OCR. Two backends are supported:
+
+### Google Cloud Vision (Recommended for handwriting)
+
+Best quality for handwriting recognition. Requires a Google Cloud account with Vision API enabled.
+
+```bash
+# Install the optional dependency
+pip install remarkable-mcp[ocr]
+
+# Set up credentials (one of these methods):
+# 1. Set GOOGLE_APPLICATION_CREDENTIALS to your service account JSON file
+# 2. Run `gcloud auth application-default login` for development
+# 3. Use a GCP environment with default credentials (Cloud Run, GKE, etc.)
+```
+
+The server will automatically use Google Vision when available.
+
+### Tesseract (Fallback)
+
+Basic OCR using pytesseract. Works offline but struggles with cursive handwriting.
 
 ```bash
 # macOS
@@ -198,7 +218,13 @@ sudo apt-get install tesseract-ocr
 sudo pacman -S tesseract
 ```
 
-PDF highlights and annotations are also extracted.
+### OCR Configuration
+
+| Environment Variable | Values | Description |
+|---------------------|--------|-------------|
+| `REMARKABLE_OCR_BACKEND` | `auto`, `google`, `tesseract` | Force a specific OCR backend. Default: `auto` (uses Google if available) |
+
+PDF highlights and annotations are also extracted automatically.
 
 ## Design
 
