@@ -40,7 +40,7 @@ uv run python server.py --register YOUR_ONE_TIME_CODE
 
 ### 1. Get a One-Time Code
 
-Go to [my.remarkable.com/device/browser/connect](https://my.remarkable.com/device/browser/connect) and generate a code.
+Go to [my.remarkable.com/device/desktop/connect](https://my.remarkable.com/device/desktop/connect) and generate a code.
 
 ### 2. Convert to Token
 
