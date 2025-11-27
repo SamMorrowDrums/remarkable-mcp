@@ -4,6 +4,21 @@
 
 This is an MCP (Model Context Protocol) server that provides access to reMarkable tablet data. It's a Python project using FastMCP.
 
+## Git Workflow
+
+**Always work on feature branches and submit PRs. Never push directly to main.**
+
+```bash
+# Create a feature branch
+git checkout -b feature/my-feature
+
+# After making changes, push and create PR
+git push origin feature/my-feature
+# Then create PR via GitHub
+```
+
+Branch protection is enabled on `main` - all changes must go through pull requests with passing CI checks.
+
 ## Package Management
 
 **Always use `uv` for all package management operations.**
