@@ -219,10 +219,25 @@ async def test_with_mock(mock_get_rmapi):
 
 ### Making a Release
 
-1. Update version in `pyproject.toml`
+Releases are automated via GitHub Actions. The version is derived from the git tag.
+
+**Steps:**
+1. Ensure all changes are merged to `main`
 2. Ensure README.md is current
-3. Run full test suite: `uv run pytest test_server.py -v`
-4. Run linting: `uv run ruff check .`
-5. Run formatting check: `uv run ruff format --check .`
-6. Commit all changes
-7. Create a GitHub release (triggers PyPI publish)
+3. Ensure CI is passing on `main`
+4. Create and push a version tag:
+   ```bash
+   # Get the current version from pyproject.toml or latest tag
+   git tag -l 'v*' | sort -V | tail -1
+   
+   # Create next version tag (e.g., v0.2.0)
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+5. The workflow automatically:
+   - Creates a GitHub release with generated notes
+   - Builds the package with the tag version
+   - Publishes to PyPI
+   - Publishes to MCP Registry
+
+**Note:** The version in `pyproject.toml` is updated automatically during the build from the git tag. You don't need to manually update it.
