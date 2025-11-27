@@ -51,7 +51,7 @@ Use pagination to avoid overwhelming context. The response includes:
 ## MCP Resources
 
 Documents are registered as resources for direct access:
-- `remarkable://{path}.txt` - Get full extracted text content in one request
+- `remarkable:///{path}.txt` - Get full extracted text content in one request
 - Use resources when you need complete document content without pagination
 """
 
@@ -62,7 +62,7 @@ Documents are registered as resources for direct access:
 
 You're connected directly to the tablet via SSH. This enables:
 - **Raw file access**: Use `content_type="raw"` to get original PDF/EPUB text
-- **Raw resources**: `remarkableraw://{path}.pdf` or `.epub` for original files
+- **Raw resources**: `remarkableraw:///{path}.pdf` or `.epub` for original files
 - **Faster operations**: Direct tablet access is 10-100x faster than cloud
 
 ### Content Types for remarkable_read

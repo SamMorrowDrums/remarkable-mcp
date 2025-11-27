@@ -2,8 +2,8 @@
 MCP Resources for reMarkable tablet access.
 
 Provides:
-- remarkable://{path}.txt - extracted text from any document
-- remarkableraw://{path} - raw PDF/EPUB file download (SSH mode only, enumerated)
+- remarkable:///{path}.txt - extracted text from any document
+- remarkableraw:///{path} - raw PDF/EPUB file download (SSH mode only, enumerated)
 
 Resources are loaded at startup (SSH) or in background batches (cloud).
 """
@@ -162,13 +162,13 @@ def _register_document(client, doc, items_by_id=None, file_types: dict = None) -
     uri_path = full_path.lstrip("/")
     encoded_path = quote(uri_path, safe="/")  # Keep slashes unencoded for paths
 
-    # Register text resource
-    base_uri = f"remarkable://{encoded_path}.txt"
+    # Register text resource (use /// for empty netloc)
+    base_uri = f"remarkable:///{encoded_path}.txt"
     counter = 1
     final_uri = base_uri
     display_name = f"{full_path}.txt"
     while final_uri in _registered_uris:
-        final_uri = f"remarkable://{encoded_path}_{counter}.txt"
+        final_uri = f"remarkable:///{encoded_path}_{counter}.txt"
         display_name = f"{full_path} ({counter}).txt"
         counter += 1
 
@@ -188,12 +188,12 @@ def _register_document(client, doc, items_by_id=None, file_types: dict = None) -
         # Use pre-loaded file types (fast)
         file_type = file_types.get(doc_id)
         if file_type in ("pdf", "epub"):
-            raw_uri = f"remarkableraw://{encoded_path}.{file_type}"
+            raw_uri = f"remarkableraw:///{encoded_path}.{file_type}"
             raw_counter = 1
             final_raw_uri = raw_uri
             raw_display = f"{full_path}.{file_type}"
             while final_raw_uri in _registered_uris:
-                final_raw_uri = f"remarkableraw://{encoded_path}_{raw_counter}.{file_type}"
+                final_raw_uri = f"remarkableraw:///{encoded_path}_{raw_counter}.{file_type}"
                 raw_display = f"{full_path} ({raw_counter}).{file_type}"
                 raw_counter += 1
 
