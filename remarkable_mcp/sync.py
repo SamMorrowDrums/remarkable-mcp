@@ -151,9 +151,12 @@ class RemarkableClient:
 
         return entries
 
-    def get_meta_items(self) -> List[Document]:
+    def get_meta_items(self, limit: Optional[int] = None) -> List[Document]:
         """
-        Fetch all documents and folders from the cloud.
+        Fetch documents and folders from the cloud.
+
+        Args:
+            limit: Maximum number of documents to fetch. If None, fetches all.
 
         Returns a list of Document objects (compatible with rmapy Collection).
         """
@@ -220,6 +223,10 @@ class RemarkableClient:
             )
 
             documents.append(doc)
+
+            # Stop early if we have enough
+            if limit is not None and len(documents) >= limit:
+                break
 
         self._documents = documents
         self._documents_by_id = {d.id: d for d in documents}
