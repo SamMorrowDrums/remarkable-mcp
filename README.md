@@ -198,12 +198,23 @@ All tools are read-only and return structured JSON with hints for next actions.
 
 ## Resources
 
-Recent documents are automatically registered as MCP resources on startup (if authenticated). Each document becomes available at `remarkable://doc/{name}`.
+Documents are automatically registered as MCP resources on startup. Each document becomes available at `remarkable://{path}.txt`.
 
-| URI | Description |
-|-----|-------------|
-| `remarkable://doc/{name}` | Content of a recent document |
-| `remarkable://folders` | Complete folder hierarchy |
+| URI Pattern | Description |
+|-------------|-------------|
+| `remarkable://{path}.txt` | Extracted text content from any document |
+| `remarkable-raw://{path}` | Raw PDF/EPUB file download (SSH mode only) |
+
+### Text Resources (`remarkable://`)
+
+Returns extracted text content:
+- **PDF/EPUB**: Full text content extracted from the source file
+- **Notebooks**: Typed text (Type Folio), highlights, and annotations
+- Handwritten content via OCR (if enabled)
+
+### Raw Resources (`remarkable-raw://`)
+
+Returns the original PDF or EPUB file as base64-encoded data. Only available in SSH mode since the Cloud API doesn't provide access to source files.
 
 ## Prompts
 
@@ -219,6 +230,12 @@ remarkable_recent(limit=5, include_preview=True)
 ```
 
 ## Text Extraction
+
+### PDF and EPUB Documents
+
+Text is extracted directly from PDF and EPUB files using PyMuPDF and ebooklib. This provides the full document content without needing OCR.
+
+### Notebooks
 
 **Typed text** from v3+ notebooks is extracted natively via `rmscene` — no OCR required.
 
