@@ -6,6 +6,10 @@ on:
       - 'v*'
   workflow_dispatch:  # Allow manual triggering
 
+# Default to minimal permissions, jobs override as needed
+permissions:
+  contents: read
+
 jobs:
   create-release:
     runs-on: ubuntu-latest
@@ -26,6 +30,8 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
       
@@ -49,6 +55,8 @@ jobs:
   build:
     needs: [create-release, test]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
       
