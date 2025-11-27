@@ -22,10 +22,9 @@ def register_document_resources():
     becomes its own resource with URI like remarkable://doc/{name}.
     """
     try:
-        from rmapy.document import Document
-
         from remarkable_mcp.api import get_item_path, get_items_by_id, get_rmapi
         from remarkable_mcp.extract import extract_text_from_document_zip
+        from remarkable_mcp.sync import Document
 
         client = get_rmapi()
         collection = client.get_meta_items()
@@ -101,7 +100,7 @@ def register_document_resources():
         )
         def folders_resource() -> str:
             """Return folder structure as a resource."""
-            from rmapy.folder import Folder
+            from remarkable_mcp.sync import Folder
 
             try:
                 folders = []

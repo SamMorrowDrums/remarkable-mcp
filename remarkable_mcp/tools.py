@@ -57,14 +57,12 @@ def remarkable_read(document: str, include_ocr: bool = False) -> str:
     </examples>
     """
     try:
-        from rmapy.document import Document
-
         client = get_rmapi()
         collection = client.get_meta_items()
         items_by_id = get_items_by_id(collection)
 
-        # Find the document by name
-        documents = [item for item in collection if isinstance(item, Document)]
+        # Find the document by name (not folders)
+        documents = [item for item in collection if not item.is_folder]
         target_doc = None
 
         for doc in documents:
@@ -90,7 +88,7 @@ def remarkable_read(document: str, include_ocr: bool = False) -> str:
         raw_doc = client.download(target_doc)
 
         with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-            tmp.write(raw_doc.content)
+            tmp.write(raw_doc)
             tmp_path = Path(tmp.name)
 
         try:
@@ -163,8 +161,7 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
     </examples>
     """
     try:
-        from rmapy.document import Document
-        from rmapy.folder import Folder
+        from remarkable_mcp.sync import Document, Folder
 
         client = get_rmapi()
         collection = client.get_meta_items()
@@ -182,7 +179,7 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
                         {
                             "name": item.VissibleName,
                             "path": get_item_path(item, items_by_id),
-                            "type": "folder" if isinstance(item, Folder) else "document",
+                            "type": "folder" if item.is_folder else "document",
                             "modified": (
                                 item.ModifiedClient if hasattr(item, "ModifiedClient") else None
                             ),
@@ -225,7 +222,7 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
             for part in path_parts:
                 found = False
                 for item in items_by_parent.get(current_parent, []):
-                    if item.VissibleName == part and isinstance(item, Folder):
+                    if item.VissibleName == part and item.is_folder:
                         current_parent = item.ID
                         found = True
                         break
@@ -235,7 +232,7 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
                     available_folders = [
                         item.VissibleName
                         for item in items_by_parent.get(current_parent, [])
-                        if isinstance(item, Folder)
+                        if item.is_folder
                     ]
                     return make_error(
                         error_type="folder_not_found",
@@ -308,7 +305,7 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
     </examples>
     """
     try:
-        from rmapy.document import Document
+        from remarkable_mcp.sync import Document
 
         client = get_rmapi()
         collection = client.get_meta_items()
@@ -393,12 +390,11 @@ def remarkable_status() -> str:
     token_source = "environment variable" if REMARKABLE_TOKEN else "file (~/.rmapi)"
 
     try:
-        from rmapy.document import Document
-
         client = get_rmapi()
         collection = client.get_meta_items()
 
-        doc_count = sum(1 for item in collection if isinstance(item, Document))
+        # Count documents (not folders)
+        doc_count = sum(1 for item in collection if not item.is_folder)
 
         result = {
             "authenticated": True,
