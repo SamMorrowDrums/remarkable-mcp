@@ -45,11 +45,24 @@ def ensure_config_dir():
 def register_and_get_token(one_time_code: str) -> str:
     """
     Register with reMarkable using a one-time code and return the token.
+
+    Get a code from: https://my.remarkable.com/device/desktop/connect
     """
     from rmapy.api import Client
+    from rmapy.exceptions import AuthError
 
     client = Client()
-    client.register_device(one_time_code)
+    try:
+        client.register_device(one_time_code)
+    except AuthError as e:
+        raise RuntimeError(
+            f"Registration failed: {e}\n\n"
+            "This usually means:\n"
+            "  1. The code has expired (codes are single-use and expire quickly)\n"
+            "  2. The code was already used\n"
+            "  3. The code was typed incorrectly\n\n"
+            "Get a new code from: https://my.remarkable.com/device/desktop/connect"
+        )
 
     rmapi_file = Path.home() / ".rmapi"
     if rmapi_file.exists():
