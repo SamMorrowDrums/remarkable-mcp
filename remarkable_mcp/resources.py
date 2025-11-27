@@ -15,7 +15,6 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Optional, Set
-from urllib.parse import quote
 
 from remarkable_mcp.server import mcp
 
@@ -158,17 +157,17 @@ def _register_document(client, doc, items_by_id=None, file_types: dict = None) -
     else:
         full_path = f"/{doc_name}"
 
-    # URL-encode the path for valid URI (spaces -> %20, etc.)
+    # Use the path directly - no URL encoding needed for JSON-RPC transport
+    # (MCP uses JSON-RPC, not HTTP, so URIs just need to be unique identifiers)
     uri_path = full_path.lstrip("/")
-    encoded_path = quote(uri_path, safe="/")  # Keep slashes unencoded for paths
 
     # Register text resource (use /// for empty netloc)
-    base_uri = f"remarkable:///{encoded_path}.txt"
+    base_uri = f"remarkable:///{uri_path}.txt"
     counter = 1
     final_uri = base_uri
     display_name = f"{full_path}.txt"
     while final_uri in _registered_uris:
-        final_uri = f"remarkable:///{encoded_path}_{counter}.txt"
+        final_uri = f"remarkable:///{uri_path}_{counter}.txt"
         display_name = f"{full_path} ({counter}).txt"
         counter += 1
 
@@ -188,12 +187,12 @@ def _register_document(client, doc, items_by_id=None, file_types: dict = None) -
         # Use pre-loaded file types (fast)
         file_type = file_types.get(doc_id)
         if file_type in ("pdf", "epub"):
-            raw_uri = f"remarkableraw:///{encoded_path}.{file_type}"
+            raw_uri = f"remarkableraw:///{uri_path}.{file_type}"
             raw_counter = 1
             final_raw_uri = raw_uri
             raw_display = f"{full_path}.{file_type}"
             while final_raw_uri in _registered_uris:
-                final_raw_uri = f"remarkableraw:///{encoded_path}_{raw_counter}.{file_type}"
+                final_raw_uri = f"remarkableraw:///{uri_path}_{raw_counter}.{file_type}"
                 raw_display = f"{full_path} ({raw_counter}).{file_type}"
                 raw_counter += 1
 
