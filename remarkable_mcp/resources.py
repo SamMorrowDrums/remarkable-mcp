@@ -3,7 +3,7 @@ MCP Resources for reMarkable tablet access.
 
 Provides:
 - remarkable://{path}.txt - extracted text from any document
-- remarkable-raw://{path} - raw PDF/EPUB file download (SSH mode only, enumerated)
+- remarkableraw://{path} - raw PDF/EPUB file download (SSH mode only, enumerated)
 
 Resources are loaded at startup (SSH) or in background batches (cloud).
 """
@@ -139,11 +139,9 @@ def _make_raw_resource(client, document, file_type: str):
     return raw_resource
 
 
-def _register_document(client, doc, items_by_id=None) -> bool:
+def _register_document(client, doc, items_by_id=None, file_types: dict = None) -> bool:
     """Register a single document as a text resource (and raw resource if PDF/EPUB)."""
     global _registered_docs, _registered_raw, _registered_uris
-
-    from remarkable_mcp.api import get_file_type
 
     doc_id = doc.ID
 
@@ -186,15 +184,16 @@ def _register_document(client, doc, items_by_id=None) -> bool:
     _registered_uris.add(final_uri)
 
     # Also register raw resource for PDF/EPUB files (SSH mode only)
-    if _is_ssh_mode():
-        file_type = get_file_type(client, doc)
+    if _is_ssh_mode() and file_types is not None:
+        # Use pre-loaded file types (fast)
+        file_type = file_types.get(doc_id)
         if file_type in ("pdf", "epub"):
-            raw_uri = f"remarkable-raw://{encoded_path}.{file_type}"
+            raw_uri = f"remarkableraw://{encoded_path}.{file_type}"
             raw_counter = 1
             final_raw_uri = raw_uri
             raw_display = f"{full_path}.{file_type}"
             while final_raw_uri in _registered_uris:
-                final_raw_uri = f"remarkable-raw://{encoded_path}_{raw_counter}.{file_type}"
+                final_raw_uri = f"remarkableraw://{encoded_path}_{raw_counter}.{file_type}"
                 raw_display = f"{full_path} ({raw_counter}).{file_type}"
                 raw_counter += 1
 
@@ -232,15 +231,22 @@ def load_all_documents_sync() -> int:
 
     logger.info(f"Found {len(documents)} documents")
 
+    # Pre-load all file types in a single SSH call (SSH mode optimization)
+    file_types = {}
+    if _is_ssh_mode() and hasattr(client, "get_all_file_types"):
+        logger.info("Pre-loading file types for raw resources...")
+        file_types = client.get_all_file_types()
+        logger.info(f"Loaded {len(file_types)} file types")
+
     for doc in documents:
         try:
-            _register_document(client, doc, items_by_id)
+            _register_document(client, doc, items_by_id, file_types if _is_ssh_mode() else None)
         except Exception as e:
             logger.debug(f"Failed to register '{doc.VissibleName}': {e}")
 
     logger.info(
-        f"Registered {len(_registered_docs)} text resources, "
-        f"{len(_registered_raw)} raw resources (PDF/EPUB)"
+        f"Registered {len(_registered_docs)} text resources"
+        + (f", {len(_registered_raw)} raw resources (PDF/EPUB)" if _registered_raw else "")
     )
     return len(_registered_docs)
 
@@ -300,13 +306,13 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
                 )
                 break
 
-            # Register this batch
+            # Register this batch (no file_types in cloud mode - raw resources not available)
             registered_count = 0
             for doc in batch_docs:
                 if shutdown_event.is_set():
                     break
                 try:
-                    if _register_document(client, doc, items_by_id):
+                    if _register_document(client, doc, items_by_id, file_types=None):
                         registered_count += 1
                 except Exception as e:
                     logger.debug(f"Failed to register document '{doc.VissibleName}': {e}")

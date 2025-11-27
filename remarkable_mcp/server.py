@@ -62,7 +62,7 @@ Documents are registered as resources for direct access:
 
 You're connected directly to the tablet via SSH. This enables:
 - **Raw file access**: Use `content_type="raw"` to get original PDF/EPUB text
-- **Raw resources**: `remarkable-raw://{path}.pdf` or `.epub` for original files
+- **Raw resources**: `remarkableraw://{path}.pdf` or `.epub` for original files
 - **Faster operations**: Direct tablet access is 10-100x faster than cloud
 
 ### Content Types for remarkable_read

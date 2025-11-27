@@ -241,8 +241,8 @@ Documents are automatically registered as MCP resources on startup.
 | URI Scheme | Description |
 |------------|-------------|
 | `remarkable://{path}.txt` | Extracted text content from any document |
-| `remarkable-raw://{path}.pdf` | Raw PDF file (SSH mode only) |
-| `remarkable-raw://{path}.epub` | Raw EPUB file (SSH mode only) |
+| `remarkableraw://{path}.pdf` | Raw PDF file (SSH mode only) |
+| `remarkableraw://{path}.epub` | Raw EPUB file (SSH mode only) |
 
 ### Text Resources (`remarkable://`)
 
@@ -251,7 +251,7 @@ Each document is registered with its full path. Returns extracted text content:
 - **Notebooks**: Typed text (Type Folio), highlights, and annotations
 - Handwritten content via OCR (if enabled)
 
-### Raw Resources (`remarkable-raw://`)
+### Raw Resources (`remarkableraw://`)
 
 PDF and EPUB files are also registered as raw resources in SSH mode. Returns the original file as base64-encoded data. Cloud API doesn't provide access to source files, so raw resources are only available in SSH mode.
 
