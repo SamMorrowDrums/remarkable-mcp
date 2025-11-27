@@ -4,7 +4,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that 
 
 ## Features
 
-- 🔐 **Authentication** - Register and authenticate with reMarkable Cloud
+- 🔐 **Authentication** - Register once, use token in config
 - 📁 **Browse Files** - List and navigate your reMarkable folders and documents
 - 🔍 **Search** - Search for documents by name
 - 📄 **Get Documents** - Download and extract text content from documents
@@ -20,7 +20,9 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that 
 git clone https://github.com/SamMorrowDrums/remarkable-mcp.git
 cd remarkable-mcp
 
-# Install with uv
+# Create venv and install
+uv venv
+source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 uv pip install -e .
 ```
 
@@ -30,31 +32,38 @@ uv pip install -e .
 pip install -e .
 ```
 
-## Configuration
+## Setup
 
-### VS Code / Cursor
+### Step 1: Get a One-Time Code
 
-Add to your `.vscode/mcp.json`:
+1. Go to https://my.remarkable.com/device/browser/connect
+2. Generate a one-time code (8 characters like `abcd1234`)
 
-```json
-{
-  "servers": {
-    "remarkable": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/remarkable-mcp", "python", "server.py"]
-    }
-  }
-}
+### Step 2: Convert to Token
+
+Run the registration command to convert your one-time code to a persistent token:
+
+```bash
+cd remarkable-mcp
+source .venv/bin/activate
+python server.py --register YOUR_CODE
 ```
 
-Or if installed globally:
+This will output your token and show you how to configure it.
+
+### Step 3: Configure MCP
+
+Add to your `.vscode/mcp.json` with the token:
 
 ```json
 {
   "servers": {
     "remarkable": {
-      "command": "python",
-      "args": ["/path/to/remarkable-mcp/server.py"]
+      "command": "/path/to/remarkable-mcp/.venv/bin/python",
+      "args": ["/path/to/remarkable-mcp/server.py"],
+      "env": {
+        "REMARKABLE_TOKEN": "your-token-from-step-2"
+      }
     }
   }
 }
@@ -68,45 +77,32 @@ Add to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "remarkable": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/remarkable-mcp", "python", "server.py"]
+      "command": "/path/to/remarkable-mcp/.venv/bin/python",
+      "args": ["/path/to/remarkable-mcp/server.py"],
+      "env": {
+        "REMARKABLE_TOKEN": "your-token-from-step-2"
+      }
     }
   }
 }
 ```
 
-## Usage
-
-### First-time Setup
-
-1. Go to https://my.remarkable.com/device/browser/connect
-2. Generate a one-time code
-3. Use the `remarkable_register` tool with your code:
-
-```
-remarkable_register("abcd1234")
-```
-
-### Available Tools
+## Available Tools
 
 | Tool | Description |
 |------|-------------|
 | `remarkable_auth_status` | Check authentication status |
-| `remarkable_register` | Register with a one-time code |
 | `remarkable_list_files` | List files in a folder (use "/" for root) |
 | `remarkable_search` | Search for documents by name |
 | `remarkable_recent` | Get recently modified documents |
 | `remarkable_get_document` | Get document details and extract text |
 | `remarkable_download_pdf` | Download a document as a zip archive |
 
-### Example Workflow
+## Example Usage
 
 ```python
 # Check if authenticated
 remarkable_auth_status()
-
-# If not, register with one-time code from remarkable.com
-remarkable_register("your-code")
 
 # List all files
 remarkable_list_files("/")
@@ -131,11 +127,14 @@ The server can extract:
 
 For full handwriting OCR, consider using the [remarks](https://github.com/lucasrla/remarks) library on downloaded documents.
 
-## Configuration Directory
+## Authentication
 
-The server stores authentication tokens and cache in:
-- `~/.remarkable/token` - Authentication token
-- `~/.remarkable/cache/` - Local cache
+The server supports two authentication methods:
+
+1. **Environment Variable** (recommended): Set `REMARKABLE_TOKEN` in your MCP config
+2. **File-based**: Token stored in `~/.rmapi` (created by `--register`)
+
+The environment variable takes precedence if both are present.
 
 ## Development
 
