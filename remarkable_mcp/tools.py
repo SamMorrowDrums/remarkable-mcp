@@ -161,8 +161,6 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
     </examples>
     """
     try:
-        from remarkable_mcp.sync import Document, Folder
-
         client = get_rmapi()
         collection = client.get_meta_items()
         items_by_id = get_items_by_id(collection)
@@ -249,9 +247,9 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
         documents = []
 
         for item in sorted(items, key=lambda x: x.VissibleName.lower()):
-            if isinstance(item, Folder):
+            if item.is_folder:
                 folders.append({"name": item.VissibleName, "id": item.ID})
-            elif isinstance(item, Document):
+            else:
                 documents.append(
                     {
                         "name": item.VissibleName,
@@ -305,8 +303,6 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
     </examples>
     """
     try:
-        from remarkable_mcp.sync import Document
-
         client = get_rmapi()
         collection = client.get_meta_items()
         items_by_id = get_items_by_id(collection)
@@ -315,7 +311,7 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
         limit = min(max(1, limit), 50)
 
         # Get documents sorted by modified date
-        documents = [item for item in collection if isinstance(item, Document)]
+        documents = [item for item in collection if not item.is_folder]
         documents.sort(
             key=lambda x: (
                 x.ModifiedClient if hasattr(x, "ModifiedClient") and x.ModifiedClient else ""
