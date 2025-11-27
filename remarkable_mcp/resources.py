@@ -1,129 +1,264 @@
 """
 MCP Resources for reMarkable tablet access.
 
-Dynamically registers recent documents as resources on startup.
+Provides:
+- remarkable://doc/{name} - template for any document by name
+- Individual resources lazily loaded in background (batches of 10)
 """
 
-import json
+import asyncio
 import logging
 import tempfile
 from pathlib import Path
+from typing import Optional, Set
 
 from remarkable_mcp.server import mcp
 
 logger = logging.getLogger(__name__)
 
+# Background loader state
+_registered_docs: Set[str] = set()
 
-def register_document_resources():
-    """
-    Dynamically register recent documents as MCP resources.
 
-    Called on startup if API connection exists. Each recent document
-    becomes its own resource with URI like remarkable://doc/{name}.
-    """
+@mcp.resource(
+    "remarkable://doc/{name}",
+    name="Document by Name",
+    description="Read a reMarkable document by name. Use remarkable_browse() to find documents.",
+    mime_type="text/plain",
+)
+def document_resource(name: str) -> str:
+    """Return document content by name (fetched on demand)."""
     try:
-        from remarkable_mcp.api import get_item_path, get_items_by_id, get_rmapi
+        from remarkable_mcp.api import get_rmapi
         from remarkable_mcp.extract import extract_text_from_document_zip
-        from remarkable_mcp.sync import Document
 
         client = get_rmapi()
         collection = client.get_meta_items()
-        items_by_id = get_items_by_id(collection)
 
-        # Get documents sorted by modified date
-        documents = [item for item in collection if isinstance(item, Document)]
-        documents.sort(
-            key=lambda x: (
-                x.ModifiedClient if hasattr(x, "ModifiedClient") and x.ModifiedClient else ""
-            ),
-            reverse=True,
-        )
+        # Find document by name
+        target_doc = None
+        for item in collection:
+            if not item.is_folder and item.VissibleName == name:
+                target_doc = item
+                break
 
-        # Register each recent document as a resource
-        for doc in documents[:10]:
-            doc_name = doc.VissibleName
-            doc_modified = doc.ModifiedClient if hasattr(doc, "ModifiedClient") else None
+        if not target_doc:
+            return f"Document not found: '{name}'"
 
-            # Create a closure to capture the document
-            def make_resource_fn(document):
-                def resource_fn() -> str:
-                    try:
-                        raw_doc = client.download(document)
+        # Download and extract
+        raw_doc = client.download(target_doc)
 
-                        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                            tmp.write(raw_doc.content)
-                            tmp_path = Path(tmp.name)
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(raw_doc)
+            tmp_path = Path(tmp.name)
 
-                        try:
-                            content = extract_text_from_document_zip(tmp_path, include_ocr=False)
-                        finally:
-                            tmp_path.unlink(missing_ok=True)
+        try:
+            content = extract_text_from_document_zip(tmp_path, include_ocr=False)
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
-                        # Combine all text content
-                        text_parts = []
+        # Combine all text content
+        text_parts = []
 
-                        if content["typed_text"]:
-                            text_parts.extend(content["typed_text"])
+        if content["typed_text"]:
+            text_parts.extend(content["typed_text"])
 
-                        if content["highlights"]:
-                            text_parts.append("\n--- Highlights ---")
-                            text_parts.extend(content["highlights"])
+        if content["highlights"]:
+            text_parts.append("\n--- Highlights ---")
+            text_parts.extend(content["highlights"])
 
-                        return "\n\n".join(text_parts) if text_parts else "(No text content found)"
-
-                    except Exception as e:
-                        return f"Error reading document: {e}"
-
-                return resource_fn
-
-            # Register the resource
-            resource_uri = f"remarkable://doc/{doc_name}"
-            description = f"Content from '{doc_name}'"
-            if doc_modified:
-                description += f" (modified: {doc_modified})"
-
-            mcp.resource(
-                resource_uri,
-                name=doc_name,
-                description=description,
-                mime_type="text/plain",
-            )(make_resource_fn(doc))
-
-        logger.info(f"Registered {min(len(documents), 10)} document resources")
-
-        # Also register a folder structure resource
-        @mcp.resource(
-            "remarkable://folders",
-            name="Folder Structure",
-            description="Your reMarkable folder hierarchy",
-            mime_type="application/json",
-        )
-        def folders_resource() -> str:
-            """Return folder structure as a resource."""
-            from remarkable_mcp.sync import Folder
-
-            try:
-                folders = []
-                for item in collection:
-                    if isinstance(item, Folder):
-                        folders.append(
-                            {
-                                "name": item.VissibleName,
-                                "path": get_item_path(item, items_by_id),
-                                "id": item.ID,
-                            }
-                        )
-
-                folders.sort(key=lambda x: x["path"])
-                return json.dumps({"folders": folders}, indent=2)
-
-            except Exception as e:
-                return json.dumps({"error": str(e)})
+        return "\n\n".join(text_parts) if text_parts else "(No text content found)"
 
     except Exception as e:
-        logger.warning(f"Could not register document resources: {e}")
-        logger.info("Resources will be available after authentication via remarkable_status()")
+        return f"Error reading document: {e}"
 
 
-# Register resources on module load (if API is available)
-register_document_resources()
+# Completions handler for document names
+@mcp.completion()
+async def complete_document_name(ref, argument, context):
+    """Provide completions for document names."""
+    from mcp.types import Completion, ResourceTemplateReference
+
+    # Only handle our document template
+    if not isinstance(ref, ResourceTemplateReference):
+        return None
+    if ref.uri_template != "remarkable://doc/{name}":
+        return None
+    if argument.name != "name":
+        return None
+
+    try:
+        from remarkable_mcp.api import get_rmapi
+
+        client = get_rmapi()
+        collection = client.get_meta_items()
+
+        # Get all document names
+        doc_names = [item.VissibleName for item in collection if not item.is_folder]
+
+        # Filter by partial value if provided
+        partial = argument.value or ""
+        if partial:
+            partial_lower = partial.lower()
+            doc_names = [n for n in doc_names if partial_lower in n.lower()]
+
+        # Return up to 50 matches, sorted
+        return Completion(values=sorted(doc_names)[:50])
+
+    except Exception:
+        return Completion(values=[])
+
+
+def _make_doc_resource(client, document):
+    """Create a resource function for a document."""
+    from remarkable_mcp.extract import extract_text_from_document_zip
+
+    def doc_resource() -> str:
+        try:
+            raw = client.download(document)
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                tmp.write(raw)
+                tmp_path = Path(tmp.name)
+            try:
+                content = extract_text_from_document_zip(tmp_path, include_ocr=False)
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+            text_parts = []
+            if content["typed_text"]:
+                text_parts.extend(content["typed_text"])
+            if content["highlights"]:
+                text_parts.append("\n--- Highlights ---")
+                text_parts.extend(content["highlights"])
+            return "\n\n".join(text_parts) if text_parts else "(No text content)"
+        except Exception as e:
+            return f"Error: {e}"
+
+    return doc_resource
+
+
+def _register_document(client, doc) -> bool:
+    """Register a single document as a resource."""
+    global _registered_docs
+
+    doc_name = doc.VissibleName
+
+    # Skip if already registered
+    if doc_name in _registered_docs:
+        return False
+
+    uri = f"remarkable://doc/{doc_name}"
+    desc = f"Content from '{doc_name}'"
+    if doc.ModifiedClient:
+        desc += f" (modified: {doc.ModifiedClient})"
+
+    mcp.resource(uri, name=doc_name, description=desc, mime_type="text/plain")(
+        _make_doc_resource(client, doc)
+    )
+
+    _registered_docs.add(doc_name)
+    return True
+
+
+async def _load_documents_background(shutdown_event: asyncio.Event):
+    """
+    Background task to lazily load all documents in batches of 10.
+
+    Runs asynchronously, yielding control between batches to keep
+    the server responsive. Cancels gracefully on shutdown.
+    """
+    batch_size = 10
+    offset = 0
+
+    try:
+        from remarkable_mcp.api import get_rmapi
+
+        client = get_rmapi()
+
+        while True:
+            # Check for shutdown
+            if shutdown_event.is_set():
+                logger.info("Background document loader cancelled by shutdown")
+                break
+
+            # Fetch next batch - run sync code in executor to not block
+            loop = asyncio.get_event_loop()
+            try:
+                items = await loop.run_in_executor(
+                    None, lambda: client.get_meta_items(limit=offset + batch_size)
+                )
+            except Exception as e:
+                logger.warning(f"Error fetching documents: {e}")
+                break
+
+            # Get documents from this batch (skip folders and already-fetched)
+            documents = [item for item in items if not item.is_folder]
+            batch_docs = documents[offset : offset + batch_size]
+
+            if not batch_docs:
+                # No more documents
+                logger.info(
+                    f"Background loader complete: {len(_registered_docs)} documents registered"
+                )
+                break
+
+            # Register this batch
+            registered_count = 0
+            for doc in batch_docs:
+                if shutdown_event.is_set():
+                    break
+                if _register_document(client, doc):
+                    registered_count += 1
+
+            if registered_count > 0:
+                logger.debug(
+                    f"Registered batch of {registered_count} documents "
+                    f"(total: {len(_registered_docs)})"
+                )
+
+            offset += batch_size
+
+            # Yield control - allow other async tasks to run
+            # Small delay to be gentle on the API
+            await asyncio.sleep(0.1)
+
+    except asyncio.CancelledError:
+        logger.info("Background document loader cancelled")
+        raise
+    except Exception as e:
+        logger.warning(f"Background document loader error: {e}")
+
+
+def start_background_loader() -> Optional[asyncio.Task]:
+    """Start the background document loader task. Returns the task."""
+    shutdown_event = asyncio.Event()
+
+    try:
+        task = asyncio.create_task(_load_documents_background(shutdown_event))
+        # Store the event on the task so we can access it later
+        task.shutdown_event = shutdown_event  # type: ignore[attr-defined]
+        logger.info("Started background document loader")
+        return task
+    except Exception as e:
+        logger.warning(f"Could not start background loader: {e}")
+        return None
+
+
+async def stop_background_loader(task: Optional[asyncio.Task]):
+    """Stop the background document loader task."""
+    if task is None:
+        return
+
+    # Signal shutdown via event
+    if hasattr(task, "shutdown_event"):
+        task.shutdown_event.set()
+
+    # Cancel and wait
+    if not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    logger.info("Stopped background document loader")
