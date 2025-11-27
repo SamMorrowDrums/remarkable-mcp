@@ -2,7 +2,7 @@
 
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server for accessing your reMarkable tablet data through the reMarkable Cloud.
 
-<!-- mcp-name: io.github.sammorrowdrums/remarkable -->
+<!-- mcp-name: io.github.SamMorrowDrums/remarkable -->
 
 ## Quick Install
 
