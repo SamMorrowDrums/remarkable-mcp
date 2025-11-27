@@ -36,6 +36,9 @@ dev = [
     "black>=23.0.0",
     "ruff>=0.1.0",
 ]
+ocr = [
+    "google-cloud-vision>=3.0.0",
+]
 
 [project.scripts]
 remarkable-mcp = "remarkable_mcp.cli:main"

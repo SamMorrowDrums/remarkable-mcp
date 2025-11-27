@@ -144,13 +144,136 @@ def extract_text_from_document_zip(zip_path: Path, include_ocr: bool = False) ->
 def extract_handwriting_ocr(rm_files: List[Path]) -> Optional[List[str]]:
     """
     Extract handwritten text using OCR.
-    Requires optional OCR dependencies (pytesseract, rmc, cairosvg).
+
+    Supports multiple backends (set REMARKABLE_OCR_BACKEND env var):
+    - "google" (default if available): Google Cloud Vision - best for handwriting
+    - "tesseract": pytesseract - basic OCR, requires rmc + cairosvg
+
+    Requires optional OCR dependencies.
+    """
+    import importlib.util
+    import os
+
+    backend = os.environ.get("REMARKABLE_OCR_BACKEND", "auto").lower()
+
+    # Auto-detect best available backend
+    if backend == "auto":
+        if importlib.util.find_spec("google.cloud.vision") is not None:
+            backend = "google"
+        else:
+            backend = "tesseract"
+
+    if backend == "google":
+        return _ocr_google_vision(rm_files)
+    else:
+        return _ocr_tesseract(rm_files)
+
+
+def _ocr_google_vision(rm_files: List[Path]) -> Optional[List[str]]:
+    """
+    OCR using Google Cloud Vision API.
+    Best quality for handwriting recognition.
+
+    Requires: pip install google-cloud-vision
+    And: GOOGLE_APPLICATION_CREDENTIALS env var or default credentials
     """
     try:
         import subprocess
+        import tempfile
+
+        from google.cloud import vision
+
+        client = vision.ImageAnnotatorClient()
+        ocr_results = []
+
+        for rm_file in rm_files:
+            tmp_svg_path = None
+            tmp_png_path = None
+            try:
+                # Create temp files
+                with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
+                    tmp_svg_path = Path(tmp_svg.name)
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
+                    tmp_png_path = Path(tmp_png.name)
+
+                # Convert .rm to SVG using rmc
+                result = subprocess.run(
+                    ["rmc", "-t", "svg", "-o", str(tmp_svg_path), str(rm_file)],
+                    capture_output=True,
+                    timeout=30,
+                )
+                if result.returncode != 0:
+                    continue
+
+                # Convert SVG to PNG using cairosvg
+                try:
+                    import cairosvg
+
+                    cairosvg.svg2png(
+                        url=str(tmp_svg_path),
+                        write_to=str(tmp_png_path),
+                        output_width=1404,  # reMarkable width
+                        output_height=1872,  # reMarkable height
+                    )
+                except ImportError:
+                    # Fall back to inkscape
+                    result = subprocess.run(
+                        ["inkscape", str(tmp_svg_path), "--export-filename", str(tmp_png_path)],
+                        capture_output=True,
+                        timeout=30,
+                    )
+                    if result.returncode != 0:
+                        continue
+
+                # Send to Google Vision API
+                with open(tmp_png_path, "rb") as f:
+                    content = f.read()
+
+                image = vision.Image(content=content)
+
+                # Use DOCUMENT_TEXT_DETECTION for best handwriting results
+                response = client.document_text_detection(image=image)
+
+                if response.error.message:
+                    continue
+
+                if response.full_text_annotation.text:
+                    ocr_results.append(response.full_text_annotation.text.strip())
+
+            except subprocess.TimeoutExpired:
+                pass
+            except FileNotFoundError:
+                # rmc not installed
+                return None
+            finally:
+                if tmp_svg_path:
+                    tmp_svg_path.unlink(missing_ok=True)
+                if tmp_png_path:
+                    tmp_png_path.unlink(missing_ok=True)
+
+        return ocr_results if ocr_results else None
+
+    except ImportError:
+        # google-cloud-vision not installed, fall back to tesseract
+        return _ocr_tesseract(rm_files)
+    except Exception:
+        # API error, fall back to tesseract
+        return _ocr_tesseract(rm_files)
+
+
+def _ocr_tesseract(rm_files: List[Path]) -> Optional[List[str]]:
+    """
+    OCR using Tesseract.
+    Basic quality - designed for printed text, not handwriting.
+
+    Requires: pytesseract, rmc, cairosvg (or inkscape)
+    """
+    try:
+        import subprocess
+        import tempfile
 
         import pytesseract
-        from PIL import Image
+        from PIL import Image, ImageFilter, ImageOps
 
         ocr_results = []
 
@@ -173,34 +296,50 @@ def extract_handwriting_ocr(rm_files: List[Path]) -> Optional[List[str]]:
                 if result.returncode != 0:
                     continue
 
-                # Convert SVG to PNG using cairosvg or inkscape
+                # Convert SVG to PNG with higher resolution for better OCR
                 try:
                     import cairosvg
 
+                    # Use 2x resolution for better OCR
                     cairosvg.svg2png(
                         url=str(tmp_svg_path),
                         write_to=str(tmp_png_path),
-                        output_width=1404,  # reMarkable width
-                        output_height=1872,  # reMarkable height
+                        output_width=2808,  # 2x reMarkable width
+                        output_height=3744,  # 2x reMarkable height
                     )
                 except ImportError:
-                    # Fall back to inkscape if cairosvg not available
                     result = subprocess.run(
-                        [
-                            "inkscape",
-                            str(tmp_svg_path),
-                            "--export-filename",
-                            str(tmp_png_path),
-                        ],
+                        ["inkscape", str(tmp_svg_path), "--export-filename", str(tmp_png_path)],
                         capture_output=True,
                         timeout=30,
                     )
                     if result.returncode != 0:
                         continue
 
-                # Run OCR on the PNG
+                # Preprocess image for better OCR
                 img = Image.open(tmp_png_path)
-                text = pytesseract.image_to_string(img)
+
+                # Convert to grayscale
+                img = img.convert("L")
+
+                # Invert if dark background (reMarkable renders as dark on light)
+                # Check average brightness
+                avg_brightness = sum(img.getdata()) / len(list(img.getdata()))
+                if avg_brightness < 128:
+                    img = ImageOps.invert(img)
+
+                # Increase contrast
+                img = ImageOps.autocontrast(img, cutoff=2)
+
+                # Slight sharpening
+                img = img.filter(ImageFilter.SHARPEN)
+
+                # Run OCR with optimized settings for sparse handwriting
+                # PSM 11 = Sparse text - find as much text as possible
+                # PSM 6 = Uniform block of text (alternative)
+                custom_config = r"--psm 11 --oem 3"
+                text = pytesseract.image_to_string(img, config=custom_config)
+
                 if text.strip():
                     ocr_results.append(text.strip())
 
@@ -210,7 +349,6 @@ def extract_handwriting_ocr(rm_files: List[Path]) -> Optional[List[str]]:
                 # rmc not installed
                 return None
             finally:
-                # Clean up temp files
                 if tmp_svg_path:
                     tmp_svg_path.unlink(missing_ok=True)
                 if tmp_png_path:
