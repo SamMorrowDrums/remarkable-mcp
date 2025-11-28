@@ -505,26 +505,62 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
             path_parts = [p for p in path.strip("/").split("/") if p]
             current_parent = ""
 
-            for part in path_parts:
+            for i, part in enumerate(path_parts):
                 part_lower = part.lower()
                 found = False
+                found_document = None
+
                 for item in items_by_parent.get(current_parent, []):
-                    if item.VissibleName.lower() == part_lower and item.is_folder:
-                        current_parent = item.ID
-                        found = True
-                        break
+                    if item.VissibleName.lower() == part_lower:
+                        if item.is_folder:
+                            current_parent = item.ID
+                            found = True
+                            break
+                        else:
+                            # Found a document with this name
+                            found_document = item
 
                 if not found:
+                    # Check if it's a document (only valid as the last path part)
+                    if found_document and i == len(path_parts) - 1:
+                        # User is trying to browse a document - suggest remarkable_read
+                        doc_path = get_item_path(found_document, items_by_id)
+                        parent_path = "/".join([""] + path_parts[:-1]) or "/"
+                        return make_error(
+                            error_type="path_is_document",
+                            message=f"'{part}' is a document, not a folder.",
+                            suggestion=(
+                                f"Use remarkable_read('{doc_path}') to read this document, "
+                                f"or remarkable_browse('{parent_path}') "
+                                "to browse the parent folder."
+                            ),
+                        )
+
                     # Folder not found - suggest alternatives
                     available_folders = [
                         item.VissibleName
                         for item in items_by_parent.get(current_parent, [])
                         if item.is_folder
                     ]
+                    available_docs = [
+                        item.VissibleName
+                        for item in items_by_parent.get(current_parent, [])
+                        if not item.is_folder
+                    ]
+                    suggestion = "Use remarkable_browse('/') to see root folder contents."
+                    if available_docs:
+                        # Check if user might be looking for a document
+                        for doc_name in available_docs:
+                            if doc_name.lower() == part_lower:
+                                suggestion = (
+                                    f"'{doc_name}' is a document. "
+                                    f"Use remarkable_read('{doc_name}') to read it."
+                                )
+                                break
                     return make_error(
                         error_type="folder_not_found",
                         message=f"Folder not found: '{part}'",
-                        suggestion=("Use remarkable_browse('/') to see root folder contents."),
+                        suggestion=suggestion,
                         did_you_mean=(available_folders[:5] if available_folders else None),
                     )
 
