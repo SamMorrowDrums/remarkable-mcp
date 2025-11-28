@@ -6,6 +6,7 @@ Provides:
 - remarkableraw:///{path}.txt - raw PDF/EPUB text content (SSH mode only, enumerated)
 
 Resources are loaded at startup (SSH) or in background batches (cloud).
+Respects REMARKABLE_ROOT_PATH environment variable for folder filtering.
 """
 
 import asyncio
@@ -18,6 +19,51 @@ from typing import Optional, Set
 from remarkable_mcp.server import mcp
 
 logger = logging.getLogger(__name__)
+
+
+def _get_root_path() -> str:
+    """Get the configured root path filter, or '/' for full access.
+
+    Handles: empty string, '/', '/Work', '/Work/', 'Work' -> normalized path
+    """
+    root = os.environ.get("REMARKABLE_ROOT_PATH", "").strip()
+    # Empty or "/" means full access
+    if not root or root == "/":
+        return "/"
+    # Normalize: ensure starts with / and no trailing slash
+    if not root.startswith("/"):
+        root = "/" + root
+    if root.endswith("/"):
+        root = root.rstrip("/")
+    return root
+
+
+def _is_within_root(path: str, root: str) -> bool:
+    """Check if a path is within the configured root (case-insensitive)."""
+    if root == "/":
+        return True
+    # Path must equal root or be a child of root (case-insensitive)
+    path_lower = path.lower()
+    root_lower = root.lower()
+    return path_lower == root_lower or path_lower.startswith(root_lower + "/")
+
+
+def _apply_root_filter(path: str, root: str) -> str:
+    """Apply root filter to a path for display/URI purposes.
+
+    If root is '/Work', then '/Work/Project' becomes '/Project' in output.
+    Case-insensitive matching, preserves original case in output.
+    """
+    if root == "/":
+        return path
+    path_lower = path.lower()
+    root_lower = root.lower()
+    if path_lower == root_lower:
+        return "/"
+    if path_lower.startswith(root_lower + "/"):
+        return path[len(root) :]
+    return path
+
 
 # Background loader state
 _registered_docs: Set[str] = set()  # Track document IDs for text resources
@@ -142,8 +188,18 @@ def _make_raw_resource(client, document, file_type: str):
     return raw_resource
 
 
-def _register_document(client, doc, items_by_id=None, file_types: dict = None) -> bool:
-    """Register a single document as a text resource (and raw resource if PDF/EPUB)."""
+def _register_document(
+    client, doc, items_by_id=None, file_types: dict = None, root: str = "/"
+) -> bool:
+    """Register a single document as a text resource (and raw resource if PDF/EPUB).
+
+    Args:
+        client: The reMarkable API client
+        doc: Document metadata object
+        items_by_id: Dict mapping IDs to items for path resolution
+        file_types: Dict mapping doc IDs to file types (for raw resources)
+        root: Root path filter (documents outside root are skipped)
+    """
     global _registered_docs, _registered_raw, _registered_uris
 
     doc_id = doc.ID
@@ -165,21 +221,27 @@ def _register_document(client, doc, items_by_id=None, file_types: dict = None) -
     else:
         full_path = f"/{doc_name}"
 
-    # Use the path directly - no URL encoding needed for JSON-RPC transport
-    # (MCP uses JSON-RPC, not HTTP, so URIs just need to be unique identifiers)
-    uri_path = full_path.lstrip("/")
+    # Filter by root path
+    if not _is_within_root(full_path, root):
+        return False
+
+    # Apply root filter for display paths (e.g., /Work/Project -> /Project)
+    display_path = _apply_root_filter(full_path, root)
+
+    # Use the filtered path for URIs
+    uri_path = display_path.lstrip("/")
 
     # Register text resource (use /// for empty netloc)
     base_uri = f"remarkable:///{uri_path}.txt"
     counter = 1
     final_uri = base_uri
-    display_name = f"{full_path}.txt"
+    display_name = f"{display_path}.txt"
     while final_uri in _registered_uris:
         final_uri = f"remarkable:///{uri_path}_{counter}.txt"
-        display_name = f"{full_path} ({counter}).txt"
+        display_name = f"{display_path} ({counter}).txt"
         counter += 1
 
-    desc = f"Content from '{full_path}'"
+    desc = f"Content from '{display_path}'"
     if doc.ModifiedClient:
         desc += f" (modified: {doc.ModifiedClient})"
 
@@ -199,13 +261,13 @@ def _register_document(client, doc, items_by_id=None, file_types: dict = None) -
             raw_uri = f"remarkableraw:///{uri_path}.{file_type}.txt"
             raw_counter = 1
             final_raw_uri = raw_uri
-            raw_display = f"{full_path} (raw {file_type.upper()}).txt"
+            raw_display = f"{display_path} (raw {file_type.upper()}).txt"
             while final_raw_uri in _registered_uris:
                 final_raw_uri = f"remarkableraw:///{uri_path}_{raw_counter}.{file_type}.txt"
-                raw_display = f"{full_path} (raw {file_type.upper()}) ({raw_counter}).txt"
+                raw_display = f"{display_path} (raw {file_type.upper()}) ({raw_counter}).txt"
                 raw_counter += 1
 
-            raw_desc = f"Raw {file_type.upper()} text content: '{full_path}'"
+            raw_desc = f"Raw {file_type.upper()} text content: '{display_path}'"
             if doc.ModifiedClient:
                 raw_desc += f" (modified: {doc.ModifiedClient})"
 
@@ -227,6 +289,8 @@ def load_all_documents_sync() -> int:
     Load and register all documents synchronously.
     Used for SSH mode where loading is fast.
     Returns the number of documents registered.
+
+    Respects REMARKABLE_ROOT_PATH environment variable.
     """
     global _registered_docs, _registered_raw
 
@@ -236,6 +300,10 @@ def load_all_documents_sync() -> int:
     items = client.get_meta_items()
     items_by_id = get_items_by_id(items)
     documents = [item for item in items if not item.is_folder]
+
+    root = _get_root_path()
+    if root != "/":
+        logger.info(f"Root path filter: {root}")
 
     logger.info(f"Found {len(documents)} documents")
 
@@ -248,13 +316,20 @@ def load_all_documents_sync() -> int:
 
     for doc in documents:
         try:
-            _register_document(client, doc, items_by_id, file_types if _is_ssh_mode() else None)
+            _register_document(
+                client,
+                doc,
+                items_by_id,
+                file_types if _is_ssh_mode() else None,
+                root=root,
+            )
         except Exception as e:
             logger.debug(f"Failed to register '{doc.VissibleName}': {e}")
 
     logger.info(
         f"Registered {len(_registered_docs)} text resources"
         + (f", {len(_registered_raw)} raw resources (PDF/EPUB)" if _registered_raw else "")
+        + (f" (filtered to {root})" if root != "/" else "")
     )
     return len(_registered_docs)
 
@@ -263,6 +338,8 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
     """
     Background task to load and register documents in batches.
     Used for Cloud mode only - SSH mode uses load_all_documents_sync().
+
+    Respects REMARKABLE_ROOT_PATH environment variable.
     """
     try:
         from remarkable_mcp.api import get_items_by_id, get_rmapi
@@ -275,6 +352,10 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
         consecutive_errors = 0
         max_consecutive_errors = 3
         items_by_id = {}  # Build incrementally
+
+        root = _get_root_path()
+        if root != "/":
+            logger.info(f"Root path filter: {root}")
 
         while True:
             # Check for shutdown
@@ -311,6 +392,7 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
                 # No more documents
                 logger.info(
                     f"Background loader complete: {len(_registered_docs)} documents registered"
+                    + (f" (filtered to {root})" if root != "/" else "")
                 )
                 break
 
@@ -320,7 +402,7 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
                 if shutdown_event.is_set():
                     break
                 try:
-                    if _register_document(client, doc, items_by_id, file_types=None):
+                    if _register_document(client, doc, items_by_id, file_types=None, root=root):
                         registered_count += 1
                 except Exception as e:
                     logger.debug(f"Failed to register document '{doc.VissibleName}': {e}")

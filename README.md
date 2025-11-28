@@ -222,6 +222,39 @@ Tesseract is designed for printed text, not handwriting. Use only as a fallback 
 
 ---
 
+## Advanced Configuration
+
+### Root Path Filtering
+
+Limit the MCP server to a specific folder on your reMarkable. All operations will be scoped to this folder:
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--ssh"],
+      "env": {
+        "REMARKABLE_ROOT_PATH": "/Work",
+        "GOOGLE_VISION_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+With this configuration:
+- `remarkable_browse("/")` shows contents of `/Work`
+- `remarkable_browse("/Projects")` shows `/Work/Projects`
+- Documents outside `/Work` are not accessible
+
+Useful for:
+- Focusing on work documents during office hours
+- Separating personal and professional notes
+- Limiting scope for specific AI workflows
+
+---
+
 ## Use Cases
 
 ### Research & Writing
