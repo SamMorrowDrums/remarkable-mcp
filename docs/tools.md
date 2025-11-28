@@ -14,6 +14,23 @@ This document provides detailed documentation for all MCP tools provided by rema
 
 All tools are **read-only** and return structured JSON with hints for logical next actions.
 
+## Root Path Filtering
+
+All tools respect the `REMARKABLE_ROOT_PATH` environment variable. When configured, operations are scoped to that folder:
+
+```json
+{
+  "env": {
+    "REMARKABLE_ROOT_PATH": "/Work"
+  }
+}
+```
+
+With this configuration:
+- Paths in responses are relative to the root (e.g., `/Work/Project` appears as `/Project`)
+- Documents outside the root are not accessible
+- `remarkable_status()` shows the configured root and document count within that folder
+
 ---
 
 ## remarkable_read
@@ -271,8 +288,9 @@ remarkable_status()
   "connection": "SSH to root@10.11.99.1:22",
   "status": "connected",
   "document_count": 142,
+  "root_path": "/Work",
   "ocr_backend": "google",
-  "_hint": "Connection healthy. Use remarkable_browse('/') to explore your library."
+  "_hint": "Connection healthy. Filtered to root: /Work. Use remarkable_browse('/') to explore your library."
 }
 ```
 
@@ -283,7 +301,8 @@ remarkable_status()
 | `authenticated` | Whether authentication succeeded |
 | `transport` | `"ssh"` or `"cloud"` |
 | `connection` | Connection details |
-| `document_count` | Total documents in library |
+| `document_count` | Total documents in library (filtered by root if configured) |
+| `root_path` | Configured root path filter (only present if set) |
 | `ocr_backend` | Which OCR backend is configured |
 
 ---
