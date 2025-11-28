@@ -121,10 +121,15 @@ async def lifespan(app: FastMCP) -> AsyncIterator[None]:
 
     if ssh_mode:
         # SSH mode: load all documents in executor to not block event loop
+        # Wrap in try/except so server starts even if connection fails
         logger.info("SSH mode: loading documents...")
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, load_all_documents_sync)
-        logger.info("SSH mode: documents loaded")
+        try:
+            await loop.run_in_executor(None, load_all_documents_sync)
+            logger.info("SSH mode: documents loaded")
+        except Exception as e:
+            logger.warning(f"SSH mode: failed to load documents on startup: {e}")
+            logger.warning("Server will start, but tools will show connection errors")
     else:
         # Cloud mode: load in background to not block startup
         logger.info("Cloud mode: starting background loader...")
