@@ -33,12 +33,18 @@ from remarkable_mcp.server import mcp
 
 
 def _get_root_path() -> str:
-    """Get the configured root path filter, or '/' for full access."""
-    root = os.environ.get("REMARKABLE_ROOT_PATH", "/").strip()
-    # Normalize: ensure starts with / and no trailing slash (unless root)
+    """Get the configured root path filter, or '/' for full access.
+
+    Handles: empty string, '/', '/Work', '/Work/', 'Work' -> normalized path
+    """
+    root = os.environ.get("REMARKABLE_ROOT_PATH", "").strip()
+    # Empty or "/" means full access
+    if not root or root == "/":
+        return "/"
+    # Normalize: ensure starts with / and no trailing slash
     if not root.startswith("/"):
         root = "/" + root
-    if root != "/" and root.endswith("/"):
+    if root.endswith("/"):
         root = root.rstrip("/")
     return root
 
