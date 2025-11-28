@@ -2,8 +2,6 @@
 
 This document outlines potential future features for remarkable-mcp. These are ideas under consideration, not commitments.
 
-## Planned Features
-
 ### Write Support
 
 Currently, remarkable-mcp is read-only. Future versions may add:

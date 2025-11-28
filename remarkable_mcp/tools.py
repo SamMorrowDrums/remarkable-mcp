@@ -5,6 +5,7 @@ All tools are read-only and idempotent - they only retrieve data from the
 reMarkable Cloud and do not modify any documents.
 """
 
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -29,6 +30,55 @@ from remarkable_mcp.extract import (
 )
 from remarkable_mcp.responses import make_error, make_response
 from remarkable_mcp.server import mcp
+
+
+def _get_root_path() -> str:
+    """Get the configured root path filter, or '/' for full access."""
+    root = os.environ.get("REMARKABLE_ROOT_PATH", "/").strip()
+    # Normalize: ensure starts with / and no trailing slash (unless root)
+    if not root.startswith("/"):
+        root = "/" + root
+    if root != "/" and root.endswith("/"):
+        root = root.rstrip("/")
+    return root
+
+
+def _is_within_root(path: str, root: str) -> bool:
+    """Check if a path is within the configured root."""
+    if root == "/":
+        return True
+    # Path must equal root or be a child of root
+    return path == root or path.startswith(root + "/")
+
+
+def _apply_root_filter(path: str) -> str:
+    """Apply root filter to a path for display/API purposes.
+
+    If root is '/Work', then '/Work/Project' becomes '/Project' in output.
+    """
+    root = _get_root_path()
+    if root == "/":
+        return path
+    if path == root:
+        return "/"
+    if path.startswith(root + "/"):
+        return path[len(root) :]
+    return path
+
+
+def _resolve_root_path(path: str) -> str:
+    """Resolve a user-provided path to the actual path on device.
+
+    If root is '/Work', then '/Project' becomes '/Work/Project'.
+    """
+    root = _get_root_path()
+    if root == "/":
+        return path
+    if path == "/":
+        return root
+    # Prepend root to the path
+    return root + path
+
 
 # Base annotations for read-only operations
 _BASE_ANNOTATIONS = {
@@ -128,25 +178,35 @@ def remarkable_read(
         # Internal page size for PDF/EPUB character-based pagination
         page_size = DEFAULT_PAGE_SIZE
 
+        root = _get_root_path()
+        # Resolve user-provided path to actual device path
+        actual_document = _resolve_root_path(document) if document.startswith("/") else document
+
         # Find the document by name or path (case-insensitive, not folders)
         documents = [item for item in collection if not item.is_folder]
         target_doc = None
-        document_lower = document.lower().strip("/")
+        document_lower = actual_document.lower().strip("/")
 
         for doc in documents:
+            doc_path = get_item_path(doc, items_by_id)
+            # Filter by root path
+            if not _is_within_root(doc_path, root):
+                continue
             # Match by name (case-insensitive)
             if doc.VissibleName.lower() == document_lower:
                 target_doc = doc
                 break
             # Also try matching by full path (case-insensitive)
-            doc_path = get_item_path(doc, items_by_id).lower().strip("/")
-            if doc_path == document_lower:
+            if doc_path.lower().strip("/") == document_lower:
                 target_doc = doc
                 break
 
         if not target_doc:
-            # Find similar documents for suggestion
-            similar = find_similar_documents(document, documents)
+            # Find similar documents for suggestion (only within root)
+            filtered_docs = [
+                doc for doc in documents if _is_within_root(get_item_path(doc, items_by_id), root)
+            ]
+            similar = find_similar_documents(document, filtered_docs)
             search_term = document.split()[0] if document else "notes"
             return make_error(
                 error_type="document_not_found",
@@ -282,7 +342,7 @@ def remarkable_read(
 
             result = {
                 "document": target_doc.VissibleName,
-                "path": doc_path,
+                "path": _apply_root_filter(doc_path),
                 "file_type": "notebook",
                 "content_type": content_type,
                 "content": page_content,
@@ -381,7 +441,7 @@ def remarkable_read(
             # Return empty result for page 1
             result = {
                 "document": target_doc.VissibleName,
-                "path": doc_path,
+                "path": _apply_root_filter(doc_path),
                 "file_type": file_type or "notebook",
                 "content_type": content_type,
                 "content": "",
@@ -414,7 +474,7 @@ def remarkable_read(
 
         result = {
             "document": target_doc.VissibleName,
-            "path": doc_path,
+            "path": _apply_root_filter(doc_path),
             "file_type": file_type or "notebook",
             "content_type": content_type,
             "content": page_content,
@@ -478,6 +538,9 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
        - Set query="search term" to search across all documents
 
     Results include document names, types, and modification dates.
+
+    Note: If REMARKABLE_ROOT_PATH is configured, only documents within that
+    folder are accessible. Paths are relative to the root path.
     </instructions>
     <parameters>
     - path: Folder path to browse (default: "/" for root)
@@ -495,6 +558,10 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
         items_by_id = get_items_by_id(collection)
         items_by_parent = get_items_by_parent(collection)
 
+        root = _get_root_path()
+        # Resolve user path to actual device path
+        actual_path = _resolve_root_path(path)
+
         # Search mode
         if query:
             query_lower = query.lower()
@@ -504,11 +571,15 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
                 # Skip cloud-archived items
                 if _is_cloud_archived(item):
                     continue
+                item_path = get_item_path(item, items_by_id)
+                # Filter by root path
+                if not _is_within_root(item_path, root):
+                    continue
                 if query_lower in item.VissibleName.lower():
                     matches.append(
                         {
                             "name": item.VissibleName,
-                            "path": get_item_path(item, items_by_id),
+                            "path": _apply_root_filter(item_path),
                             "type": "folder" if item.is_folder else "document",
                             "modified": (
                                 item.ModifiedClient if hasattr(item, "ModifiedClient") else None
@@ -541,12 +612,12 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
 
             return make_response(result, hint)
 
-        # Browse mode
-        if path == "/" or path == "":
+        # Browse mode - use actual_path (with root applied)
+        if actual_path == "/" or actual_path == "":
             target_parent = ""
         else:
             # Navigate to the folder (case-insensitive)
-            path_parts = [p for p in path.strip("/").split("/") if p]
+            path_parts = [p for p in actual_path.strip("/").split("/") if p]
             current_parent = ""
 
             for i, part in enumerate(path_parts):
@@ -569,8 +640,18 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
                     if found_document and i == len(path_parts) - 1:
                         # Auto-redirect: return first page of the document
                         doc_path = get_item_path(found_document, items_by_id)
+                        # Check if within root before redirecting
+                        if not _is_within_root(doc_path, root):
+                            return make_error(
+                                error_type="access_denied",
+                                message=(
+                                    f"Document '{found_document.VissibleName}' "
+                                    "is outside the configured root path."
+                                ),
+                                suggestion="Check REMARKABLE_ROOT_PATH configuration.",
+                            )
                         # Call remarkable_read internally and add redirect note
-                        read_result = remarkable_read(doc_path, page=1)
+                        read_result = remarkable_read(_apply_root_filter(doc_path), page=1)
                         import json
 
                         result_data = json.loads(read_result)
@@ -666,6 +747,9 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
     Optionally includes a text preview of each document's content.
 
     Use this to quickly find what you were working on recently.
+
+    Note: If REMARKABLE_ROOT_PATH is configured, only documents within that
+    folder are included.
     </instructions>
     <parameters>
     - limit: Maximum documents to return (default: 10, max: 50)
@@ -684,10 +768,18 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
         # Clamp limit
         limit = min(max(1, limit), 50)
 
-        # Get documents sorted by modified date (excluding archived)
-        documents = [
-            item for item in collection if not item.is_folder and not _is_cloud_archived(item)
-        ]
+        root = _get_root_path()
+
+        # Get documents sorted by modified date (excluding archived, filtered by root)
+        documents = []
+        for item in collection:
+            if item.is_folder or _is_cloud_archived(item):
+                continue
+            item_path = get_item_path(item, items_by_id)
+            if not _is_within_root(item_path, root):
+                continue
+            documents.append(item)
+
         documents.sort(
             key=lambda x: (
                 x.ModifiedClient if hasattr(x, "ModifiedClient") and x.ModifiedClient else ""
@@ -697,9 +789,10 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
 
         results = []
         for doc in documents[:limit]:
+            doc_path = get_item_path(doc, items_by_id)
             doc_info = {
                 "name": doc.VissibleName,
-                "path": get_item_path(doc, items_by_id),
+                "path": _apply_root_filter(doc_path),
                 "modified": (doc.ModifiedClient if hasattr(doc, "ModifiedClient") else None),
             }
 
@@ -901,9 +994,18 @@ def remarkable_status() -> str:
     try:
         client = get_rmapi()
         collection = client.get_meta_items()
+        items_by_id = get_items_by_id(collection)
 
-        # Count documents (not folders)
-        doc_count = sum(1 for item in collection if not item.is_folder)
+        root = _get_root_path()
+
+        # Count documents (not folders, filtered by root)
+        doc_count = 0
+        for item in collection:
+            if item.is_folder:
+                continue
+            item_path = get_item_path(item, items_by_id)
+            if _is_within_root(item_path, root):
+                doc_count += 1
 
         result = {
             "authenticated": True,
@@ -913,14 +1015,19 @@ def remarkable_status() -> str:
             "document_count": doc_count,
         }
 
-        return make_response(
-            result,
-            (
-                f"Connected successfully via {transport}. Found {doc_count} documents. "
-                "Use remarkable_browse() to see your files, "
-                "or remarkable_recent() for recent documents."
-            ),
+        # Add root path info if configured
+        if root != "/":
+            result["root_path"] = root
+
+        hint_parts = [f"Connected successfully via {transport}. Found {doc_count} documents."]
+        if root != "/":
+            hint_parts.append(f"Filtered to root: {root}")
+        hint_parts.append(
+            "Use remarkable_browse() to see your files, "
+            "or remarkable_recent() for recent documents."
         )
+
+        return make_response(result, " ".join(hint_parts))
 
     except Exception as e:
         error_msg = str(e)
