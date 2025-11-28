@@ -3,13 +3,23 @@ Response helpers for MCP tools.
 """
 
 import json
+from datetime import datetime
 from typing import Any, Dict, List, Optional
+
+
+class DateTimeEncoder(json.JSONEncoder):
+    """JSON encoder that handles datetime objects."""
+
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
 
 
 def make_response(data: Dict[str, Any], hint: str) -> str:
     """Create a JSON response with a hint for the model."""
     data["_hint"] = hint
-    return json.dumps(data, indent=2)
+    return json.dumps(data, indent=2, cls=DateTimeEncoder)
 
 
 def make_error(
@@ -21,4 +31,4 @@ def make_error(
     }
     if did_you_mean:
         error["_error"]["did_you_mean"] = did_you_mean
-    return json.dumps(error, indent=2)
+    return json.dumps(error, indent=2, cls=DateTimeEncoder)
