@@ -73,7 +73,7 @@ def _apply_root_filter(path: str) -> str:
     if path_lower == root_lower:
         return "/"
     if path_lower.startswith(root_lower + "/"):
-        return path[len(root):]
+        return path[len(root) :]
     return path
 
 
