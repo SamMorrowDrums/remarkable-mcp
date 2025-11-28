@@ -213,6 +213,10 @@ All tools are read-only and return structured JSON with hints for next actions.
 - `"annotations"` — Only typed text, highlights, and OCR content from notebooks
 - `"raw"` — Only raw PDF/EPUB text (no annotations)
 
+**Pagination:**
+- **PDF/EPUB**: Pages are ~8000 character chunks of text
+- **Notebooks with OCR**: Pages correspond to actual notebook pages
+
 **Pagination Output:**
 ```json
 {
@@ -359,6 +363,14 @@ sudo pacman -S tesseract
 | `REMARKABLE_OCR_BACKEND` | `auto`, `google`, `tesseract` | Force a specific backend. Default: `auto` (uses Google if configured) |
 
 PDF highlights and annotations are also extracted automatically.
+
+**Performance:** OCR results are cached per document, so reading multiple pages of the same notebook doesn't re-run OCR.
+
+## Behavior Notes
+
+- **Archived documents** (synced=false or in trash) are automatically filtered from browse, search, and recent results
+- **Case-insensitive** matching for document names and paths
+- **Page ordering** for notebooks uses the actual page order from the device
 
 ## Design
 
