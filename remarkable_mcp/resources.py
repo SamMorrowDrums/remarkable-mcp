@@ -2,8 +2,10 @@
 MCP Resources for reMarkable tablet access.
 
 Provides:
-- remarkable://doc/{name} - template for any document by name
-- Individual resources loaded at startup (SSH) or in background batches (cloud)
+- remarkable:///{path}.txt - extracted text from any document
+- remarkableraw:///{path}.txt - raw PDF/EPUB text content (SSH mode only, enumerated)
+
+Resources are loaded at startup (SSH) or in background batches (cloud).
 """
 
 import asyncio
@@ -18,7 +20,9 @@ from remarkable_mcp.server import mcp
 logger = logging.getLogger(__name__)
 
 # Background loader state
-_registered_docs: Set[str] = set()
+_registered_docs: Set[str] = set()  # Track document IDs for text resources
+_registered_raw: Set[str] = set()  # Track document IDs for raw resources
+_registered_uris: Set[str] = set()  # Track URIs for collision detection
 
 
 def _is_ssh_mode() -> bool:
@@ -26,143 +30,195 @@ def _is_ssh_mode() -> bool:
     return os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
 
 
-@mcp.resource(
-    "remarkable://doc/{name}",
-    name="Document by Name",
-    description="Read a reMarkable document by name. Use remarkable_browse() to find documents.",
-    mime_type="text/plain",
-)
-def document_resource(name: str) -> str:
-    """Return document content by name (fetched on demand)."""
-    try:
-        from remarkable_mcp.api import get_rmapi
-        from remarkable_mcp.extract import extract_text_from_document_zip
-
-        client = get_rmapi()
-        collection = client.get_meta_items()
-
-        # Find document by name
-        target_doc = None
-        for item in collection:
-            if not item.is_folder and item.VissibleName == name:
-                target_doc = item
-                break
-
-        if not target_doc:
-            return f"Document not found: '{name}'"
-
-        # Download and extract
-        raw_doc = client.download(target_doc)
-
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-            tmp.write(raw_doc)
-            tmp_path = Path(tmp.name)
-
-        try:
-            content = extract_text_from_document_zip(tmp_path, include_ocr=False)
-        finally:
-            tmp_path.unlink(missing_ok=True)
-
-        # Combine all text content
-        text_parts = []
-
-        if content["typed_text"]:
-            text_parts.extend(content["typed_text"])
-
-        if content["highlights"]:
-            text_parts.append("\n--- Highlights ---")
-            text_parts.extend(content["highlights"])
-
-        return "\n\n".join(text_parts) if text_parts else "(No text content found)"
-
-    except Exception as e:
-        return f"Error reading document: {e}"
-
-
-# Completions handler for document names
-@mcp.completion()
-async def complete_document_name(ref, argument, context):
-    """Provide completions for document names."""
-    from mcp.types import Completion, ResourceTemplateReference
-
-    # Only handle our document template
-    if not isinstance(ref, ResourceTemplateReference):
-        return None
-    if ref.uri_template != "remarkable://doc/{name}":
-        return None
-    if argument.name != "name":
-        return None
-
-    try:
-        from remarkable_mcp.api import get_rmapi
-
-        client = get_rmapi()
-        collection = client.get_meta_items()
-
-        # Get all document names
-        doc_names = [item.VissibleName for item in collection if not item.is_folder]
-
-        # Filter by partial value if provided
-        partial = argument.value or ""
-        if partial:
-            partial_lower = partial.lower()
-            doc_names = [n for n in doc_names if partial_lower in n.lower()]
-
-        # Return up to 50 matches, sorted
-        return Completion(values=sorted(doc_names)[:50])
-
-    except Exception:
-        return Completion(values=[])
-
-
 def _make_doc_resource(client, document):
     """Create a resource function for a document."""
-    from remarkable_mcp.extract import extract_text_from_document_zip
+    from remarkable_mcp.api import download_raw_file, get_file_type
+    from remarkable_mcp.extract import (
+        extract_text_from_document_zip,
+        extract_text_from_epub,
+        extract_text_from_pdf,
+    )
 
     def doc_resource() -> str:
         try:
+            text_parts = []
+
+            # Check file type and extract from raw file first
+            file_type = get_file_type(client, document)
+
+            if file_type == "pdf":
+                raw_pdf = download_raw_file(client, document, "pdf")
+                if raw_pdf:
+                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                        tmp.write(raw_pdf)
+                        tmp_path = Path(tmp.name)
+                    try:
+                        pdf_text = extract_text_from_pdf(tmp_path)
+                        if pdf_text:
+                            text_parts.append(pdf_text)
+                    finally:
+                        tmp_path.unlink(missing_ok=True)
+
+            elif file_type == "epub":
+                raw_epub = download_raw_file(client, document, "epub")
+                if raw_epub:
+                    with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as tmp:
+                        tmp.write(raw_epub)
+                        tmp_path = Path(tmp.name)
+                    try:
+                        epub_text = extract_text_from_epub(tmp_path)
+                        if epub_text:
+                            text_parts.append(epub_text)
+                    finally:
+                        tmp_path.unlink(missing_ok=True)
+
+            # Download notebook data for annotations/typed text
             raw = client.download(document)
             with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                 tmp.write(raw)
                 tmp_path = Path(tmp.name)
             try:
+                # First try without OCR (faster)
                 content = extract_text_from_document_zip(tmp_path, include_ocr=False)
+
+                if content["typed_text"]:
+                    if text_parts:
+                        text_parts.append("\n--- Annotations/Notes ---")
+                    text_parts.extend(content["typed_text"])
+                if content["highlights"]:
+                    text_parts.append("\n--- Highlights ---")
+                    text_parts.extend(content["highlights"])
+
+                # If no text found and document has pages (notebook), try OCR
+                if not text_parts and content["pages"] > 0:
+                    content = extract_text_from_document_zip(tmp_path, include_ocr=True)
+                    if content["handwritten_text"]:
+                        text_parts.append("--- Handwritten (OCR) ---")
+                        text_parts.extend(content["handwritten_text"])
+
+                return "\n\n".join(text_parts) if text_parts else "(No text content)"
             finally:
                 tmp_path.unlink(missing_ok=True)
-
-            text_parts = []
-            if content["typed_text"]:
-                text_parts.extend(content["typed_text"])
-            if content["highlights"]:
-                text_parts.append("\n--- Highlights ---")
-                text_parts.extend(content["highlights"])
-            return "\n\n".join(text_parts) if text_parts else "(No text content)"
         except Exception as e:
             return f"Error: {e}"
 
     return doc_resource
 
 
-def _register_document(client, doc) -> bool:
-    """Register a single document as a resource."""
-    global _registered_docs
+def _make_raw_resource(client, document, file_type: str):
+    """Create a resource function for raw PDF/EPUB text extraction."""
+    from remarkable_mcp.api import download_raw_file
+    from remarkable_mcp.extract import extract_text_from_epub, extract_text_from_pdf
 
-    doc_name = doc.VissibleName
+    def raw_resource() -> str:
+        try:
+            if not _is_ssh_mode():
+                return "Error: Raw file download only available in SSH mode"
 
-    # Skip if already registered
-    if doc_name in _registered_docs:
+            raw_data = download_raw_file(client, document, file_type)
+
+            if not raw_data:
+                return f"Raw {file_type.upper()} file not found"
+
+            # Extract text from the raw file
+            with tempfile.NamedTemporaryFile(suffix=f".{file_type}", delete=False) as tmp:
+                tmp.write(raw_data)
+                tmp_path = Path(tmp.name)
+
+            try:
+                if file_type == "pdf":
+                    text = extract_text_from_pdf(tmp_path)
+                elif file_type == "epub":
+                    text = extract_text_from_epub(tmp_path)
+                else:
+                    text = f"Unsupported file type: {file_type}"
+
+                return text if text else f"(No text content in {file_type.upper()} file)"
+            finally:
+                tmp_path.unlink(missing_ok=True)
+        except Exception as e:
+            return f"Error: {e}"
+
+    return raw_resource
+
+
+def _register_document(client, doc, items_by_id=None, file_types: dict = None) -> bool:
+    """Register a single document as a text resource (and raw resource if PDF/EPUB)."""
+    global _registered_docs, _registered_raw, _registered_uris
+
+    doc_id = doc.ID
+
+    # Skip if already registered (by ID)
+    if doc_id in _registered_docs:
         return False
 
-    uri = f"remarkable://doc/{doc_name}"
-    desc = f"Content from '{doc_name}'"
+    # Skip cloud-archived documents (not available on device)
+    if hasattr(doc, "is_cloud_archived") and doc.is_cloud_archived:
+        return False
+
+    # Get the full path
+    doc_name = doc.VissibleName
+    if items_by_id:
+        from remarkable_mcp.api import get_item_path
+
+        full_path = get_item_path(doc, items_by_id)
+    else:
+        full_path = f"/{doc_name}"
+
+    # Use the path directly - no URL encoding needed for JSON-RPC transport
+    # (MCP uses JSON-RPC, not HTTP, so URIs just need to be unique identifiers)
+    uri_path = full_path.lstrip("/")
+
+    # Register text resource (use /// for empty netloc)
+    base_uri = f"remarkable:///{uri_path}.txt"
+    counter = 1
+    final_uri = base_uri
+    display_name = f"{full_path}.txt"
+    while final_uri in _registered_uris:
+        final_uri = f"remarkable:///{uri_path}_{counter}.txt"
+        display_name = f"{full_path} ({counter}).txt"
+        counter += 1
+
+    desc = f"Content from '{full_path}'"
     if doc.ModifiedClient:
         desc += f" (modified: {doc.ModifiedClient})"
 
-    mcp.resource(uri, name=doc_name, description=desc, mime_type="text/plain")(
+    mcp.resource(final_uri, name=display_name, description=desc, mime_type="text/plain")(
         _make_doc_resource(client, doc)
     )
 
-    _registered_docs.add(doc_name)
+    _registered_docs.add(doc_id)
+    _registered_uris.add(final_uri)
+
+    # Also register raw resource for PDF/EPUB files (SSH mode only)
+    if _is_ssh_mode() and file_types is not None:
+        # Use pre-loaded file types (fast)
+        file_type = file_types.get(doc_id)
+        if file_type in ("pdf", "epub"):
+            # Raw resources now return extracted text, use .txt extension
+            raw_uri = f"remarkableraw:///{uri_path}.{file_type}.txt"
+            raw_counter = 1
+            final_raw_uri = raw_uri
+            raw_display = f"{full_path} (raw {file_type.upper()}).txt"
+            while final_raw_uri in _registered_uris:
+                final_raw_uri = f"remarkableraw:///{uri_path}_{raw_counter}.{file_type}.txt"
+                raw_display = f"{full_path} (raw {file_type.upper()}) ({raw_counter}).txt"
+                raw_counter += 1
+
+            raw_desc = f"Raw {file_type.upper()} text content: '{full_path}'"
+            if doc.ModifiedClient:
+                raw_desc += f" (modified: {doc.ModifiedClient})"
+
+            mcp.resource(
+                final_raw_uri,
+                name=raw_display,
+                description=raw_desc,
+                mime_type="text/plain",
+            )(_make_raw_resource(client, doc, file_type))
+
+            _registered_raw.add(doc_id)
+            _registered_uris.add(final_raw_uri)
+
     return True
 
 
@@ -172,23 +228,34 @@ def load_all_documents_sync() -> int:
     Used for SSH mode where loading is fast.
     Returns the number of documents registered.
     """
-    global _registered_docs
+    global _registered_docs, _registered_raw
 
-    from remarkable_mcp.api import get_rmapi
+    from remarkable_mcp.api import get_items_by_id, get_rmapi
 
     client = get_rmapi()
     items = client.get_meta_items()
+    items_by_id = get_items_by_id(items)
     documents = [item for item in items if not item.is_folder]
 
     logger.info(f"Found {len(documents)} documents")
 
+    # Pre-load all file types in a single SSH call (SSH mode optimization)
+    file_types = {}
+    if _is_ssh_mode() and hasattr(client, "get_all_file_types"):
+        logger.info("Pre-loading file types for raw resources...")
+        file_types = client.get_all_file_types()
+        logger.info(f"Loaded {len(file_types)} file types")
+
     for doc in documents:
         try:
-            _register_document(client, doc)
+            _register_document(client, doc, items_by_id, file_types if _is_ssh_mode() else None)
         except Exception as e:
             logger.debug(f"Failed to register '{doc.VissibleName}': {e}")
 
-    logger.info(f"Registered {len(_registered_docs)} document resources")
+    logger.info(
+        f"Registered {len(_registered_docs)} text resources"
+        + (f", {len(_registered_raw)} raw resources (PDF/EPUB)" if _registered_raw else "")
+    )
     return len(_registered_docs)
 
 
@@ -198,7 +265,7 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
     Used for Cloud mode only - SSH mode uses load_all_documents_sync().
     """
     try:
-        from remarkable_mcp.api import get_rmapi
+        from remarkable_mcp.api import get_items_by_id, get_rmapi
 
         client = get_rmapi()
         loop = asyncio.get_event_loop()
@@ -207,6 +274,7 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
         offset = 0
         consecutive_errors = 0
         max_consecutive_errors = 3
+        items_by_id = {}  # Build incrementally
 
         while True:
             # Check for shutdown
@@ -219,6 +287,8 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
                 items = await loop.run_in_executor(
                     None, lambda: client.get_meta_items(limit=offset + batch_size)
                 )
+                # Update items_by_id with all items for path resolution
+                items_by_id = get_items_by_id(items)
                 consecutive_errors = 0  # Reset on success
             except Exception as e:
                 consecutive_errors += 1
@@ -244,13 +314,13 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
                 )
                 break
 
-            # Register this batch
+            # Register this batch (no file_types in cloud mode - raw resources not available)
             registered_count = 0
             for doc in batch_docs:
                 if shutdown_event.is_set():
                     break
                 try:
-                    if _register_document(client, doc):
+                    if _register_document(client, doc, items_by_id, file_types=None):
                         registered_count += 1
                 except Exception as e:
                     logger.debug(f"Failed to register document '{doc.VissibleName}': {e}")

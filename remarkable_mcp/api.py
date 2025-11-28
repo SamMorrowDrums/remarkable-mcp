@@ -108,3 +108,51 @@ def get_item_path(item, items_by_id: Dict[str, Any]) -> str:
         path_parts.insert(0, parent.VissibleName)
         parent_id = parent.Parent if hasattr(parent, "Parent") else ""
     return "/" + "/".join(path_parts)
+
+
+def download_raw_file(client, doc, extension: str):
+    """
+    Download a raw file (PDF or EPUB) for a document.
+
+    Args:
+        client: The reMarkable API client (SSH or Cloud)
+        doc: The document to download
+        extension: File extension without dot (e.g., 'pdf', 'epub')
+
+    Returns:
+        Raw file bytes, or None if file doesn't exist or not supported
+    """
+    # SSH client has direct download_raw_file method
+    if hasattr(client, "download_raw_file"):
+        return client.download_raw_file(doc, extension)
+
+    # Cloud client - raw files are not available via API
+    # The cloud API only returns the notebook annotations, not source PDFs/EPUBs
+    return None
+
+
+def get_file_type(client, doc) -> str:
+    """
+    Get the file type (pdf, epub, notebook) for a document.
+
+    Args:
+        client: The reMarkable API client (SSH or Cloud)
+        doc: The document to check
+
+    Returns:
+        File type string: 'pdf', 'epub', or 'notebook'
+    """
+    # SSH client has direct get_file_type method
+    if hasattr(client, "get_file_type"):
+        file_type = client.get_file_type(doc)
+        if file_type:
+            return file_type
+
+    # Infer from document name
+    name = doc.VissibleName.lower()
+    if name.endswith(".pdf"):
+        return "pdf"
+    elif name.endswith(".epub"):
+        return "epub"
+
+    return "notebook"

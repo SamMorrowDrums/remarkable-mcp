@@ -45,6 +45,7 @@ class Document:
     parent: str = ""
     deleted: bool = False
     pinned: bool = False
+    synced: bool = True  # False means cloud-archived (not on device)
     last_modified: Optional[datetime] = None
     size: int = 0
     files: List[Dict[str, Any]] = field(default_factory=list)
@@ -54,6 +55,11 @@ class Document:
     @property
     def is_folder(self) -> bool:
         return self.doc_type == "CollectionType"
+
+    @property
+    def is_cloud_archived(self) -> bool:
+        """True if document is archived to cloud (not on device)."""
+        return not self.synced or self.parent == "trash"
 
     @property
     def VissibleName(self) -> str:
@@ -132,32 +138,34 @@ class SSHClient:
             raise RuntimeError("SSH client not found. Install openssh-client.")
 
     def _scp_download(self, remote_path: str, timeout: int = 60) -> bytes:
-        """Download a file from the tablet via SCP."""
-        scp_args = [
-            "scp",
+        """Download a file from the tablet via SSH cat (more reliable than SCP)."""
+        # Use SSH + cat instead of SCP for binary file transfer
+        # This avoids issues with /dev/stdout on various platforms
+        ssh_args = [
+            "ssh",
             "-o",
             "BatchMode=yes",
             "-o",
             "ConnectTimeout=5",
             "-o",
             "StrictHostKeyChecking=accept-new",
-            "-P",
+            "-p",
             str(self.port),
-            f"{self.user}@{self.host}:{remote_path}",
-            "/dev/stdout",
+            f"{self.user}@{self.host}",
+            f"cat '{remote_path}'",
         ]
 
         try:
             result = subprocess.run(
-                scp_args,
+                ssh_args,
                 capture_output=True,
                 timeout=timeout,
             )
             if result.returncode != 0:
-                raise RuntimeError(f"SCP failed: {result.stderr.decode()}")
+                raise RuntimeError(f"SSH cat failed: {result.stderr.decode()}")
             return result.stdout
         except subprocess.TimeoutExpired:
-            raise RuntimeError(f"SCP timed out after {timeout}s")
+            raise RuntimeError(f"SSH cat timed out after {timeout}s")
 
     def check_connection(self) -> bool:
         """Check if SSH connection to tablet is available."""
@@ -268,6 +276,7 @@ class SSHClient:
                 parent=metadata.get("parent", ""),
                 deleted=metadata.get("deleted", False),
                 pinned=metadata.get("pinned", False),
+                synced=metadata.get("synced", True),
                 last_modified=last_modified,
                 size=0,
                 local_path=f"{XOCHITL_PATH}/{doc_id}",
@@ -326,6 +335,99 @@ class SSHClient:
 
         zip_buffer.seek(0)
         return zip_buffer.read()
+
+    def download_raw_file(self, doc: Document, extension: str) -> Optional[bytes]:
+        """
+        Download a raw file (PDF or EPUB) for a document.
+
+        Args:
+            doc: The document to download
+            extension: File extension without dot (e.g., 'pdf', 'epub')
+
+        Returns:
+            Raw file bytes, or None if file doesn't exist
+        """
+        file_path = f"{XOCHITL_PATH}/{doc.id}.{extension}"
+
+        try:
+            # Check if file exists first
+            self._ssh_command(f"test -f '{file_path}'", timeout=5)
+            # Download the file
+            return self._scp_download(file_path, timeout=120)
+        except Exception as e:
+            logger.debug(f"Raw file not found: {file_path}: {e}")
+            return None
+
+    def get_file_type(self, doc: Document) -> Optional[str]:
+        """
+        Get the file type (pdf, epub, etc.) for a document.
+
+        Returns the extension without dot, or None if not a file-based document.
+        """
+        # Check cache first
+        if hasattr(self, "_file_type_cache") and doc.id in self._file_type_cache:
+            return self._file_type_cache[doc.id]
+
+        content_file = f"{XOCHITL_PATH}/{doc.id}.content"
+
+        try:
+            content = self._scp_download(content_file, timeout=10)
+            data = json.loads(content.decode("utf-8"))
+            return data.get("fileType")
+        except Exception:
+            return None
+
+    def get_all_file_types(self) -> dict[str, Optional[str]]:
+        """
+        Get file types for all documents in a single SSH command.
+
+        Returns a dict mapping document ID to file type (pdf, epub, or None).
+        Much more efficient than calling get_file_type() for each document.
+        """
+        if hasattr(self, "_file_type_cache"):
+            return self._file_type_cache
+
+        self._file_type_cache: dict[str, Optional[str]] = {}
+
+        try:
+            # Read all .content files in a single command
+            output = self._ssh_command(
+                f"for f in {XOCHITL_PATH}/*.content; do "
+                f'echo "===FILE===$(basename $f .content)"; cat "$f" 2>/dev/null; '
+                f"done",
+                timeout=60,
+            )
+
+            current_id = None
+            current_content = []
+
+            for line in output.split("\n"):
+                if line.startswith("===FILE==="):
+                    # Parse previous content
+                    if current_id and current_content:
+                        try:
+                            data = json.loads("\n".join(current_content))
+                            self._file_type_cache[current_id] = data.get("fileType")
+                        except json.JSONDecodeError:
+                            self._file_type_cache[current_id] = None
+
+                    current_id = line.replace("===FILE===", "").strip()
+                    current_content = []
+                else:
+                    current_content.append(line)
+
+            # Don't forget the last one
+            if current_id and current_content:
+                try:
+                    data = json.loads("\n".join(current_content))
+                    self._file_type_cache[current_id] = data.get("fileType")
+                except json.JSONDecodeError:
+                    self._file_type_cache[current_id] = None
+
+        except Exception as e:
+            logger.warning(f"Failed to batch-load file types: {e}")
+
+        return self._file_type_cache
 
 
 def check_ssh_available(
