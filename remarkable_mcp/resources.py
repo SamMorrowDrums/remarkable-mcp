@@ -39,23 +39,28 @@ def _get_root_path() -> str:
 
 
 def _is_within_root(path: str, root: str) -> bool:
-    """Check if a path is within the configured root."""
+    """Check if a path is within the configured root (case-insensitive)."""
     if root == "/":
         return True
-    # Path must equal root or be a child of root
-    return path == root or path.startswith(root + "/")
+    # Path must equal root or be a child of root (case-insensitive)
+    path_lower = path.lower()
+    root_lower = root.lower()
+    return path_lower == root_lower or path_lower.startswith(root_lower + "/")
 
 
 def _apply_root_filter(path: str, root: str) -> str:
     """Apply root filter to a path for display/URI purposes.
 
     If root is '/Work', then '/Work/Project' becomes '/Project' in output.
+    Case-insensitive matching, preserves original case in output.
     """
     if root == "/":
         return path
-    if path == root:
+    path_lower = path.lower()
+    root_lower = root.lower()
+    if path_lower == root_lower:
         return "/"
-    if path.startswith(root + "/"):
+    if path_lower.startswith(root_lower + "/"):
         return path[len(root):]
     return path
 
