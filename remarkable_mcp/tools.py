@@ -326,7 +326,26 @@ def remarkable_read(
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
 
-        # Handle empty content case - page 1 should still work
+        # Handle empty content case - auto-retry with OCR if not already enabled
+        if total_chars == 0 and not include_ocr and file_type not in ("pdf", "epub"):
+            # Auto-retry with OCR for notebooks
+            import json
+
+            ocr_result = remarkable_read(
+                document=document,
+                content_type=content_type,
+                page=page,
+                grep=grep,
+                include_ocr=True,  # Enable OCR automatically
+            )
+            result_data = json.loads(ocr_result)
+            if "_error" not in result_data:
+                result_data["_ocr_auto_enabled"] = True
+                result_data["_hint"] = (
+                    "OCR auto-enabled (notebook had no typed text). " + result_data.get("_hint", "")
+                )
+            return json.dumps(result_data, indent=2)
+
         if total_chars == 0:
             if page > 1:
                 return make_error(
@@ -505,26 +524,64 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
             path_parts = [p for p in path.strip("/").split("/") if p]
             current_parent = ""
 
-            for part in path_parts:
+            for i, part in enumerate(path_parts):
                 part_lower = part.lower()
                 found = False
+                found_document = None
+
                 for item in items_by_parent.get(current_parent, []):
-                    if item.VissibleName.lower() == part_lower and item.is_folder:
-                        current_parent = item.ID
-                        found = True
-                        break
+                    if item.VissibleName.lower() == part_lower:
+                        if item.is_folder:
+                            current_parent = item.ID
+                            found = True
+                            break
+                        else:
+                            # Found a document with this name
+                            found_document = item
 
                 if not found:
+                    # Check if it's a document (only valid as the last path part)
+                    if found_document and i == len(path_parts) - 1:
+                        # Auto-redirect: return first page of the document
+                        doc_path = get_item_path(found_document, items_by_id)
+                        # Call remarkable_read internally and add redirect note
+                        read_result = remarkable_read(doc_path, page=1)
+                        import json
+
+                        result_data = json.loads(read_result)
+                        if "_error" not in result_data:
+                            result_data["_redirected_from"] = f"browse:{path}"
+                            result_data["_hint"] = (
+                                f"Auto-redirected from browse to read. "
+                                f"{result_data.get('_hint', '')}"
+                            )
+                        return json.dumps(result_data, indent=2)
+
                     # Folder not found - suggest alternatives
                     available_folders = [
                         item.VissibleName
                         for item in items_by_parent.get(current_parent, [])
                         if item.is_folder
                     ]
+                    available_docs = [
+                        item.VissibleName
+                        for item in items_by_parent.get(current_parent, [])
+                        if not item.is_folder
+                    ]
+                    suggestion = "Use remarkable_browse('/') to see root folder contents."
+                    if available_docs:
+                        # Check if user might be looking for a document
+                        for doc_name in available_docs:
+                            if doc_name.lower() == part_lower:
+                                suggestion = (
+                                    f"'{doc_name}' is a document. "
+                                    f"Use remarkable_read('{doc_name}') to read it."
+                                )
+                                break
                     return make_error(
                         error_type="folder_not_found",
                         message=f"Folder not found: '{part}'",
-                        suggestion=("Use remarkable_browse('/') to see root folder contents."),
+                        suggestion=suggestion,
                         did_you_mean=(available_folders[:5] if available_folders else None),
                     )
 
@@ -662,6 +719,122 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
     except Exception as e:
         return make_error(
             error_type="recent_failed",
+            message=str(e),
+            suggestion="Check remarkable_status() to verify your connection.",
+        )
+
+
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
+def remarkable_search(
+    query: str,
+    grep: Optional[str] = None,
+    limit: int = 5,
+    include_ocr: bool = False,
+) -> str:
+    """
+    <usecase>Search across multiple documents and return matching content.</usecase>
+    <instructions>
+    Searches document names for the query, then optionally searches content with grep.
+    Returns summaries from multiple documents in a single call.
+
+    This is efficient for finding information across your library without
+    making many individual tool calls.
+
+    Limits:
+    - Max 5 documents per search (to keep response size manageable)
+    - Returns first page (~8000 chars) of each matching document
+    - Use grep to filter to relevant sections
+    </instructions>
+    <parameters>
+    - query: Search term for document names
+    - grep: Optional pattern to search within document content
+    - limit: Max documents to return (default: 5, max: 5)
+    - include_ocr: Enable OCR for handwritten content (default: False)
+    </parameters>
+    <examples>
+    - remarkable_search("meeting")  # Find docs with "meeting" in name
+    - remarkable_search("journal", grep="project")  # Find "project" in journals
+    - remarkable_search("notes", include_ocr=True)  # Search with OCR enabled
+    </examples>
+    """
+    import json
+
+    try:
+        # Enforce limits
+        limit = min(max(1, limit), 5)
+
+        # First, find matching documents
+        browse_result = remarkable_browse(query=query)
+        browse_data = json.loads(browse_result)
+
+        if "_error" in browse_data:
+            return browse_result
+
+        results = browse_data.get("results", [])
+        documents = [r for r in results if r.get("type") == "document"][:limit]
+
+        if not documents:
+            return make_error(
+                error_type="no_documents_found",
+                message=f"No documents found matching '{query}'.",
+                suggestion="Try a different search term or use remarkable_browse('/') to list all.",
+            )
+
+        # Read each document
+        search_results = []
+        for doc in documents:
+            doc_result = {
+                "name": doc["name"],
+                "path": doc["path"],
+                "modified": doc.get("modified"),
+            }
+
+            try:
+                read_result = remarkable_read(
+                    document=doc["path"],
+                    page=1,
+                    grep=grep,
+                    include_ocr=include_ocr,
+                )
+                read_data = json.loads(read_result)
+
+                if "_error" not in read_data:
+                    doc_result["content"] = read_data.get("content", "")[:2000]  # Limit per doc
+                    doc_result["total_pages"] = read_data.get("total_pages", 1)
+                    if grep:
+                        doc_result["grep_matches"] = read_data.get("grep_matches", 0)
+                    if len(read_data.get("content", "")) > 2000:
+                        doc_result["truncated"] = True
+                else:
+                    doc_result["error"] = read_data["_error"]["message"]
+            except Exception as e:
+                doc_result["error"] = str(e)
+
+            search_results.append(doc_result)
+
+        result = {
+            "query": query,
+            "grep": grep,
+            "count": len(search_results),
+            "documents": search_results,
+        }
+
+        # Build hint
+        docs_with_content = [d for d in search_results if "content" in d]
+        if grep:
+            matches = sum(d.get("grep_matches", 0) for d in docs_with_content)
+            hint = f"Found {len(docs_with_content)} document(s) with {matches} grep match(es)."
+        else:
+            hint = f"Found {len(docs_with_content)} document(s) matching '{query}'."
+
+        if docs_with_content:
+            hint += f" To read more: remarkable_read('{docs_with_content[0]['path']}')."
+
+        return make_response(result, hint)
+
+    except Exception as e:
+        return make_error(
+            error_type="search_failed",
             message=str(e),
             suggestion="Check remarkable_status() to verify your connection.",
         )

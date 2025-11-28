@@ -192,11 +192,18 @@ Your token is stored securely using VS Code's input system with `password: true`
 | Tool | Description |
 |------|-------------|
 | `remarkable_read` | Extract text from a document (with pagination and search) |
-| `remarkable_browse` | List files or search by name |
+| `remarkable_browse` | List files, search by name, or auto-redirect to read documents |
+| `remarkable_search` | Search across multiple documents and return matching content |
 | `remarkable_recent` | Get recently modified documents |
 | `remarkable_status` | Check connection status |
 
 All tools are read-only and return structured JSON with hints for next actions.
+
+### Smart Features
+
+- **Auto-redirect**: Browsing a document path (e.g., `/Journals/November`) automatically returns the first page instead of an error
+- **Auto-OCR**: If a notebook has no typed text, OCR is automatically enabled and you're notified in the response
+- **Batch search**: Use `remarkable_search` to find content across multiple documents in one call
 
 ### `remarkable_read` Parameters
 
@@ -206,6 +213,15 @@ All tools are read-only and return structured JSON with hints for next actions.
 | `content_type` | string | `"all"` | `"all"`, `"annotations"`, or `"raw"` |
 | `page` | int | `1` | Page number for pagination |
 | `grep` | string | `None` | Search for keywords (returns matches with context) |
+| `include_ocr` | bool | `False` | Enable OCR for handwritten content |
+
+### `remarkable_search` Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `query` | string | *required* | Search term for document names |
+| `grep` | string | `None` | Pattern to search within document content |
+| `limit` | int | `5` | Max documents to return (max: 5) |
 | `include_ocr` | bool | `False` | Enable OCR for handwritten content |
 
 **Content Types:**
