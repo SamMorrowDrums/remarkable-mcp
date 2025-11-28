@@ -33,9 +33,9 @@ Connect directly via USB for **10-100x faster** access, offline operation, and n
 <details>
 <summary>📋 Manual SSH Configuration</summary>
 
-Add to \`.vscode/mcp.json\`:
+Add to `.vscode/mcp.json`:
 
-\`\`\`json
+```json
 {
   "servers": {
     "remarkable": {
@@ -47,7 +47,7 @@ Add to \`.vscode/mcp.json\`:
     }
   }
 }
-\`\`\`
+```
 
 See [SSH Setup Guide](docs/ssh-setup.md) for detailed instructions.
 
@@ -68,18 +68,18 @@ Go to [my.remarkable.com/device/desktop/connect](https://my.remarkable.com/devic
 
 #### 2. Convert to Token
 
-\`\`\`bash
+```bash
 uvx remarkable-mcp --register YOUR_CODE
-\`\`\`
+```
 
 #### 3. Install
 
 [![Install Cloud Mode in VS Code](https://img.shields.io/badge/VS_Code-Install_Cloud_Mode-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22token%22%2C%22description%22%3A%22reMarkable%20API%20token%22%2C%22password%22%3Atrue%7D%2C%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%5D%2C%22env%22%3A%7B%22REMARKABLE_TOKEN%22%3A%22%24%7Binput%3Atoken%7D%22%2C%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D)
 [![Install Cloud Mode in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Cloud_Mode-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22token%22%2C%22description%22%3A%22reMarkable%20API%20token%22%2C%22password%22%3Atrue%7D%2C%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%5D%2C%22env%22%3A%7B%22REMARKABLE_TOKEN%22%3A%22%24%7Binput%3Atoken%7D%22%2C%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D&quality=insiders)
 
-Or configure manually in \`.vscode/mcp.json\`:
+Or configure manually in `.vscode/mcp.json`:
 
-\`\`\`json
+```json
 {
   "inputs": [
     {
@@ -100,13 +100,13 @@ Or configure manually in \`.vscode/mcp.json\`:
       "command": "uvx",
       "args": ["remarkable-mcp"],
       "env": {
-        "REMARKABLE_TOKEN": "\${input:remarkable-token}",
-        "GOOGLE_VISION_API_KEY": "\${input:google-vision-key}"
+        "REMARKABLE_TOKEN": "${input:remarkable-token}",
+        "GOOGLE_VISION_API_KEY": "${input:google-vision-key}"
       }
     }
   }
 }
-\`\`\`
+```
 
 </details>
 
@@ -132,11 +132,11 @@ AI assistants use the tools to read documents, search content, and more:
 
 | Tool | Description |
 |------|-------------|
-| \`remarkable_read\` | Read and extract text from documents (with pagination and search) |
-| \`remarkable_browse\` | Navigate folders or search by document name |
-| \`remarkable_search\` | Search content across multiple documents |
-| \`remarkable_recent\` | Get recently modified documents |
-| \`remarkable_status\` | Check connection status |
+| `remarkable_read` | Read and extract text from documents (with pagination and search) |
+| `remarkable_browse` | Navigate folders or search by document name |
+| `remarkable_search` | Search content across multiple documents |
+| `remarkable_recent` | Get recently modified documents |
+| `remarkable_status` | Check connection status |
 
 All tools are **read-only** and return structured JSON with hints for next actions.
 
@@ -150,7 +150,7 @@ All tools are **read-only** and return structured JSON with hints for next actio
 
 ### Example Usage
 
-\`\`\`python
+```python
 # Read a document
 remarkable_read("Meeting Notes")
 
@@ -168,7 +168,7 @@ remarkable_search("meeting", grep="action items")
 
 # Get recent documents
 remarkable_recent(limit=10)
-\`\`\`
+```
 
 ---
 
@@ -178,9 +178,9 @@ Documents are automatically registered as MCP resources:
 
 | URI Scheme | Description |
 |------------|-------------|
-| \`remarkable:///{path}.txt\` | Extracted text content |
-| \`remarkableraw:///{path}.pdf\` | Original PDF file (SSH only) |
-| \`remarkableraw:///{path}.epub\` | Original EPUB file (SSH only) |
+| `remarkable:///{path}.txt` | Extracted text content |
+| `remarkableraw:///{path}.pdf` | Original PDF file (SSH only) |
+| `remarkableraw:///{path}.epub` | Original EPUB file (SSH only) |
 
 📖 **[Full Resources Documentation](docs/resources.md)**
 
@@ -198,9 +198,9 @@ Google Vision provides **far superior handwriting recognition** compared to Tess
 
 1. Enable [Cloud Vision API](https://console.cloud.google.com/apis/library/vision.googleapis.com) in Google Cloud
 2. Create an [API key](https://console.cloud.google.com/apis/credentials)
-3. Add \`GOOGLE_VISION_API_KEY\` to your MCP config
+3. Add `GOOGLE_VISION_API_KEY` to your MCP config
 
-**Cost:** 1,000 free requests/month, then ~\$1.50 per 1,000 images.
+**Cost:** 1,000 free requests/month, then ~$1.50 per 1,000 images.
 
 ### Tesseract (Fallback)
 
@@ -290,12 +290,12 @@ Treat your reMarkable as a second brain that AI can access. Combined with tools 
 
 ## Development
 
-\`\`\`bash
+```bash
 git clone https://github.com/SamMorrowDrums/remarkable-mcp.git
 cd remarkable-mcp
 uv sync --all-extras
 uv run pytest test_server.py -v
-\`\`\`
+```
 
 📖 **[Development Guide](docs/development.md)**
 
