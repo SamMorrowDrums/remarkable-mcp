@@ -77,48 +77,19 @@ def _is_ssh_mode() -> bool:
 
 
 def _make_doc_resource(client, document):
-    """Create a resource function for a document."""
-    from remarkable_mcp.api import download_raw_file, get_file_type
-    from remarkable_mcp.extract import (
-        extract_text_from_document_zip,
-        extract_text_from_epub,
-        extract_text_from_pdf,
-    )
+    """Create a resource function for a document.
+
+    Returns only user-supplied content: typed text, annotations, highlights,
+    and OCR for handwritten content. Does NOT include original PDF/EPUB text.
+    Use raw resources for original document text.
+    """
+    from remarkable_mcp.extract import extract_text_from_document_zip
 
     def doc_resource() -> str:
         try:
             text_parts = []
 
-            # Check file type and extract from raw file first
-            file_type = get_file_type(client, document)
-
-            if file_type == "pdf":
-                raw_pdf = download_raw_file(client, document, "pdf")
-                if raw_pdf:
-                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                        tmp.write(raw_pdf)
-                        tmp_path = Path(tmp.name)
-                    try:
-                        pdf_text = extract_text_from_pdf(tmp_path)
-                        if pdf_text:
-                            text_parts.append(pdf_text)
-                    finally:
-                        tmp_path.unlink(missing_ok=True)
-
-            elif file_type == "epub":
-                raw_epub = download_raw_file(client, document, "epub")
-                if raw_epub:
-                    with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as tmp:
-                        tmp.write(raw_epub)
-                        tmp_path = Path(tmp.name)
-                    try:
-                        epub_text = extract_text_from_epub(tmp_path)
-                        if epub_text:
-                            text_parts.append(epub_text)
-                    finally:
-                        tmp_path.unlink(missing_ok=True)
-
-            # Download notebook data for annotations/typed text
+            # Download notebook data for annotations/typed text/handwritten
             raw = client.download(document)
             with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                 tmp.write(raw)
@@ -128,21 +99,19 @@ def _make_doc_resource(client, document):
                 content = extract_text_from_document_zip(tmp_path, include_ocr=False)
 
                 if content["typed_text"]:
-                    if text_parts:
-                        text_parts.append("\n--- Annotations/Notes ---")
                     text_parts.extend(content["typed_text"])
                 if content["highlights"]:
-                    text_parts.append("\n--- Highlights ---")
+                    if text_parts:
+                        text_parts.append("\n--- Highlights ---")
                     text_parts.extend(content["highlights"])
 
-                # If no text found and document has pages (notebook), try OCR
+                # If no text found and document has pages, try OCR for handwritten
                 if not text_parts and content["pages"] > 0:
                     content = extract_text_from_document_zip(tmp_path, include_ocr=True)
                     if content["handwritten_text"]:
-                        text_parts.append("--- Handwritten (OCR) ---")
                         text_parts.extend(content["handwritten_text"])
 
-                return "\n\n".join(text_parts) if text_parts else "(No text content)"
+                return "\n\n".join(text_parts) if text_parts else "(No user content)"
             finally:
                 tmp_path.unlink(missing_ok=True)
         except Exception as e:
