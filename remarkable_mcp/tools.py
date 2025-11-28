@@ -643,7 +643,7 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
     Use this to quickly find what you were working on recently.
     </instructions>
     <parameters>
-    - limit: Maximum documents to return (default: 10, max: 50)
+    - limit: Maximum documents to return (default: 10, max: 50 without preview, 10 with preview)
     - include_preview: Include first ~200 chars of text content (default: False)
     </parameters>
     <examples>
@@ -656,8 +656,9 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
         collection = client.get_meta_items()
         items_by_id = get_items_by_id(collection)
 
-        # Clamp limit
-        limit = min(max(1, limit), 50)
+        # Clamp limit - lower max when previews enabled (expensive operation)
+        max_limit = 10 if include_preview else 50
+        limit = min(max(1, limit), max_limit)
 
         # Get documents sorted by modified date (excluding archived)
         documents = [
@@ -679,26 +680,32 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
             }
 
             if include_preview:
-                # Download and extract preview
-                try:
-                    raw_doc = client.download(doc)
-                    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                        tmp.write(raw_doc.content)
-                        tmp_path = Path(tmp.name)
-
-                    try:
-                        content = extract_text_from_document_zip(
-                            tmp_path, include_ocr=False, doc_id=doc.ID
-                        )
-                        preview_text = "\n".join(content["typed_text"])[:200]
-                        if len(preview_text) == 200:
-                            doc_info["preview"] = preview_text + "..."
-                        else:
-                            doc_info["preview"] = preview_text
-                    finally:
-                        tmp_path.unlink(missing_ok=True)
-                except Exception:
+                # Download and extract preview (skip if notebook - OCR too slow)
+                file_type = get_file_type(doc)
+                if file_type == "notebook":
+                    # Notebooks need OCR for preview, skip for performance
                     doc_info["preview"] = None
+                    doc_info["preview_skipped"] = "notebook (use remarkable_read with include_ocr)"
+                else:
+                    try:
+                        raw_doc = client.download(doc)
+                        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                            tmp.write(raw_doc.content)
+                            tmp_path = Path(tmp.name)
+
+                        try:
+                            content = extract_text_from_document_zip(
+                                tmp_path, include_ocr=False, doc_id=doc.ID
+                            )
+                            preview_text = "\n".join(content["typed_text"])[:200]
+                            if len(preview_text) == 200:
+                                doc_info["preview"] = preview_text + "..."
+                            else:
+                                doc_info["preview"] = preview_text or None
+                        finally:
+                            tmp_path.unlink(missing_ok=True)
+                    except Exception:
+                        doc_info["preview"] = None
 
             results.append(doc_info)
 
