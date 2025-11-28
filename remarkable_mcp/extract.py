@@ -9,6 +9,24 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Module-level cache for OCR results
+# Key: doc_id, Value: {"result": extraction_result, "include_ocr": bool}
+_extraction_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def clear_extraction_cache(doc_id: Optional[str] = None) -> None:
+    """
+    Clear the extraction cache.
+
+    Args:
+        doc_id: If provided, only clear cache for this document.
+                If None, clear the entire cache.
+    """
+    if doc_id:
+        _extraction_cache.pop(doc_id, None)
+    else:
+        _extraction_cache.clear()
+
 
 def find_similar_documents(query: str, documents: List, limit: int = 5) -> List[str]:
     """Find documents with similar names for 'did you mean' suggestions."""
@@ -115,9 +133,16 @@ def extract_text_from_rm_file(rm_file_path: Path) -> List[str]:
         return []
 
 
-def extract_text_from_document_zip(zip_path: Path, include_ocr: bool = False) -> Dict[str, Any]:
+def extract_text_from_document_zip(
+    zip_path: Path, include_ocr: bool = False, doc_id: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Extract all text content from a reMarkable document zip.
+
+    Args:
+        zip_path: Path to the document zip file
+        include_ocr: Whether to run OCR on handwritten content
+        doc_id: Optional document ID for caching OCR results
 
     Returns:
         {
@@ -128,6 +153,14 @@ def extract_text_from_document_zip(zip_path: Path, include_ocr: bool = False) ->
             "page_ids": [...],         # Page UUIDs in order
         }
     """
+    # Check cache if doc_id provided
+    if doc_id and doc_id in _extraction_cache:
+        cached = _extraction_cache[doc_id]
+        # Return cached result if OCR requirement is satisfied
+        # (cached with OCR can satisfy no-OCR request, but not vice versa)
+        if cached["include_ocr"] or not include_ocr:
+            return cached["result"]
+
     result: Dict[str, Any] = {
         "typed_text": [],
         "highlights": [],
@@ -226,6 +259,10 @@ def extract_text_from_document_zip(zip_path: Path, include_ocr: bool = False) ->
         # OCR for handwritten content (optional)
         if include_ocr and rm_files:
             result["handwritten_text"] = extract_handwriting_ocr(rm_files)
+
+    # Cache result if doc_id provided
+    if doc_id:
+        _extraction_cache[doc_id] = {"result": result, "include_ocr": include_ocr}
 
     return result
 

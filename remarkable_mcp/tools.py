@@ -178,7 +178,9 @@ def remarkable_read(
                 tmp_path = Path(tmp.name)
 
             try:
-                content = extract_text_from_document_zip(tmp_path, include_ocr=include_ocr)
+                content = extract_text_from_document_zip(
+                    tmp_path, include_ocr=include_ocr, doc_id=target_doc.ID
+                )
             finally:
                 tmp_path.unlink(missing_ok=True)
 
@@ -628,7 +630,9 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
                         tmp_path = Path(tmp.name)
 
                     try:
-                        content = extract_text_from_document_zip(tmp_path, include_ocr=False)
+                        content = extract_text_from_document_zip(
+                            tmp_path, include_ocr=False, doc_id=doc.ID
+                        )
                         preview_text = "\n".join(content["typed_text"])[:200]
                         if len(preview_text) == 200:
                             doc_info["preview"] = preview_text + "..."
