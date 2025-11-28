@@ -680,13 +680,13 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
             }
 
             if include_preview:
-                # Download and extract preview (skip if notebook - OCR too slow)
+                # Download and extract preview (skip notebooks - they need slow OCR)
                 file_type = get_file_type(doc)
                 if file_type == "notebook":
                     # Notebooks need OCR for preview, skip for performance
-                    doc_info["preview"] = None
                     doc_info["preview_skipped"] = "notebook (use remarkable_read with include_ocr)"
                 else:
+                    # PDFs and EPUBs have extractable text - fast to preview
                     try:
                         raw_doc = client.download(doc)
                         with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
@@ -698,14 +698,16 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
                                 tmp_path, include_ocr=False, doc_id=doc.ID
                             )
                             preview_text = "\n".join(content["typed_text"])[:200]
-                            if len(preview_text) == 200:
-                                doc_info["preview"] = preview_text + "..."
-                            else:
-                                doc_info["preview"] = preview_text or None
+                            if preview_text:
+                                if len(preview_text) == 200:
+                                    doc_info["preview"] = preview_text + "..."
+                                else:
+                                    doc_info["preview"] = preview_text
+                            # No preview key if empty - cleaner response
                         finally:
                             tmp_path.unlink(missing_ok=True)
                     except Exception:
-                        doc_info["preview"] = None
+                        pass  # No preview key on error - cleaner response
 
             results.append(doc_info)
 
