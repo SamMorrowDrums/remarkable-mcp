@@ -6,8 +6,8 @@ Documents in your reMarkable library are automatically registered as MCP resourc
 
 | URI Scheme | Description | Mode |
 |------------|-------------|------|
-| `remarkable:///` | Extracted text content | Both |
-| `remarkableraw:///` | Original PDF/EPUB files | SSH only |
+| `remarkable:///` | Your annotations, typed text, and handwriting | Both |
+| `remarkableraw:///` | Original PDF/EPUB text | SSH only |
 
 ## Text Resources (`remarkable:///`)
 
@@ -31,11 +31,11 @@ remarkable:///Journals/November.txt
 
 | Document Type | Content |
 |---------------|---------|
-| **PDF** | Full text extracted from PDF |
-| **EPUB** | Full text extracted from EPUB |
-| **Notebook** | Typed text (Type Folio), highlights |
+| **PDF** | Your annotations, highlights, and typed notes |
+| **EPUB** | Your annotations, highlights, and typed notes |
+| **Notebook** | Typed text, highlights, and handwritten content (OCR) |
 
-**Note:** OCR for handwritten content is not included in resources by default. Use `remarkable_read` with `include_ocr=True` for handwritten content.
+**Note:** Text resources contain only user-created content—not the original PDF/EPUB text. Use raw resources (`remarkableraw:///`) for the original document content. OCR is automatically applied for notebooks with handwritten content.
 
 ### Response
 
@@ -54,31 +54,30 @@ Action Items:
 
 ## Raw Resources (`remarkableraw:///`)
 
-Original PDF and EPUB files are available as raw resources in SSH mode.
+Original PDF and EPUB text content is available as raw resources in SSH mode. These resources extract and return the full text from the original document file—the actual content of the PDF or EPUB, not your annotations.
 
 ### URI Format
 
 ```
-remarkableraw:///{path}.pdf
-remarkableraw:///{path}.epub
+remarkableraw:///{path}.pdf.txt
+remarkableraw:///{path}.epub.txt
 ```
 
 ### Examples
 
 ```
-remarkableraw:///Research%20Paper.pdf
-remarkableraw:///Books/Deep%20Work.epub
+remarkableraw:///Research%20Paper.pdf.txt
+remarkableraw:///Books/Deep%20Work.epub.txt
 ```
 
 ### Response
 
-Raw resources return the original file as base64-encoded data:
+Raw resources return extracted text from the original file:
 
-```json
-{
-  "content": "base64-encoded-file-data...",
-  "mimeType": "application/pdf"
-}
+```
+Chapter 1: Introduction
+
+This paper explores the relationship between...
 ```
 
 ### Availability
@@ -111,18 +110,18 @@ Resources appear in Claude's context when you mention them or use the "Attach" f
 
 MCP resources can be accessed through the Copilot chat interface. The screenshot below shows resources appearing with the `mcpr` prefix:
 
-![Resources in VS Code](../assets/resources-screenshot.png)
+![Resources in VS Code](assets/resources-screenshot.png)
 
 ### Programmatically
 
 MCP clients can request resources by URI:
 
 ```python
-# Request a text resource
+# Request a text resource (includes annotations)
 content = await client.read_resource("remarkable:///Meeting%20Notes.txt")
 
-# Request a raw PDF
-pdf_data = await client.read_resource("remarkableraw:///Paper.pdf")
+# Request raw PDF text (original document only, no annotations)
+pdf_text = await client.read_resource("remarkableraw:///Paper.pdf.txt")
 ```
 
 ## Path Encoding

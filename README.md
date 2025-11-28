@@ -112,6 +112,7 @@ Or configure manually in `.vscode/mcp.json`:
 
 ---
 
+<!-- Screenshots section - uncomment when screenshots are added
 ## Screenshots
 
 ### MCP Resources
@@ -125,6 +126,7 @@ Documents appear as resources that AI assistants can access directly:
 AI assistants use the tools to read documents, search content, and more:
 
 ![Tool calls in VS Code](docs/assets/tool-calls-screenshot.png)
+-->
 
 ---
 
