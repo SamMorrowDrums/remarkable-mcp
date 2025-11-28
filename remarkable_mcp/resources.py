@@ -61,8 +61,9 @@ def _apply_root_filter(path: str, root: str) -> str:
     if path_lower == root_lower:
         return "/"
     if path_lower.startswith(root_lower + "/"):
-        return path[len(root):]
+        return path[len(root) :]
     return path
+
 
 # Background loader state
 _registered_docs: Set[str] = set()  # Track document IDs for text resources
