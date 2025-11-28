@@ -30,13 +30,38 @@ from remarkable_mcp.extract import (
 from remarkable_mcp.responses import make_error, make_response
 from remarkable_mcp.server import mcp
 
-# Tool annotations for read-only operations
-READ_ONLY_ANNOTATIONS = ToolAnnotations(
-    title="Read-only reMarkable operation",
-    readOnlyHint=True,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=False,  # Private cloud account, not open world
+# Base annotations for read-only operations
+_BASE_ANNOTATIONS = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": False,  # Private cloud account, not open world
+}
+
+# Unique annotations for each tool with descriptive titles
+READ_ANNOTATIONS = ToolAnnotations(
+    title="Read reMarkable Document",
+    **_BASE_ANNOTATIONS,
+)
+
+BROWSE_ANNOTATIONS = ToolAnnotations(
+    title="Browse reMarkable Library",
+    **_BASE_ANNOTATIONS,
+)
+
+SEARCH_ANNOTATIONS = ToolAnnotations(
+    title="Search reMarkable Documents",
+    **_BASE_ANNOTATIONS,
+)
+
+RECENT_ANNOTATIONS = ToolAnnotations(
+    title="Get Recent reMarkable Documents",
+    **_BASE_ANNOTATIONS,
+)
+
+STATUS_ANNOTATIONS = ToolAnnotations(
+    title="Check reMarkable Connection",
+    **_BASE_ANNOTATIONS,
 )
 
 # Default page size for pagination (characters) - used for PDFs/EPUBs
@@ -53,7 +78,7 @@ def _is_cloud_archived(item) -> bool:
     return parent == "trash"
 
 
-@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
+@mcp.tool(annotations=READ_ANNOTATIONS)
 def remarkable_read(
     document: str,
     content_type: Literal["text", "raw", "annotations"] = "text",
@@ -440,7 +465,7 @@ def remarkable_read(
         )
 
 
-@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
+@mcp.tool(annotations=BROWSE_ANNOTATIONS)
 def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
     """
     <usecase>Browse your reMarkable library or search for documents.</usecase>
@@ -632,7 +657,7 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
         )
 
 
-@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
+@mcp.tool(annotations=RECENT_ANNOTATIONS)
 def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
     """
     <usecase>Get your most recently modified documents.</usecase>
@@ -733,7 +758,7 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
         )
 
 
-@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
+@mcp.tool(annotations=SEARCH_ANNOTATIONS)
 def remarkable_search(
     query: str,
     grep: Optional[str] = None,
@@ -849,7 +874,7 @@ def remarkable_search(
         )
 
 
-@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
+@mcp.tool(annotations=STATUS_ANNOTATIONS)
 def remarkable_status() -> str:
     """
     <usecase>Check connection status and authentication with reMarkable Cloud.</usecase>
