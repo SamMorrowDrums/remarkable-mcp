@@ -681,7 +681,7 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
 
             if include_preview:
                 # Download and extract preview (skip notebooks - they need slow OCR)
-                file_type = get_file_type(doc)
+                file_type = get_file_type(client, doc)
                 if file_type == "notebook":
                     # Notebooks need OCR for preview, skip for performance
                     doc_info["preview_skipped"] = "notebook (use remarkable_read with include_ocr)"
