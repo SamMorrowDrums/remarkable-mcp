@@ -143,6 +143,22 @@ Examples:
 
 Archived documents and trash items are **not** registered as resources. Only documents that are actively synced appear.
 
+### Root Path Filtering
+
+When `REMARKABLE_ROOT_PATH` is configured, only documents within that folder are registered as resources. Paths in URIs are relative to the root:
+
+```json
+{
+  "env": {
+    "REMARKABLE_ROOT_PATH": "/Work"
+  }
+}
+```
+
+With this configuration:
+- `/Work/Meeting Notes` → `remarkable:///Meeting%20Notes.txt`
+- Documents outside `/Work` are not registered
+
 ## Performance Considerations
 
 - Resources are registered at startup (slight delay for large libraries)

@@ -2,7 +2,9 @@
 
 This document outlines potential future features for remarkable-mcp. These are ideas under consideration, not commitments.
 
-### Write Support
+> **Track progress:** See open [enhancement issues](https://github.com/SamMorrowDrums/remarkable-mcp/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement) on GitHub.
+
+### Write Support ([#24](https://github.com/SamMorrowDrums/remarkable-mcp/issues/24))
 
 Currently, remarkable-mcp is read-only. Future versions may add:
 
@@ -16,7 +18,7 @@ Write support requires careful consideration of:
 - Data safety and backup
 - API stability
 
-### Additional OCR Providers
+### Additional OCR Providers ([#25](https://github.com/SamMorrowDrums/remarkable-mcp/issues/25))
 
 Google Vision works well, but more options would be valuable:
 
@@ -31,7 +33,7 @@ Google Vision works well, but more options would be valuable:
 
 The goal is **BYOK (Bring Your Own Key)** — let users choose their preferred provider.
 
-### Enhanced Search
+### Enhanced Search ([#26](https://github.com/SamMorrowDrums/remarkable-mcp/issues/26))
 
 - **Full-text indexing** — Index all documents for instant search
 - **Semantic search** — Find documents by meaning, not just keywords
@@ -45,7 +47,7 @@ Deep integration with Obsidian vaults:
 - **Link resolution** — reMarkable documents as Obsidian attachments
 - **Daily notes** — Sync reMarkable journals to Obsidian daily notes
 
-### Export Features
+### Export Features ([#27](https://github.com/SamMorrowDrums/remarkable-mcp/issues/27))
 
 - **PDF export** — Export notebooks as PDFs
 - **Markdown export** — Convert notebooks to markdown
@@ -64,13 +66,13 @@ Popular requests we're tracking:
 
 ## Technical Improvements
 
-### Performance
+### Performance ([#28](https://github.com/SamMorrowDrums/remarkable-mcp/issues/28))
 
 - **Parallel resource registration** — Faster startup for large libraries
 - **Incremental sync** — Only fetch changed documents
 - **Persistent cache** — Cache OCR results across sessions
 
-### Reliability
+### Reliability ([#29](https://github.com/SamMorrowDrums/remarkable-mcp/issues/29))
 
 - **Automatic reconnection** — Recover from dropped SSH connections
 - **Retry logic** — Handle transient API failures
