@@ -163,8 +163,9 @@ def _make_image_resource(client, document):
     """Create a resource function for page images from a notebook.
 
     Returns a function that takes a page number and returns PNG bytes.
+    Uses the standard reMarkable background color for resources.
     """
-    from remarkable_mcp.extract import render_page_from_document_zip
+    from remarkable_mcp.extract import REMARKABLE_BACKGROUND_COLOR, render_page_from_document_zip
 
     def image_resource(page: str) -> bytes:
         try:
@@ -180,7 +181,10 @@ def _make_image_resource(client, document):
             tmp_path = Path(tmp.name)
 
         try:
-            png_data = render_page_from_document_zip(tmp_path, page_num)
+            # Use reMarkable standard background color for resources
+            png_data = render_page_from_document_zip(
+                tmp_path, page_num, background_color=REMARKABLE_BACKGROUND_COLOR
+            )
             if png_data is None:
                 raise RuntimeError(
                     f"Failed to render page {page_num}. "

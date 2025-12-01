@@ -9,9 +9,15 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# reMarkable tablet screen dimensions (in pixels)
+# reMarkable tablet screen dimensions (in pixels) - used as fallback
 REMARKABLE_WIDTH = 1404
 REMARKABLE_HEIGHT = 1872
+
+# Standard reMarkable background color (light cream/gray)
+REMARKABLE_BACKGROUND_COLOR = "#FBFBFB"
+
+# Margin around content when using content-based bounding box (in pixels)
+CONTENT_MARGIN = 50
 
 # Module-level cache for OCR results
 # Key: doc_id, Value: {"result": extraction_result, "include_ocr": bool}
@@ -137,15 +143,57 @@ def extract_text_from_rm_file(rm_file_path: Path) -> List[str]:
         return []
 
 
-def render_rm_file_to_png(rm_file_path: Path) -> Optional[bytes]:
+def _get_svg_content_bounds(svg_path: Path) -> Optional[tuple]:
+    """
+    Parse SVG file to get the content bounding box from viewBox.
+
+    Args:
+        svg_path: Path to the SVG file
+
+    Returns:
+        Tuple of (min_x, min_y, width, height) or None if not determinable
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        tree = ET.parse(svg_path)
+        root = tree.getroot()
+
+        # Try to get viewBox attribute
+        viewbox = root.get("viewBox")
+        if viewbox:
+            parts = viewbox.split()
+            if len(parts) == 4:
+                return (float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
+
+        # Fallback to width/height attributes
+        width = root.get("width")
+        height = root.get("height")
+        if width and height:
+            # Remove 'px' suffix if present
+            w = float(width.replace("px", ""))
+            h = float(height.replace("px", ""))
+            return (0, 0, w, h)
+
+        return None
+    except Exception:
+        return None
+
+
+def render_rm_file_to_png(
+    rm_file_path: Path, background_color: Optional[str] = None
+) -> Optional[bytes]:
     """
     Render a .rm file to PNG image bytes.
 
     Uses rmc to convert .rm to SVG, then cairosvg to convert to PNG.
-    Returns PNG bytes with a white background suitable for display.
+    The output is sized based on the SVG content bounds with a margin.
 
     Args:
         rm_file_path: Path to the .rm file
+        background_color: Background color (e.g., "#FFFFFF", "transparent", None).
+                         None means transparent. Use REMARKABLE_BACKGROUND_COLOR
+                         for the standard reMarkable paper color.
 
     Returns:
         PNG image bytes, or None if rendering failed
@@ -173,6 +221,18 @@ def render_rm_file_to_png(rm_file_path: Path) -> Optional[bytes]:
         if result.returncode != 0:
             return None
 
+        # Get content bounds from SVG
+        bounds = _get_svg_content_bounds(tmp_svg_path)
+        if bounds:
+            # Use content bounds with margin
+            _, _, content_width, content_height = bounds
+            output_width = int(content_width) + 2 * CONTENT_MARGIN
+            output_height = int(content_height) + 2 * CONTENT_MARGIN
+        else:
+            # Fallback to standard reMarkable dimensions
+            output_width = REMARKABLE_WIDTH
+            output_height = REMARKABLE_HEIGHT
+
         # Convert SVG to PNG
         try:
             import cairosvg
@@ -181,22 +241,40 @@ def render_rm_file_to_png(rm_file_path: Path) -> Optional[bytes]:
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_raw:
                 tmp_raw_path = Path(tmp_raw.name)
 
+            # Use cairosvg with background_color if specified
             cairosvg.svg2png(
                 url=str(tmp_svg_path),
                 write_to=str(tmp_raw_path),
-                output_width=REMARKABLE_WIDTH,
-                output_height=REMARKABLE_HEIGHT,
+                output_width=output_width,
+                output_height=output_height,
+                background_color=background_color,
             )
 
-            # Add white background (SVG renders as black-on-transparent)
+            # If no background color specified (transparent), return as-is
+            if background_color is None:
+                with open(tmp_raw_path, "rb") as f:
+                    return f.read()
+
+            # If background color specified, ensure it's applied properly
             img = PILImage.open(tmp_raw_path)
-            if img.mode == "RGBA":
-                bg = PILImage.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "RGBA" and background_color:
+                # Parse hex color
+                if background_color.startswith("#"):
+                    hex_color = background_color.lstrip("#")
+                    if len(hex_color) == 6:
+                        r, g, b = tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+                    else:
+                        r, g, b = 255, 255, 255
+                else:
+                    r, g, b = 255, 255, 255
+                bg = PILImage.new("RGB", img.size, (r, g, b))
                 bg.paste(img, mask=img.split()[3])
                 img = bg
             img.save(tmp_png_path)
-            tmp_raw_path.unlink(missing_ok=True)
-            tmp_raw_path = None
+
+            with open(tmp_png_path, "rb") as f:
+                return f.read()
+
         except ImportError:
             # Fall back to inkscape
             result = subprocess.run(
@@ -207,9 +285,8 @@ def render_rm_file_to_png(rm_file_path: Path) -> Optional[bytes]:
             if result.returncode != 0:
                 return None
 
-        # Read and return PNG bytes
-        with open(tmp_png_path, "rb") as f:
-            return f.read()
+            with open(tmp_png_path, "rb") as f:
+                return f.read()
 
     except subprocess.TimeoutExpired:
         return None
@@ -227,13 +304,17 @@ def render_rm_file_to_png(rm_file_path: Path) -> Optional[bytes]:
             tmp_raw_path.unlink(missing_ok=True)
 
 
-def render_page_from_document_zip(zip_path: Path, page: int = 1) -> Optional[bytes]:
+def render_page_from_document_zip(
+    zip_path: Path, page: int = 1, background_color: Optional[str] = None
+) -> Optional[bytes]:
     """
     Render a specific page from a reMarkable document zip to PNG.
 
     Args:
         zip_path: Path to the document zip file
         page: Page number (1-indexed)
+        background_color: Background color (e.g., "#FFFFFF", None for transparent).
+                         Use REMARKABLE_BACKGROUND_COLOR for the standard paper color.
 
     Returns:
         PNG image bytes, or None if rendering failed or page doesn't exist
@@ -284,7 +365,7 @@ def render_page_from_document_zip(zip_path: Path, page: int = 1) -> Optional[byt
 
         # Render the requested page
         target_rm_file = rm_files[page - 1]
-        return render_rm_file_to_png(target_rm_file)
+        return render_rm_file_to_png(target_rm_file, background_color=background_color)
 
 
 def get_document_page_count(zip_path: Path) -> int:
