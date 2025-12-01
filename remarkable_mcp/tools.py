@@ -30,6 +30,7 @@ from remarkable_mcp.extract import (
     find_similar_documents,
     get_document_page_count,
     render_page_from_document_zip,
+    render_page_from_document_zip_svg,
 )
 from remarkable_mcp.responses import make_error, make_response
 from remarkable_mcp.server import mcp
@@ -1091,16 +1092,22 @@ def remarkable_status() -> str:
 
 
 @mcp.tool(annotations=IMAGE_ANNOTATIONS)
-def remarkable_image(document: str, page: int = 1, background: Optional[str] = None):
+def remarkable_image(
+    document: str,
+    page: int = 1,
+    background: Optional[str] = None,
+    format: str = "png",
+):
     """
-    <usecase>Get a PNG image of a specific page from a reMarkable document.</usecase>
+    <usecase>Get an image of a specific page from a reMarkable document.</usecase>
     <instructions>
-    Renders a notebook or document page as a PNG image. This is useful for:
+    Renders a notebook or document page as an image (PNG or SVG). This is useful for:
     - Viewing hand-drawn diagrams, sketches, or UI mockups
     - Getting visual context that text extraction might miss
     - Implementing designs based on hand-drawn wireframes
+    - SVG format for scalable vector graphics that can be edited
 
-    The image is returned as a base64-encoded PNG that can be displayed inline.
+    The image is returned as base64-encoded data that can be displayed inline.
 
     Note: This works best with notebooks and handwritten content. For PDFs/EPUBs,
     the annotations layer is rendered (not the underlying PDF content).
@@ -1110,13 +1117,15 @@ def remarkable_image(document: str, page: int = 1, background: Optional[str] = N
     - page: Page number (default: 1, 1-indexed)
     - background: Background color as hex code (e.g., "#FFFFFF" for white, "#FBFBFB" for
       reMarkable paper color). Supports RGB (#RRGGBB) or RGBA (#RRGGBBAA) formats.
-      Default is transparent (None).
+      Default is transparent (None). Only applies to PNG format.
+    - format: Output format - "png" (default) or "svg" for vector graphics
     </parameters>
     <examples>
-    - remarkable_image("UI Mockup")  # Get first page with transparent background
+    - remarkable_image("UI Mockup")  # Get first page as PNG with transparent background
     - remarkable_image("Meeting Notes", page=2)  # Get second page
     - remarkable_image("/Work/Designs/Wireframe", background="#FFFFFF")  # White background
     - remarkable_image("Sketch", background="#FBFBFB")  # reMarkable paper color
+    - remarkable_image("Diagram", format="svg")  # Get as SVG for editing
     </examples>
     """
     try:
@@ -1171,6 +1180,15 @@ def remarkable_image(document: str, page: int = 1, background: Optional[str] = N
             tmp_path = Path(tmp.name)
 
         try:
+            # Validate format parameter
+            format_lower = format.lower()
+            if format_lower not in ("png", "svg"):
+                return make_error(
+                    error_type="invalid_format",
+                    message=f"Invalid format: '{format}'. Supported formats: png, svg",
+                    suggestion="Use format='png' for raster images or format='svg' for vectors.",
+                )
+
             # Get total page count
             total_pages = get_document_page_count(tmp_path)
 
@@ -1191,21 +1209,44 @@ def remarkable_image(document: str, page: int = 1, background: Optional[str] = N
                     suggestion=f"Use page=1 to {total_pages} to view different pages.",
                 )
 
-            # Render the page
-            png_data = render_page_from_document_zip(tmp_path, page, background_color=background)
+            # Render the page based on format
+            if format_lower == "svg":
+                svg_content = render_page_from_document_zip_svg(tmp_path, page)
 
-            if png_data is None:
-                return make_error(
-                    error_type="render_failed",
-                    message="Failed to render page to image.",
-                    suggestion=(
-                        "Make sure 'rmc' and 'cairosvg' are installed. "
-                        "Try: pip install rmc cairosvg"
-                    ),
+                if svg_content is None:
+                    return make_error(
+                        error_type="render_failed",
+                        message="Failed to render page to SVG.",
+                        suggestion="Make sure 'rmc' is installed. Try: pip install rmc",
+                    )
+
+                # Return SVG as text content
+                hint = (
+                    f"Page {page}/{total_pages} as SVG. "
+                    f"Use remarkable_image('{document}', format='png') for raster."
+                )
+                return make_response(
+                    {"svg": svg_content, "page": page, "total_pages": total_pages},
+                    hint,
+                )
+            else:
+                # PNG format
+                png_data = render_page_from_document_zip(
+                    tmp_path, page, background_color=background
                 )
 
-            # Return the image using FastMCP's Image class
-            return Image(data=png_data, format="png")
+                if png_data is None:
+                    return make_error(
+                        error_type="render_failed",
+                        message="Failed to render page to image.",
+                        suggestion=(
+                            "Make sure 'rmc' and 'cairosvg' are installed. "
+                            "Try: pip install rmc cairosvg"
+                        ),
+                    )
+
+                # Return the image using FastMCP's Image class
+                return Image(data=png_data, format="png")
 
         finally:
             tmp_path.unlink(missing_ok=True)
