@@ -62,7 +62,7 @@ Use pagination to avoid overwhelming context. The response includes:
 
 Documents are registered as resources for direct access:
 - `remarkable:///{path}.txt` - Get full extracted text content in one request
-- `remarkableimg:///{path}.page-{N}.png` - Get PNG image of page N
+- `remarkableimg:///{path}.page-{N}.png` - Get PNG image of page N (notebooks only)
 - Use resources when you need complete document content without pagination
 """
 
