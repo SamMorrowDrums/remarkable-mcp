@@ -205,8 +205,12 @@ def _make_svg_resource(client, document):
     """Create a resource function for SVG page images from a notebook.
 
     Returns a function that takes a page number and returns SVG content.
+    Uses the standard reMarkable background color for resources.
     """
-    from remarkable_mcp.extract import render_page_from_document_zip_svg
+    from remarkable_mcp.extract import (
+        REMARKABLE_BACKGROUND_COLOR,
+        render_page_from_document_zip_svg,
+    )
 
     def svg_resource(page: str) -> str:
         try:
@@ -222,11 +226,13 @@ def _make_svg_resource(client, document):
             tmp_path = Path(tmp.name)
 
         try:
-            svg_content = render_page_from_document_zip_svg(tmp_path, page_num)
+            # Use reMarkable standard background color for resources
+            svg_content = render_page_from_document_zip_svg(
+                tmp_path, page_num, background_color=REMARKABLE_BACKGROUND_COLOR
+            )
             if svg_content is None:
                 raise RuntimeError(
-                    f"Failed to render page {page_num} to SVG. "
-                    "Make sure 'rmc' is installed."
+                    f"Failed to render page {page_num} to SVG. Make sure 'rmc' is installed."
                 )
             return svg_content
         finally:

@@ -24,6 +24,7 @@ from remarkable_mcp.api import (
     get_rmapi,
 )
 from remarkable_mcp.extract import (
+    REMARKABLE_BACKGROUND_COLOR,
     extract_text_from_document_zip,
     extract_text_from_epub,
     extract_text_from_pdf,
@@ -1095,7 +1096,7 @@ def remarkable_status() -> str:
 def remarkable_image(
     document: str,
     page: int = 1,
-    background: Optional[str] = None,
+    background: Optional[str] = REMARKABLE_BACKGROUND_COLOR,
     format: str = "png",
 ):
     """
@@ -1115,16 +1116,15 @@ def remarkable_image(
     <parameters>
     - document: Document name or path (use remarkable_browse to find documents)
     - page: Page number (default: 1, 1-indexed)
-    - background: Background color as hex code (e.g., "#FFFFFF" for white, "#FBFBFB" for
-      reMarkable paper color). Supports RGB (#RRGGBB) or RGBA (#RRGGBBAA) formats.
-      Default is transparent (None). Only applies to PNG format.
+    - background: Background color as hex code. Supports RGB (#RRGGBB) or RGBA (#RRGGBBAA).
+      Default is "#FBFBFB" (reMarkable paper color). Use "#00000000" for transparent.
     - format: Output format - "png" (default) or "svg" for vector graphics
     </parameters>
     <examples>
-    - remarkable_image("UI Mockup")  # Get first page as PNG with transparent background
+    - remarkable_image("UI Mockup")  # Get first page with reMarkable paper background
     - remarkable_image("Meeting Notes", page=2)  # Get second page
     - remarkable_image("/Work/Designs/Wireframe", background="#FFFFFF")  # White background
-    - remarkable_image("Sketch", background="#FBFBFB")  # reMarkable paper color
+    - remarkable_image("Sketch", background="#00000000")  # Transparent background
     - remarkable_image("Diagram", format="svg")  # Get as SVG for editing
     </examples>
     """
@@ -1211,7 +1211,9 @@ def remarkable_image(
 
             # Render the page based on format
             if format_lower == "svg":
-                svg_content = render_page_from_document_zip_svg(tmp_path, page)
+                svg_content = render_page_from_document_zip_svg(
+                    tmp_path, page, background_color=background
+                )
 
                 if svg_content is None:
                     return make_error(

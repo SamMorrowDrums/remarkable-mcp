@@ -11,6 +11,7 @@ This document provides detailed documentation for all MCP tools provided by rema
 | [`remarkable_search`](#remarkable_search) | Search across multiple documents |
 | [`remarkable_recent`](#remarkable_recent) | Get recently modified documents |
 | [`remarkable_status`](#remarkable_status) | Check connection status |
+| [`remarkable_image`](#remarkable_image) | Get page images (PNG or SVG) |
 
 All tools are **read-only** and return structured JSON with hints for logical next actions.
 
@@ -304,6 +305,72 @@ remarkable_status()
 | `document_count` | Total documents in library (filtered by root if configured) |
 | `root_path` | Configured root path filter (only present if set) |
 | `ocr_backend` | Which OCR backend is configured |
+
+---
+
+## remarkable_image
+
+**Get a PNG or SVG image of a specific page.**
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `document` | string | *required* | Document name or full path |
+| `page` | int | `1` | Page number (1-indexed) |
+| `background` | string | `"#FBFBFB"` | Background color (hex RGB or RGBA) |
+| `format` | string | `"png"` | Output format: `"png"` or `"svg"` |
+
+### Background Colors
+
+- **`"#FBFBFB"`** — Default reMarkable paper color (light cream)
+- **`"#FFFFFF"`** — Pure white
+- **`"#00000000"`** — Fully transparent (RGBA format)
+- **`"#80008080"`** — Semi-transparent purple (RGBA format)
+
+### Examples
+
+```python
+# Get first page with default paper background
+remarkable_image("UI Mockup")
+
+# Get specific page
+remarkable_image("Meeting Notes", page=2)
+
+# White background
+remarkable_image("Diagram", background="#FFFFFF")
+
+# Transparent background for compositing
+remarkable_image("Logo Sketch", background="#00000000")
+
+# SVG format for editing in design tools
+remarkable_image("Wireframe", format="svg")
+
+# SVG with custom background
+remarkable_image("Sketch", format="svg", background="#F0F0F0")
+```
+
+### Response Format
+
+For PNG format, returns a base64-encoded image that can be displayed inline.
+
+For SVG format, returns JSON with the SVG content:
+
+```json
+{
+  "svg": "<svg xmlns=...",
+  "page": 1,
+  "total_pages": 5,
+  "_hint": "Page 1/5 as SVG. Use remarkable_image('Doc', format='png') for raster."
+}
+```
+
+### Notes
+
+- Works best with notebooks and handwritten content
+- For PDFs/EPUBs, renders the annotation layer only (not the underlying document)
+- SVG format is useful for further editing in design tools
+- RGBA colors (8-digit hex) allow transparency control
 
 ---
 
