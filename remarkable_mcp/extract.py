@@ -297,17 +297,17 @@ def render_rm_file_to_png(
             if img.mode == "RGBA" and background_color:
                 # Parse hex color (supports #RRGGBB and #RRGGBBAA formats)
                 r, g, b, a = _parse_hex_color(background_color)
-                # If fully opaque, composite onto RGB background
+                # Create background and composite foreground on top
                 if a == 255:
+                    # Fully opaque background - convert to RGB
                     bg = PILImage.new("RGB", img.size, (r, g, b))
                     bg.paste(img, mask=img.split()[3])
                     img = bg
-                # If semi-transparent, keep RGBA and composite
                 elif a > 0:
+                    # Semi-transparent or transparent background
                     bg = PILImage.new("RGBA", img.size, (r, g, b, a))
-                    bg.paste(img, mask=img.split()[3])
-                    img = bg
-                # If fully transparent (a == 0), return as-is
+                    img = PILImage.alpha_composite(bg, img)
+                # If a == 0 (fully transparent), return as-is
             img.save(tmp_png_path)
 
             with open(tmp_png_path, "rb") as f:
