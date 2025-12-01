@@ -17,6 +17,8 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Set
 
+from mcp.types import Completion, ResourceTemplateReference
+
 from remarkable_mcp.server import mcp
 
 logger = logging.getLogger(__name__)
@@ -511,3 +513,29 @@ async def stop_background_loader(task: Optional[asyncio.Task]):
             pass
 
     logger.info("Stopped background document loader")
+
+
+# Completion handler for resource templates
+@mcp.completion()
+async def handle_completion(ref, argument, context):
+    """Provide completions for resource template parameters.
+
+    Currently handles:
+    - remarkableimg:// page parameter: suggests page numbers 1-10
+    """
+    if isinstance(ref, ResourceTemplateReference):
+        uri = ref.uri if hasattr(ref, "uri") else str(ref)
+
+        # Handle page completions for image resources
+        if uri.startswith("remarkableimg://") and argument.name == "page":
+            # Extract any partial value the user has typed
+            partial = argument.value or ""
+
+            # Suggest page numbers 1-10 that match the partial input
+            suggestions = [str(i) for i in range(1, 11)]
+            if partial:
+                suggestions = [s for s in suggestions if s.startswith(partial)]
+
+            return Completion(values=suggestions[:10], hasMore=True)
+
+    return None
