@@ -9,6 +9,10 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# reMarkable tablet screen dimensions (in pixels)
+REMARKABLE_WIDTH = 1404
+REMARKABLE_HEIGHT = 1872
+
 # Module-level cache for OCR results
 # Key: doc_id, Value: {"result": extraction_result, "include_ocr": bool}
 _extraction_cache: Dict[str, Dict[str, Any]] = {}
@@ -177,12 +181,11 @@ def render_rm_file_to_png(rm_file_path: Path) -> Optional[bytes]:
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_raw:
                 tmp_raw_path = Path(tmp_raw.name)
 
-            # reMarkable dimensions
             cairosvg.svg2png(
                 url=str(tmp_svg_path),
                 write_to=str(tmp_raw_path),
-                output_width=1404,
-                output_height=1872,
+                output_width=REMARKABLE_WIDTH,
+                output_height=REMARKABLE_HEIGHT,
             )
 
             # Add white background (SVG renders as black-on-transparent)
@@ -529,8 +532,8 @@ def _ocr_google_vision_rest(rm_files: List[Path], api_key: str) -> Optional[List
                 cairosvg.svg2png(
                     url=str(tmp_svg_path),
                     write_to=str(tmp_raw_path),
-                    output_width=1404,
-                    output_height=1872,
+                    output_width=REMARKABLE_WIDTH,
+                    output_height=REMARKABLE_HEIGHT,
                 )
 
                 # Add white background
@@ -641,8 +644,8 @@ def _ocr_google_vision_sdk(rm_files: List[Path]) -> Optional[List[str]]:
                     cairosvg.svg2png(
                         url=str(tmp_svg_path),
                         write_to=str(tmp_raw_path),
-                        output_width=1404,  # reMarkable width
-                        output_height=1872,  # reMarkable height
+                        output_width=REMARKABLE_WIDTH,
+                        output_height=REMARKABLE_HEIGHT,
                     )
 
                     # Add white background (SVG renders as black-on-transparent)
