@@ -4,6 +4,7 @@ MCP Resources for reMarkable tablet access.
 Provides:
 - remarkable:///{path}.txt - extracted text from any document
 - remarkableraw:///{path}.txt - raw PDF/EPUB text content (SSH mode only, enumerated)
+- remarkableimg:///{path}.page-{page}.png - page image (template resource)
 
 Resources are loaded at startup (SSH) or in background batches (cloud).
 Respects REMARKABLE_ROOT_PATH environment variable for folder filtering.
@@ -251,6 +252,88 @@ def _register_document(
             _registered_uris.add(final_raw_uri)
 
     return True
+
+
+# Resource template for page images
+# URI pattern: remarkableimg:///{path}.page-{page}.png
+@mcp.resource(
+    "remarkableimg:///{path}.page-{page}.png",
+    name="Page Image",
+    description="PNG image of a specific page from a reMarkable document",
+    mime_type="image/png",
+)
+def get_page_image(path: str, page: str) -> bytes:
+    """
+    Get a PNG image of a specific page from a reMarkable document.
+
+    Args:
+        path: Document path (e.g., "Notes/Meeting Notes" or "Sketch")
+        page: Page number (1-indexed)
+
+    Returns:
+        PNG image bytes
+    """
+    from remarkable_mcp.api import get_item_path, get_items_by_id, get_rmapi
+    from remarkable_mcp.extract import render_page_from_document_zip
+
+    try:
+        page_num = int(page)
+        if page_num < 1:
+            raise ValueError("Page number must be >= 1")
+    except ValueError as e:
+        raise ValueError(f"Invalid page number: {page}") from e
+
+    root = _get_root_path()
+
+    # Resolve path (add root prefix if configured)
+    document_path = f"/{path}" if not path.startswith("/") else path
+    if root != "/":
+        # Prepend root to the path
+        actual_path = root + document_path
+    else:
+        actual_path = document_path
+
+    client = get_rmapi()
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+
+    # Find document by path
+    document_lower = actual_path.lower().strip("/")
+    documents = [item for item in collection if not item.is_folder]
+    target_doc = None
+
+    for doc in documents:
+        doc_path = get_item_path(doc, items_by_id)
+        # Filter by root path
+        if not _is_within_root(doc_path, root):
+            continue
+        # Match by full path (case-insensitive)
+        if doc_path.lower().strip("/") == document_lower:
+            target_doc = doc
+            break
+        # Also try matching by name only
+        if doc.VissibleName.lower() == path.lower():
+            target_doc = doc
+            break
+
+    if not target_doc:
+        raise ValueError(f"Document not found: {path}")
+
+    # Download and render
+    raw_doc = client.download(target_doc)
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        tmp.write(raw_doc)
+        tmp_path = Path(tmp.name)
+
+    try:
+        png_data = render_page_from_document_zip(tmp_path, page_num)
+        if png_data is None:
+            raise RuntimeError(
+                f"Failed to render page {page_num}. Make sure 'rmc' and 'cairosvg' are installed."
+            )
+        return png_data
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def load_all_documents_sync() -> int:

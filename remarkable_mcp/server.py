@@ -28,6 +28,7 @@ Access documents from your reMarkable tablet. All operations are read-only.
 - `remarkable_read(document, content_type, page, grep)` - Read document content with pagination
 - `remarkable_recent(limit)` - Get recently modified documents
 - `remarkable_status()` - Check connection and diagnose issues
+- `remarkable_image(document, page)` - Get a PNG image of a specific page
 
 ## Recommended Workflows
 
@@ -36,6 +37,14 @@ Access documents from your reMarkable tablet. All operations are read-only.
 2. Use `remarkable_read("Document Name")` to get content
 3. Use `remarkable_read("Document", page=2)` to continue reading long documents
 4. Use `remarkable_read("Document", grep="pattern")` to search within a document
+
+### Getting Page Images
+Use `remarkable_image` when you need visual context:
+- Hand-drawn diagrams, sketches, or UI mockups
+- Content that text extraction might miss
+- Implementing designs based on hand-drawn wireframes
+
+Example: `remarkable_image("UI Mockup", page=1)` returns a PNG image
 
 ### For Large Documents
 Use pagination to avoid overwhelming context. The response includes:
@@ -47,11 +56,13 @@ Use pagination to avoid overwhelming context. The response includes:
 - Browse → Read: Find documents first, then read them
 - Recent → Read: Check what was recently modified, then read specific ones
 - Read with grep: Search for specific content within large documents
+- Browse → Image: Find a document then get its visual representation
 
 ## MCP Resources
 
 Documents are registered as resources for direct access:
 - `remarkable:///{path}.txt` - Get full extracted text content in one request
+- `remarkableimg:///{path}.page-{N}.png` - Get PNG image of page N
 - Use resources when you need complete document content without pagination
 """
 

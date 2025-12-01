@@ -133,6 +133,176 @@ def extract_text_from_rm_file(rm_file_path: Path) -> List[str]:
         return []
 
 
+def render_rm_file_to_png(rm_file_path: Path) -> Optional[bytes]:
+    """
+    Render a .rm file to PNG image bytes.
+
+    Uses rmc to convert .rm to SVG, then cairosvg to convert to PNG.
+    Returns PNG bytes with a white background suitable for display.
+
+    Args:
+        rm_file_path: Path to the .rm file
+
+    Returns:
+        PNG image bytes, or None if rendering failed
+    """
+    import subprocess
+    import tempfile
+
+    tmp_svg_path = None
+    tmp_png_path = None
+    tmp_raw_path = None
+
+    try:
+        # Create temp files
+        with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
+            tmp_svg_path = Path(tmp_svg.name)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
+            tmp_png_path = Path(tmp_png.name)
+
+        # Convert .rm to SVG using rmc
+        result = subprocess.run(
+            ["rmc", "-t", "svg", "-o", str(tmp_svg_path), str(rm_file_path)],
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+
+        # Convert SVG to PNG
+        try:
+            import cairosvg
+            from PIL import Image as PILImage
+
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_raw:
+                tmp_raw_path = Path(tmp_raw.name)
+
+            # reMarkable dimensions
+            cairosvg.svg2png(
+                url=str(tmp_svg_path),
+                write_to=str(tmp_raw_path),
+                output_width=1404,
+                output_height=1872,
+            )
+
+            # Add white background (SVG renders as black-on-transparent)
+            img = PILImage.open(tmp_raw_path)
+            if img.mode == "RGBA":
+                bg = PILImage.new("RGB", img.size, (255, 255, 255))
+                bg.paste(img, mask=img.split()[3])
+                img = bg
+            img.save(tmp_png_path)
+            tmp_raw_path.unlink(missing_ok=True)
+            tmp_raw_path = None
+        except ImportError:
+            # Fall back to inkscape
+            result = subprocess.run(
+                ["inkscape", str(tmp_svg_path), "--export-filename", str(tmp_png_path)],
+                capture_output=True,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                return None
+
+        # Read and return PNG bytes
+        with open(tmp_png_path, "rb") as f:
+            return f.read()
+
+    except subprocess.TimeoutExpired:
+        return None
+    except FileNotFoundError:
+        # rmc not installed
+        return None
+    except Exception:
+        return None
+    finally:
+        if tmp_svg_path:
+            tmp_svg_path.unlink(missing_ok=True)
+        if tmp_png_path:
+            tmp_png_path.unlink(missing_ok=True)
+        if tmp_raw_path:
+            tmp_raw_path.unlink(missing_ok=True)
+
+
+def render_page_from_document_zip(zip_path: Path, page: int = 1) -> Optional[bytes]:
+    """
+    Render a specific page from a reMarkable document zip to PNG.
+
+    Args:
+        zip_path: Path to the document zip file
+        page: Page number (1-indexed)
+
+    Returns:
+        PNG image bytes, or None if rendering failed or page doesn't exist
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(tmpdir_path)
+
+        # Get page order from .content file
+        page_order = []
+        for content_file in tmpdir_path.glob("*.content"):
+            try:
+                data = json.loads(content_file.read_text())
+                # New format: cPages.pages array
+                if "cPages" in data and "pages" in data["cPages"]:
+                    page_order = [p["id"] for p in data["cPages"]["pages"]]
+                # Fallback: pages array directly
+                elif "pages" in data and isinstance(data["pages"], list):
+                    page_order = data["pages"]
+            except Exception:
+                pass
+            break
+
+        rm_files = list(tmpdir_path.glob("**/*.rm"))
+
+        # Sort rm_files by page order if available
+        if page_order:
+            rm_by_id = {}
+            for rm_file in rm_files:
+                page_id = rm_file.stem
+                rm_by_id[page_id] = rm_file
+
+            ordered_rm_files = []
+            for page_id in page_order:
+                if page_id in rm_by_id:
+                    ordered_rm_files.append(rm_by_id[page_id])
+            # Add any remaining files not in page order
+            for rm_file in rm_files:
+                if rm_file not in ordered_rm_files:
+                    ordered_rm_files.append(rm_file)
+            rm_files = ordered_rm_files
+
+        # Validate page number
+        if page < 1 or page > len(rm_files):
+            return None
+
+        # Render the requested page
+        target_rm_file = rm_files[page - 1]
+        return render_rm_file_to_png(target_rm_file)
+
+
+def get_document_page_count(zip_path: Path) -> int:
+    """
+    Get the number of pages in a reMarkable document zip.
+
+    Args:
+        zip_path: Path to the document zip file
+
+    Returns:
+        Number of pages (0 if unable to determine)
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(tmpdir_path)
+
+        return len(list(tmpdir_path.glob("**/*.rm")))
+
+
 def extract_text_from_document_zip(
     zip_path: Path, include_ocr: bool = False, doc_id: Optional[str] = None
 ) -> Dict[str, Any]:
