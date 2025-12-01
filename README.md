@@ -139,6 +139,7 @@ AI assistants use the tools to read documents, search content, and more:
 | `remarkable_search` | Search content across multiple documents |
 | `remarkable_recent` | Get recently modified documents |
 | `remarkable_status` | Check connection status |
+| `remarkable_image` | Get a PNG image of a specific page (for visual content like diagrams or UI mockups) |
 
 All tools are **read-only** and return structured JSON with hints for next actions.
 
@@ -149,6 +150,7 @@ All tools are **read-only** and return structured JSON with hints for next actio
 - **Auto-redirect** — Browsing a document path returns its content automatically
 - **Auto-OCR** — Notebooks with no typed text automatically enable OCR
 - **Batch search** — Search across multiple documents in one call
+- **Vision support** — Get page images for visual context (diagrams, mockups, sketches)
 
 ### Example Usage
 
@@ -170,6 +172,15 @@ remarkable_search("meeting", grep="action items")
 
 # Get recent documents
 remarkable_recent(limit=10)
+
+# Get a page image (for visual content like UI mockups or diagrams)
+remarkable_image("UI Mockup", page=1)
+
+# Get SVG for editing in design tools
+remarkable_image("Wireframe", format="svg")
+
+# Transparent background for compositing
+remarkable_image("Logo Sketch", background="#00000000")
 ```
 
 ---
@@ -183,6 +194,8 @@ Documents are automatically registered as MCP resources:
 | `remarkable:///{path}.txt` | Extracted text content |
 | `remarkableraw:///{path}.pdf` | Original PDF file (SSH only) |
 | `remarkableraw:///{path}.epub` | Original EPUB file (SSH only) |
+| `remarkableimg:///{path}.page-{N}.png` | PNG image of page N (notebooks only) |
+| `remarkablesvg:///{path}.page-{N}.svg` | SVG vector image of page N (notebooks only) |
 
 📖 **[Full Resources Documentation](docs/resources.md)**
 
@@ -254,6 +267,30 @@ Useful for:
 - Focusing on work documents during office hours
 - Separating personal and professional notes
 - Limiting scope for specific AI workflows
+
+### Custom Background Color
+
+Set the default background color for image rendering:
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--ssh"],
+      "env": {
+        "REMARKABLE_BACKGROUND_COLOR": "#FFFFFF"
+      }
+    }
+  }
+}
+```
+
+Supported formats:
+- `#RRGGBB` — RGB hex (e.g., `#FFFFFF` for white)
+- `#RRGGBBAA` — RGBA hex (e.g., `#00000000` for transparent)
+
+Default is `#FBFBFB` (reMarkable paper color). This affects both the `remarkable_image` tool and image resources.
 
 ---
 

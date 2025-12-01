@@ -98,6 +98,7 @@ class TestMCPServerInitialization:
             "remarkable_recent",
             "remarkable_search",
             "remarkable_status",
+            "remarkable_image",
         ]
 
         for tool_name in expected_tools:
@@ -105,9 +106,9 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Test that we have exactly 5 intent-based tools."""
+        """Test that we have exactly 6 intent-based tools."""
         tools = await mcp.list_tools()
-        assert len(tools) == 5, f"Expected 5 tools, got {len(tools)}"
+        assert len(tools) == 6, f"Expected 6 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -468,6 +469,58 @@ class TestRemarkableRead:
 
 
 # =============================================================================
+# Test remarkable_image Tool
+# =============================================================================
+
+
+class TestRemarkableImage:
+    """Test remarkable_image tool."""
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_image_document_not_found(self, mock_get_rmapi):
+        """Test getting image from non-existent document."""
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_client.get_meta_items.return_value = []
+
+        result = await mcp.call_tool("remarkable_image", {"document": "NonExistent"})
+        data = json.loads(result[0].text)
+
+        assert "_error" in data
+        assert data["_error"]["type"] == "document_not_found"
+        assert "suggestion" in data["_error"]
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_image_error_handling(self, mock_get_rmapi):
+        """Test error handling in image tool."""
+        mock_get_rmapi.side_effect = RuntimeError("Connection failed")
+
+        result = await mcp.call_tool("remarkable_image", {"document": "Test"})
+        data = json.loads(result[0].text)
+
+        assert "_error" in data
+        assert data["_error"]["type"] == "image_failed"
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_image_provides_suggestions(self, mock_get_rmapi, mock_document):
+        """Test that image tool provides 'did you mean' suggestions."""
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_client.get_meta_items.return_value = [mock_document]
+
+        # Search for something similar but not exact
+        result = await mcp.call_tool("remarkable_image", {"document": "Test Doc"})
+        data = json.loads(result[0].text)
+
+        # Should get a not found error with suggestions
+        assert "_error" in data
+        assert data["_error"]["type"] == "document_not_found"
+
+
+# =============================================================================
 # Test Registration
 # =============================================================================
 
@@ -530,7 +583,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await mcp.list_tools()
 
-        assert len(tools) == 5
+        assert len(tools) == 6
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:

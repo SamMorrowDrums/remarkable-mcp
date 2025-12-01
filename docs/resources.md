@@ -8,6 +8,8 @@ Documents in your reMarkable library are automatically registered as MCP resourc
 |------------|-------------|------|
 | `remarkable:///` | Your annotations, typed text, and handwriting | Both |
 | `remarkableraw:///` | Original PDF/EPUB text | SSH only |
+| `remarkableimg:///` | PNG page images (notebooks) | Both |
+| `remarkablesvg:///` | SVG page images (notebooks) | Both |
 
 ## Text Resources (`remarkable:///`)
 
@@ -88,6 +90,46 @@ This paper explores the relationship between...
 | Cloud | ✅ Yes | ❌ No |
 
 The Cloud API doesn't provide access to original source files, so raw resources are only available when using SSH mode.
+
+## Image Resources (`remarkableimg:///` and `remarkablesvg:///`)
+
+Notebook pages are available as image resources in both PNG and SVG formats.
+
+### URI Format
+
+```
+remarkableimg:///{path}.page-{N}.png
+remarkablesvg:///{path}.page-{N}.svg
+```
+
+Where `{N}` is the 1-indexed page number.
+
+### Examples
+
+```
+remarkableimg:///UI%20Mockup.page-1.png
+remarkableimg:///Work/Diagrams/Architecture.page-3.png
+remarkablesvg:///Wireframe.page-1.svg
+remarkablesvg:///Sketches/Logo.page-2.svg
+```
+
+### Response
+
+- **PNG resources** return binary image data with the standard reMarkable paper background color (`#FBFBFB`)
+- **SVG resources** return SVG XML content with the same background color
+
+### Use Cases
+
+- **Visual context**: View hand-drawn diagrams, sketches, or UI mockups
+- **Design implementation**: Convert wireframes to code
+- **SVG editing**: Import vector graphics into design tools for further editing
+- **Documentation**: Include notebook drawings in documents
+
+### Notes
+
+- Only available for notebooks (not PDFs or EPUBs)
+- For PDFs/EPUBs, the annotation layer would be rendered (not the underlying document)
+- Use the `remarkable_image` tool for more control (custom backgrounds, transparent output)
 
 ## How Resources Are Registered
 

@@ -6,10 +6,50 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
+from urllib.parse import unquote
 
 from mcp.server.fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
+
+
+class RemarkableMCP(FastMCP):
+    """Custom FastMCP server that handles VS Code's URI quirks.
+
+    VS Code:
+    - Appends ?version=... to resource URIs for cache busting
+    - URL-encodes spaces as %20 in URIs
+
+    This subclass normalizes URIs before resource lookup.
+    """
+
+    async def read_resource(self, uri):
+        """Read a resource, normalizing the URI for lookup.
+
+        Handles:
+        - Query parameters: ?version=timestamp -> stripped
+        - URL encoding: %20 -> space (to match registered templates)
+        """
+        uri_str = str(uri)
+
+        # Strip query parameters (e.g., ?version=1764625282944)
+        # Use simple string split to preserve URI structure (e.g., triple slashes)
+        if "?" in uri_str:
+            uri_str = uri_str.split("?")[0]
+            logger.debug("Stripped query params from resource URI")
+
+        # URL-decode the path portion (e.g., %20 -> space)
+        # This is needed because VS Code encodes spaces but our templates have spaces
+        if "%" in uri_str:
+            # Split to preserve scheme (remarkableimg://) and decode path
+            if ":///" in uri_str:
+                scheme_end = uri_str.index(":///") + 4
+                scheme = uri_str[:scheme_end]
+                path = uri_str[scheme_end:]
+                uri_str = scheme + unquote(path)
+                logger.debug("URL-decoded resource path")
+
+        return await super().read_resource(uri_str)
 
 
 def _build_instructions() -> str:
@@ -28,6 +68,7 @@ Access documents from your reMarkable tablet. All operations are read-only.
 - `remarkable_read(document, content_type, page, grep)` - Read document content with pagination
 - `remarkable_recent(limit)` - Get recently modified documents
 - `remarkable_status()` - Check connection and diagnose issues
+- `remarkable_image(document, page)` - Get a PNG image of a specific page
 
 ## Recommended Workflows
 
@@ -36,6 +77,14 @@ Access documents from your reMarkable tablet. All operations are read-only.
 2. Use `remarkable_read("Document Name")` to get content
 3. Use `remarkable_read("Document", page=2)` to continue reading long documents
 4. Use `remarkable_read("Document", grep="pattern")` to search within a document
+
+### Getting Page Images
+Use `remarkable_image` when you need visual context:
+- Hand-drawn diagrams, sketches, or UI mockups
+- Content that text extraction might miss
+- Implementing designs based on hand-drawn wireframes
+
+Example: `remarkable_image("UI Mockup", page=1)` returns a PNG image
 
 ### For Large Documents
 Use pagination to avoid overwhelming context. The response includes:
@@ -47,11 +96,13 @@ Use pagination to avoid overwhelming context. The response includes:
 - Browse → Read: Find documents first, then read them
 - Recent → Read: Check what was recently modified, then read specific ones
 - Read with grep: Search for specific content within large documents
+- Browse → Image: Find a document then get its visual representation
 
 ## MCP Resources
 
 Documents are registered as resources for direct access:
 - `remarkable:///{path}.txt` - Get full extracted text content in one request
+- `remarkableimg:///{path}.page-{N}.png` - Get PNG image of page N (notebooks only)
 - Use resources when you need complete document content without pagination
 """
 
@@ -143,7 +194,7 @@ async def lifespan(app: FastMCP) -> AsyncIterator[None]:
 
 
 # Initialize FastMCP server with lifespan and instructions
-mcp = FastMCP("remarkable", instructions=_build_instructions(), lifespan=lifespan)
+mcp = RemarkableMCP("remarkable", instructions=_build_instructions(), lifespan=lifespan)
 
 # Import tools, resources, and prompts to register them
 from remarkable_mcp import (  # noqa: E402
