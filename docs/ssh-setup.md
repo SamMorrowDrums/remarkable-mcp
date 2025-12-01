@@ -15,10 +15,10 @@ Developer mode is required to enable SSH access on your reMarkable.
 
 > ⚠️ **Warning:** Enabling developer mode will **factory reset** your device. Make sure your documents are synced to the cloud before proceeding.
 
-1. Go to **Settings → General → Software**
-2. Tap **Developer mode**
-3. Follow the prompts to enable it
-4. Your device will reset and restart
+Follow the official instructions to enable developer mode:
+
+- **[Official reMarkable Support: Developer Mode](https://support.remarkable.com/s/article/Developer-mode)** — Official guide from reMarkable
+- **[reMarkable Guide: Developer Mode](https://remarkable.guide/tech/developer-mode.html)** — Community documentation with additional context
 
 ### 2. USB Connection
 
@@ -61,9 +61,35 @@ Add to your VS Code MCP config (`.vscode/mcp.json`):
 
 That's it! The default connection (`root@10.11.99.1`) works for USB connections.
 
-### Passwordless SSH (Recommended)
+### Password Authentication
 
-Avoid typing your password every time:
+If you haven't set up SSH keys, you can use password authentication **(not recommended)**:
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--ssh"],
+      "env": {
+        "REMARKABLE_SSH_PASSWORD": "your-ssh-password",
+        "GOOGLE_VISION_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+> ⚠️ **Requires sshpass:** Password authentication requires `sshpass` to be installed:
+> - **Debian/Ubuntu:** `sudo apt install sshpass`
+> - **macOS:** `brew install hudochenkov/sshpass/sshpass`
+> - **Fedora:** `sudo dnf install sshpass`
+
+> 🔐 **Security Recommendation:** Password authentication stores your password in plain text in your config file. For better security, set up SSH key authentication instead (see below).
+
+### SSH Key Authentication (Recommended)
+
+SSH keys are more secure than passwords and don't require `sshpass`:
 
 ```bash
 # Generate an SSH key if you don't have one
@@ -72,6 +98,31 @@ ssh-keygen -t ed25519
 # Copy your key to the tablet
 ssh-copy-id root@10.11.99.1
 ```
+
+Once your key is set up, you don't need to specify a password in your config.
+
+#### Passphrase-Protected Keys
+
+If your SSH key has a passphrase, you'll need an **SSH agent** running to cache the passphrase. Without an agent, the MCP server can't prompt for your passphrase interactively.
+
+**Using ssh-agent:**
+```bash
+# Start ssh-agent (add to your shell profile)
+eval "$(ssh-agent -s)"
+
+# Add your key (will prompt for passphrase once)
+ssh-add ~/.ssh/id_ed25519
+```
+
+**Password managers with SSH agent support:**
+
+Some password managers provide built-in SSH agents, letting you use passphrase-protected keys across all your devices:
+
+- **[1Password SSH Agent](https://developer.1password.com/docs/ssh/)** — Stores SSH keys in your vault, prompts via 1Password GUI when needed
+- **[Secretive](https://github.com/maxgoedjen/secretive)** (macOS) — Stores keys in Secure Enclave with Touch ID
+- **[KeePassXC](https://keepassxc.org/docs/KeePassXC_UserGuide#_ssh_agent_integration)** — Open-source with SSH agent integration
+
+These integrate seamlessly — the agent handles authentication automatically, and you get the security benefits of passphrase-protected keys without manual setup.
 
 ### SSH Config Alias
 
@@ -118,6 +169,7 @@ Note: WiFi is slower than USB but works from anywhere on your network.
 | `REMARKABLE_SSH_HOST` | `10.11.99.1` | SSH hostname or IP address |
 | `REMARKABLE_SSH_USER` | `root` | SSH username |
 | `REMARKABLE_SSH_PORT` | `22` | SSH port |
+| `REMARKABLE_SSH_PASSWORD` | *(none)* | SSH password (requires `sshpass`, key auth recommended) |
 
 ## Troubleshooting
 
@@ -131,6 +183,7 @@ Note: WiFi is slower than USB but works from anywhere on your network.
 
 - Double-check the password from Settings → Developer mode
 - If using SSH keys, ensure they're set up correctly
+- If your key has a passphrase, make sure ssh-agent is running and your key is added (`ssh-add -l` to check)
 
 ### "Connection timed out"
 
