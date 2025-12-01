@@ -4,7 +4,8 @@ MCP Resources for reMarkable tablet access.
 Provides:
 - remarkable:///{path}.txt - extracted text from any document
 - remarkableraw:///{path}.txt - raw PDF/EPUB text content (SSH mode only)
-- remarkableimg:///{path}.page-{page}.png - page image for notebooks (page is templated)
+- remarkableimg:///{path}.page-{page}.png - page image for notebooks (PNG)
+- remarkablesvg:///{path}.page-{page}.svg - page image for notebooks (SVG vector)
 
 Resources are loaded at startup (SSH) or in background batches (cloud).
 Respects REMARKABLE_ROOT_PATH environment variable for folder filtering.
@@ -200,6 +201,40 @@ def _make_image_resource(client, document):
     return image_resource
 
 
+def _make_svg_resource(client, document):
+    """Create a resource function for SVG page images from a notebook.
+
+    Returns a function that takes a page number and returns SVG content.
+    """
+    from remarkable_mcp.extract import render_page_from_document_zip_svg
+
+    def svg_resource(page: str) -> str:
+        try:
+            page_num = int(page)
+            if page_num < 1:
+                raise ValueError("Page number must be >= 1")
+        except ValueError as e:
+            raise ValueError(f"Invalid page number: {page}") from e
+
+        raw_doc = client.download(document)
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(raw_doc)
+            tmp_path = Path(tmp.name)
+
+        try:
+            svg_content = render_page_from_document_zip_svg(tmp_path, page_num)
+            if svg_content is None:
+                raise RuntimeError(
+                    f"Failed to render page {page_num} to SVG. "
+                    "Make sure 'rmc' is installed."
+                )
+            return svg_content
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    return svg_resource
+
+
 def _register_document(
     client, doc, items_by_id=None, file_types: dict = None, root: str = "/"
 ) -> bool:
@@ -309,9 +344,9 @@ def _register_document(
         _registered_raw.add(doc_id)
         _registered_uris.add(final_raw_uri)
 
-    # Register image template resource for notebooks only (not PDF/EPUB)
+    # Register image template resources for notebooks only (not PDF/EPUB)
     if file_type == "notebook":
-        # URI template with {page} parameter - path is pre-resolved
+        # PNG resource template with {page} parameter
         img_uri = f"remarkableimg:///{uri_path}.page-{{page}}.png"
         img_counter = 1
         final_img_uri = img_uri
@@ -337,6 +372,32 @@ def _register_document(
 
         # Store mapping for completion handler to look up page counts
         _img_uri_to_doc[final_img_uri] = (client, doc)
+
+        # SVG resource template with {page} parameter
+        svg_uri = f"remarkablesvg:///{uri_path}.page-{{page}}.svg"
+        svg_counter = 1
+        final_svg_uri = svg_uri
+        svg_display = f"{display_path} (SVG)"
+        while final_svg_uri in _registered_uris:
+            final_svg_uri = f"remarkablesvg:///{uri_path}_{svg_counter}.page-{{page}}.svg"
+            svg_display = f"{display_path} ({svg_counter}) (SVG)"
+            svg_counter += 1
+
+        svg_desc = f"SVG vector image of page from notebook '{display_path}'"
+        if doc.ModifiedClient:
+            svg_desc += f" (modified: {doc.ModifiedClient})"
+
+        mcp.resource(
+            final_svg_uri,
+            name=svg_display,
+            description=svg_desc,
+            mime_type="image/svg+xml",
+        )(_make_svg_resource(client, doc))
+
+        _registered_uris.add(final_svg_uri)
+
+        # Store mapping for SVG completions too
+        _img_uri_to_doc[final_svg_uri] = (client, doc)
 
     return True
 
@@ -526,12 +587,16 @@ async def handle_completion(ref, argument, context):
 
     Currently handles:
     - remarkableimg:// page parameter: looks up actual page count for the document
+    - remarkablesvg:// page parameter: looks up actual page count for the document
     """
     if isinstance(ref, ResourceTemplateReference):
         uri = ref.uri if hasattr(ref, "uri") else str(ref)
 
-        # Handle page completions for image resources
-        if uri.startswith("remarkableimg://") and argument.name == "page":
+        # Handle page completions for image resources (PNG and SVG)
+        is_img = uri.startswith("remarkableimg://") and argument.name == "page"
+        is_svg = uri.startswith("remarkablesvg://") and argument.name == "page"
+
+        if is_img or is_svg:
             # Extract any partial value the user has typed
             partial = argument.value or ""
 

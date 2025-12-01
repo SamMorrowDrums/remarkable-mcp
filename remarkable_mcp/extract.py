@@ -304,6 +304,112 @@ def render_rm_file_to_png(
             tmp_raw_path.unlink(missing_ok=True)
 
 
+def render_rm_file_to_svg(rm_file_path: Path) -> Optional[str]:
+    """
+    Render a .rm file to SVG string.
+
+    Uses rmc to convert .rm to SVG.
+
+    Args:
+        rm_file_path: Path to the .rm file
+
+    Returns:
+        SVG content as string, or None if rendering failed
+    """
+    import subprocess
+    import tempfile
+
+    tmp_svg_path = None
+
+    try:
+        # Create temp file for SVG output
+        with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
+            tmp_svg_path = Path(tmp_svg.name)
+
+        # Convert .rm to SVG using rmc
+        result = subprocess.run(
+            ["rmc", "-t", "svg", "-o", str(tmp_svg_path), str(rm_file_path)],
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+
+        # Read and return SVG content
+        return tmp_svg_path.read_text()
+
+    except subprocess.TimeoutExpired:
+        return None
+    except FileNotFoundError:
+        # rmc not installed
+        return None
+    except Exception:
+        return None
+    finally:
+        if tmp_svg_path:
+            tmp_svg_path.unlink(missing_ok=True)
+
+
+def render_page_from_document_zip_svg(zip_path: Path, page: int = 1) -> Optional[str]:
+    """
+    Render a specific page from a reMarkable document zip to SVG.
+
+    Args:
+        zip_path: Path to the document zip file
+        page: Page number (1-indexed)
+
+    Returns:
+        SVG content as string, or None if rendering failed or page doesn't exist
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(tmpdir_path)
+
+        # Get page order from .content file
+        page_order = []
+        for content_file in tmpdir_path.glob("*.content"):
+            try:
+                data = json.loads(content_file.read_text())
+                # New format: cPages.pages array
+                if "cPages" in data and "pages" in data["cPages"]:
+                    page_order = [p["id"] for p in data["cPages"]["pages"]]
+                # Fallback: pages array directly
+                elif "pages" in data and isinstance(data["pages"], list):
+                    page_order = data["pages"]
+            except Exception:
+                pass
+            break
+
+        rm_files = list(tmpdir_path.glob("**/*.rm"))
+
+        # Sort rm_files by page order if available
+        if page_order:
+            rm_by_id = {}
+            for rm_file in rm_files:
+                page_id = rm_file.stem
+                rm_by_id[page_id] = rm_file
+
+            ordered_rm_files = []
+            for page_id in page_order:
+                if page_id in rm_by_id:
+                    ordered_rm_files.append(rm_by_id[page_id])
+            # Add any remaining files not in page order
+            for rm_file in rm_files:
+                if rm_file not in ordered_rm_files:
+                    ordered_rm_files.append(rm_file)
+            rm_files = ordered_rm_files
+
+        # Validate page number
+        if page < 1 or page > len(rm_files):
+            return None
+
+        # Render the requested page
+        target_rm_file = rm_files[page - 1]
+        return render_rm_file_to_svg(target_rm_file)
+
+
 def render_page_from_document_zip(
     zip_path: Path, page: int = 1, background_color: Optional[str] = None
 ) -> Optional[bytes]:
