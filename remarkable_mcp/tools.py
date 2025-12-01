@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import Literal, Optional
 
+from mcp.server.fastmcp import Image
 from mcp.types import ToolAnnotations
 
 from remarkable_mcp.api import (
@@ -27,6 +28,10 @@ from remarkable_mcp.extract import (
     extract_text_from_epub,
     extract_text_from_pdf,
     find_similar_documents,
+    get_background_color,
+    get_document_page_count,
+    render_page_from_document_zip,
+    render_page_from_document_zip_svg,
 )
 from remarkable_mcp.responses import make_error, make_response
 from remarkable_mcp.server import mcp
@@ -122,6 +127,11 @@ RECENT_ANNOTATIONS = ToolAnnotations(
 
 STATUS_ANNOTATIONS = ToolAnnotations(
     title="Check reMarkable Connection",
+    **_BASE_ANNOTATIONS,
+)
+
+IMAGE_ANNOTATIONS = ToolAnnotations(
+    title="Get reMarkable Page Image",
     **_BASE_ANNOTATIONS,
 )
 
@@ -1080,3 +1090,176 @@ def remarkable_status() -> str:
             )
 
         return make_response(result, hint)
+
+
+@mcp.tool(annotations=IMAGE_ANNOTATIONS)
+def remarkable_image(
+    document: str,
+    page: int = 1,
+    background: Optional[str] = None,
+    output_format: str = "png",
+):
+    """
+    <usecase>Get an image of a specific page from a reMarkable document.</usecase>
+    <instructions>
+    Renders a notebook or document page as an image (PNG or SVG). This is useful for:
+    - Viewing hand-drawn diagrams, sketches, or UI mockups
+    - Getting visual context that text extraction might miss
+    - Implementing designs based on hand-drawn wireframes
+    - SVG format for scalable vector graphics that can be edited
+
+    The image is returned as base64-encoded data that can be displayed inline.
+
+    Note: This works best with notebooks and handwritten content. For PDFs/EPUBs,
+    the annotations layer is rendered (not the underlying PDF content).
+    </instructions>
+    <parameters>
+    - document: Document name or path (use remarkable_browse to find documents)
+    - page: Page number (default: 1, 1-indexed)
+    - background: Background color as hex code. Supports RGB (#RRGGBB) or RGBA (#RRGGBBAA).
+      Default is "#FBFBFB" (reMarkable paper color), or set REMARKABLE_BACKGROUND_COLOR
+      env var to override. Use "#00000000" for transparent.
+    - output_format: Output format - "png" (default) or "svg" for vector graphics
+    </parameters>
+    <examples>
+    - remarkable_image("UI Mockup")  # Get first page with reMarkable paper background
+    - remarkable_image("Meeting Notes", page=2)  # Get second page
+    - remarkable_image("/Work/Designs/Wireframe", background="#FFFFFF")  # White background
+    - remarkable_image("Sketch", background="#00000000")  # Transparent background
+    - remarkable_image("Diagram", output_format="svg")  # Get as SVG for editing
+    </examples>
+    """
+    try:
+        # Resolve background color: use provided value or get from env/default
+        if background is None:
+            background = get_background_color()
+
+        client = get_rmapi()
+        collection = client.get_meta_items()
+        items_by_id = get_items_by_id(collection)
+
+        root = _get_root_path()
+        # Resolve user-provided path to actual device path
+        actual_document = _resolve_root_path(document) if document.startswith("/") else document
+
+        # Find the document by name or path (case-insensitive, not folders)
+        documents = [item for item in collection if not item.is_folder]
+        target_doc = None
+        document_lower = actual_document.lower().strip("/")
+
+        for doc in documents:
+            doc_path = get_item_path(doc, items_by_id)
+            # Filter by root path
+            if not _is_within_root(doc_path, root):
+                continue
+            # Match by name (case-insensitive)
+            if doc.VissibleName.lower() == document_lower:
+                target_doc = doc
+                break
+            # Also try matching by full path (case-insensitive)
+            if doc_path.lower().strip("/") == document_lower:
+                target_doc = doc
+                break
+
+        if not target_doc:
+            # Find similar documents for suggestion (only within root)
+            filtered_docs = [
+                doc for doc in documents if _is_within_root(get_item_path(doc, items_by_id), root)
+            ]
+            similar = find_similar_documents(document, filtered_docs)
+            search_term = document.split()[0] if document else "notes"
+            return make_error(
+                error_type="document_not_found",
+                message=f"Document not found: '{document}'",
+                suggestion=(
+                    f"Try remarkable_browse(query='{search_term}') to search, "
+                    "or remarkable_browse('/') to list all files."
+                ),
+                did_you_mean=similar if similar else None,
+            )
+
+        # Download the document
+        raw_doc = client.download(target_doc)
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(raw_doc)
+            tmp_path = Path(tmp.name)
+
+        try:
+            # Validate format parameter
+            format_lower = output_format.lower()
+            if format_lower not in ("png", "svg"):
+                return make_error(
+                    error_type="invalid_format",
+                    message=f"Invalid format: '{output_format}'. Supported formats: png, svg",
+                    suggestion="Use output_format='png' for raster or 'svg' for vectors.",
+                )
+
+            # Get total page count
+            total_pages = get_document_page_count(tmp_path)
+
+            if total_pages == 0:
+                return make_error(
+                    error_type="no_pages",
+                    message=f"Document '{target_doc.VissibleName}' has no renderable pages.",
+                    suggestion=(
+                        "This may be a PDF/EPUB without annotations. "
+                        "Use remarkable_read() to extract text content instead."
+                    ),
+                )
+
+            if page < 1 or page > total_pages:
+                return make_error(
+                    error_type="page_out_of_range",
+                    message=f"Page {page} does not exist. Document has {total_pages} page(s).",
+                    suggestion=f"Use page=1 to {total_pages} to view different pages.",
+                )
+
+            # Render the page based on format
+            if format_lower == "svg":
+                svg_content = render_page_from_document_zip_svg(
+                    tmp_path, page, background_color=background
+                )
+
+                if svg_content is None:
+                    return make_error(
+                        error_type="render_failed",
+                        message="Failed to render page to SVG.",
+                        suggestion="Make sure 'rmc' is installed. Try: uv add rmc",
+                    )
+
+                # Return SVG as text content
+                hint = (
+                    f"Page {page}/{total_pages} as SVG. "
+                    f"Use remarkable_image('{document}', output_format='png') for raster."
+                )
+                return make_response(
+                    {"svg": svg_content, "page": page, "total_pages": total_pages},
+                    hint,
+                )
+            else:
+                # PNG format
+                png_data = render_page_from_document_zip(
+                    tmp_path, page, background_color=background
+                )
+
+                if png_data is None:
+                    return make_error(
+                        error_type="render_failed",
+                        message="Failed to render page to image.",
+                        suggestion=(
+                            "Make sure 'rmc' and 'cairosvg' are installed. Try: uv add rmc cairosvg"
+                        ),
+                    )
+
+                # Return the image using FastMCP's Image class
+                return Image(data=png_data, format="png")
+
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    except Exception as e:
+        return make_error(
+            error_type="image_failed",
+            message=str(e),
+            suggestion="Check remarkable_status() to verify your connection.",
+        )
