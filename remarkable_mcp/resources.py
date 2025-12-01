@@ -3,8 +3,8 @@ MCP Resources for reMarkable tablet access.
 
 Provides:
 - remarkable:///{path}.txt - extracted text from any document
-- remarkableraw:///{path}.txt - raw PDF/EPUB text content (SSH mode only, enumerated)
-- remarkableimg:///{path}.page-{page}.png - page image (template resource)
+- remarkableraw:///{path}.txt - raw PDF/EPUB text content (SSH mode only)
+- remarkableimg:///{path}.page-{page}.png - page image for notebooks (page is templated)
 
 Resources are loaded at startup (SSH) or in background batches (cloud).
 Respects REMARKABLE_ROOT_PATH environment variable for folder filtering.
@@ -69,6 +69,7 @@ def _apply_root_filter(path: str, root: str) -> str:
 # Background loader state
 _registered_docs: Set[str] = set()  # Track document IDs for text resources
 _registered_raw: Set[str] = set()  # Track document IDs for raw resources
+_registered_img: Set[str] = set()  # Track document IDs for image resources
 _registered_uris: Set[str] = set()  # Track URIs for collision detection
 
 
@@ -158,10 +159,49 @@ def _make_raw_resource(client, document, file_type: str):
     return raw_resource
 
 
+def _make_image_resource(client, document):
+    """Create a resource function for page images from a notebook.
+
+    Returns a function that takes a page number and returns PNG bytes.
+    """
+    from remarkable_mcp.extract import render_page_from_document_zip
+
+    def image_resource(page: str) -> bytes:
+        try:
+            page_num = int(page)
+            if page_num < 1:
+                raise ValueError("Page number must be >= 1")
+        except ValueError as e:
+            raise ValueError(f"Invalid page number: {page}") from e
+
+        raw_doc = client.download(document)
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(raw_doc)
+            tmp_path = Path(tmp.name)
+
+        try:
+            png_data = render_page_from_document_zip(tmp_path, page_num)
+            if png_data is None:
+                raise RuntimeError(
+                    f"Failed to render page {page_num}. "
+                    "Make sure 'rmc' and 'cairosvg' are installed."
+                )
+            return png_data
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    return image_resource
+
+
 def _register_document(
     client, doc, items_by_id=None, file_types: dict = None, root: str = "/"
 ) -> bool:
-    """Register a single document as a text resource (and raw resource if PDF/EPUB).
+    """Register a single document as resources.
+
+    Registers:
+    - Text resource for all documents
+    - Raw resource for PDF/EPUB files (SSH mode only)
+    - Image template resource for notebooks (not PDF/EPUB)
 
     Args:
         client: The reMarkable API client
@@ -170,7 +210,7 @@ def _register_document(
         file_types: Dict mapping doc IDs to file types (for raw resources)
         root: Root path filter (documents outside root are skipped)
     """
-    global _registered_docs, _registered_raw, _registered_uris
+    global _registered_docs, _registered_raw, _registered_img, _registered_uris
 
     doc_id = doc.ID
 
@@ -222,118 +262,73 @@ def _register_document(
     _registered_docs.add(doc_id)
     _registered_uris.add(final_uri)
 
-    # Also register raw resource for PDF/EPUB files (SSH mode only)
-    if _is_ssh_mode() and file_types is not None:
-        # Use pre-loaded file types (fast)
+    # Get file type for this document
+    file_type = None
+    if file_types is not None:
         file_type = file_types.get(doc_id)
-        if file_type in ("pdf", "epub"):
-            # Raw resources now return extracted text, use .txt extension
-            raw_uri = f"remarkableraw:///{uri_path}.{file_type}.txt"
-            raw_counter = 1
-            final_raw_uri = raw_uri
-            raw_display = f"{display_path} (raw {file_type.upper()}).txt"
-            while final_raw_uri in _registered_uris:
-                final_raw_uri = f"remarkableraw:///{uri_path}_{raw_counter}.{file_type}.txt"
-                raw_display = f"{display_path} (raw {file_type.upper()}) ({raw_counter}).txt"
-                raw_counter += 1
+    if file_type is None:
+        # Infer from document name
+        name_lower = doc.VissibleName.lower()
+        if name_lower.endswith(".pdf"):
+            file_type = "pdf"
+        elif name_lower.endswith(".epub"):
+            file_type = "epub"
+        else:
+            file_type = "notebook"
 
-            raw_desc = f"Raw {file_type.upper()} text content: '{display_path}'"
-            if doc.ModifiedClient:
-                raw_desc += f" (modified: {doc.ModifiedClient})"
+    # Register raw resource for PDF/EPUB files (SSH mode only)
+    if _is_ssh_mode() and file_type in ("pdf", "epub"):
+        # Raw resources now return extracted text, use .txt extension
+        raw_uri = f"remarkableraw:///{uri_path}.{file_type}.txt"
+        raw_counter = 1
+        final_raw_uri = raw_uri
+        raw_display = f"{display_path} (raw {file_type.upper()}).txt"
+        while final_raw_uri in _registered_uris:
+            final_raw_uri = f"remarkableraw:///{uri_path}_{raw_counter}.{file_type}.txt"
+            raw_display = f"{display_path} (raw {file_type.upper()}) ({raw_counter}).txt"
+            raw_counter += 1
 
-            mcp.resource(
-                final_raw_uri,
-                name=raw_display,
-                description=raw_desc,
-                mime_type="text/plain",
-            )(_make_raw_resource(client, doc, file_type))
+        raw_desc = f"Raw {file_type.upper()} text content: '{display_path}'"
+        if doc.ModifiedClient:
+            raw_desc += f" (modified: {doc.ModifiedClient})"
 
-            _registered_raw.add(doc_id)
-            _registered_uris.add(final_raw_uri)
+        mcp.resource(
+            final_raw_uri,
+            name=raw_display,
+            description=raw_desc,
+            mime_type="text/plain",
+        )(_make_raw_resource(client, doc, file_type))
+
+        _registered_raw.add(doc_id)
+        _registered_uris.add(final_raw_uri)
+
+    # Register image template resource for notebooks only (not PDF/EPUB)
+    if file_type == "notebook":
+        # URI template with {page} parameter - path is pre-resolved
+        img_uri = f"remarkableimg:///{uri_path}.page-{{page}}.png"
+        img_counter = 1
+        final_img_uri = img_uri
+        img_display = f"{display_path} (page image)"
+        while final_img_uri in _registered_uris:
+            final_img_uri = f"remarkableimg:///{uri_path}_{img_counter}.page-{{page}}.png"
+            img_display = f"{display_path} ({img_counter}) (page image)"
+            img_counter += 1
+
+        img_desc = f"PNG image of page from notebook '{display_path}'"
+        if doc.ModifiedClient:
+            img_desc += f" (modified: {doc.ModifiedClient})"
+
+        mcp.resource(
+            final_img_uri,
+            name=img_display,
+            description=img_desc,
+            mime_type="image/png",
+        )(_make_image_resource(client, doc))
+
+        _registered_img.add(doc_id)
+        _registered_uris.add(final_img_uri)
 
     return True
-
-
-# Resource template for page images
-# URI pattern: remarkableimg:///{path}.page-{page}.png
-@mcp.resource(
-    "remarkableimg:///{path}.page-{page}.png",
-    name="Page Image",
-    description="PNG image of a specific page from a reMarkable document",
-    mime_type="image/png",
-)
-def get_page_image(path: str, page: str) -> bytes:
-    """
-    Get a PNG image of a specific page from a reMarkable document.
-
-    Args:
-        path: Document path (e.g., "Notes/Meeting Notes" or "Sketch")
-        page: Page number (1-indexed)
-
-    Returns:
-        PNG image bytes
-    """
-    from remarkable_mcp.api import get_item_path, get_items_by_id, get_rmapi
-    from remarkable_mcp.extract import render_page_from_document_zip
-
-    try:
-        page_num = int(page)
-        if page_num < 1:
-            raise ValueError("Page number must be >= 1")
-    except ValueError as e:
-        raise ValueError(f"Invalid page number: {page}") from e
-
-    root = _get_root_path()
-
-    # Resolve path (add root prefix if configured)
-    document_path = f"/{path}" if not path.startswith("/") else path
-    if root != "/":
-        # Prepend root to the path
-        actual_path = root + document_path
-    else:
-        actual_path = document_path
-
-    client = get_rmapi()
-    collection = client.get_meta_items()
-    items_by_id = get_items_by_id(collection)
-
-    # Find document by path
-    document_lower = actual_path.lower().strip("/")
-    documents = [item for item in collection if not item.is_folder]
-    target_doc = None
-
-    for doc in documents:
-        doc_path = get_item_path(doc, items_by_id)
-        # Filter by root path
-        if not _is_within_root(doc_path, root):
-            continue
-        # Match by full path (case-insensitive)
-        if doc_path.lower().strip("/") == document_lower:
-            target_doc = doc
-            break
-        # Also try matching by name only
-        if doc.VissibleName.lower() == path.lower():
-            target_doc = doc
-            break
-
-    if not target_doc:
-        raise ValueError(f"Document not found: {path}")
-
-    # Download and render
-    raw_doc = client.download(target_doc)
-    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-        tmp.write(raw_doc)
-        tmp_path = Path(tmp.name)
-
-    try:
-        png_data = render_page_from_document_zip(tmp_path, page_num)
-        if png_data is None:
-            raise RuntimeError(
-                f"Failed to render page {page_num}. Make sure 'rmc' and 'cairosvg' are installed."
-            )
-        return png_data
-    finally:
-        tmp_path.unlink(missing_ok=True)
 
 
 def load_all_documents_sync() -> int:
@@ -344,7 +339,7 @@ def load_all_documents_sync() -> int:
 
     Respects REMARKABLE_ROOT_PATH environment variable.
     """
-    global _registered_docs, _registered_raw
+    global _registered_docs, _registered_raw, _registered_img
 
     from remarkable_mcp.api import get_items_by_id, get_rmapi
 
@@ -381,6 +376,7 @@ def load_all_documents_sync() -> int:
     logger.info(
         f"Registered {len(_registered_docs)} text resources"
         + (f", {len(_registered_raw)} raw resources (PDF/EPUB)" if _registered_raw else "")
+        + (f", {len(_registered_img)} image resources (notebooks)" if _registered_img else "")
         + (f" (filtered to {root})" if root != "/" else "")
     )
     return len(_registered_docs)

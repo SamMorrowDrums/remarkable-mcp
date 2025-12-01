@@ -188,7 +188,7 @@ Documents are automatically registered as MCP resources:
 | `remarkable:///{path}.txt` | Extracted text content |
 | `remarkableraw:///{path}.pdf` | Original PDF file (SSH only) |
 | `remarkableraw:///{path}.epub` | Original EPUB file (SSH only) |
-| `remarkableimg:///{path}.page-{N}.png` | PNG image of page N |
+| `remarkableimg:///{path}.page-{N}.png` | PNG image of page N (notebooks only) |
 
 📖 **[Full Resources Documentation](docs/resources.md)**
 
