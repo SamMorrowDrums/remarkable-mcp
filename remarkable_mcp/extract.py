@@ -3,6 +3,7 @@ Text extraction helpers for reMarkable documents.
 """
 
 import json
+import os
 import tempfile
 import zipfile
 from difflib import SequenceMatcher
@@ -14,7 +15,18 @@ REMARKABLE_WIDTH = 1404
 REMARKABLE_HEIGHT = 1872
 
 # Standard reMarkable background color (light cream/gray)
-REMARKABLE_BACKGROUND_COLOR = "#FBFBFB"
+# Can be overridden via REMARKABLE_BACKGROUND_COLOR environment variable
+_DEFAULT_BACKGROUND_COLOR = "#FBFBFB"
+
+
+def get_background_color() -> str:
+    """Get the background color, checking env var for override."""
+    return os.environ.get("REMARKABLE_BACKGROUND_COLOR", _DEFAULT_BACKGROUND_COLOR)
+
+
+# For backwards compatibility, expose as module constant (evaluated at import)
+# Use get_background_color() for runtime evaluation of env var
+REMARKABLE_BACKGROUND_COLOR = get_background_color()
 
 # Margin around content when using content-based bounding box (in pixels)
 CONTENT_MARGIN = 50

@@ -167,9 +167,9 @@ def _make_image_resource(client, document):
     """Create a resource function for page images from a notebook.
 
     Returns a function that takes a page number and returns PNG bytes.
-    Uses the standard reMarkable background color for resources.
+    Uses the standard reMarkable background color for resources (configurable via env).
     """
-    from remarkable_mcp.extract import REMARKABLE_BACKGROUND_COLOR, render_page_from_document_zip
+    from remarkable_mcp.extract import get_background_color, render_page_from_document_zip
 
     def image_resource(page: str) -> bytes:
         try:
@@ -187,7 +187,7 @@ def _make_image_resource(client, document):
         try:
             # Use reMarkable standard background color for resources
             png_data = render_page_from_document_zip(
-                tmp_path, page_num, background_color=REMARKABLE_BACKGROUND_COLOR
+                tmp_path, page_num, background_color=get_background_color()
             )
             if png_data is None:
                 raise RuntimeError(
@@ -205,10 +205,10 @@ def _make_svg_resource(client, document):
     """Create a resource function for SVG page images from a notebook.
 
     Returns a function that takes a page number and returns SVG content.
-    Uses the standard reMarkable background color for resources.
+    Uses the standard reMarkable background color for resources (configurable via env).
     """
     from remarkable_mcp.extract import (
-        REMARKABLE_BACKGROUND_COLOR,
+        get_background_color,
         render_page_from_document_zip_svg,
     )
 
@@ -228,7 +228,7 @@ def _make_svg_resource(client, document):
         try:
             # Use reMarkable standard background color for resources
             svg_content = render_page_from_document_zip_svg(
-                tmp_path, page_num, background_color=REMARKABLE_BACKGROUND_COLOR
+                tmp_path, page_num, background_color=get_background_color()
             )
             if svg_content is None:
                 raise RuntimeError(

@@ -328,6 +328,8 @@ remarkable_status()
 - **`"#00000000"`** — Fully transparent (RGBA format)
 - **`"#80008080"`** — Semi-transparent purple (RGBA format)
 
+**Tip:** Set `REMARKABLE_BACKGROUND_COLOR` environment variable to change the default for all image operations.
+
 ### Examples
 
 ```python

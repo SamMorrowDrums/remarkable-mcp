@@ -24,11 +24,11 @@ from remarkable_mcp.api import (
     get_rmapi,
 )
 from remarkable_mcp.extract import (
-    REMARKABLE_BACKGROUND_COLOR,
     extract_text_from_document_zip,
     extract_text_from_epub,
     extract_text_from_pdf,
     find_similar_documents,
+    get_background_color,
     get_document_page_count,
     render_page_from_document_zip,
     render_page_from_document_zip_svg,
@@ -1096,7 +1096,7 @@ def remarkable_status() -> str:
 def remarkable_image(
     document: str,
     page: int = 1,
-    background: Optional[str] = REMARKABLE_BACKGROUND_COLOR,
+    background: Optional[str] = None,
     format: str = "png",
 ):
     """
@@ -1117,7 +1117,8 @@ def remarkable_image(
     - document: Document name or path (use remarkable_browse to find documents)
     - page: Page number (default: 1, 1-indexed)
     - background: Background color as hex code. Supports RGB (#RRGGBB) or RGBA (#RRGGBBAA).
-      Default is "#FBFBFB" (reMarkable paper color). Use "#00000000" for transparent.
+      Default is "#FBFBFB" (reMarkable paper color), or set REMARKABLE_BACKGROUND_COLOR
+      env var to override. Use "#00000000" for transparent.
     - format: Output format - "png" (default) or "svg" for vector graphics
     </parameters>
     <examples>
@@ -1129,6 +1130,10 @@ def remarkable_image(
     </examples>
     """
     try:
+        # Resolve background color: use provided value or get from env/default
+        if background is None:
+            background = get_background_color()
+
         client = get_rmapi()
         collection = client.get_meta_items()
         items_by_id = get_items_by_id(collection)

@@ -268,6 +268,30 @@ Useful for:
 - Separating personal and professional notes
 - Limiting scope for specific AI workflows
 
+### Custom Background Color
+
+Set the default background color for image rendering:
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--ssh"],
+      "env": {
+        "REMARKABLE_BACKGROUND_COLOR": "#FFFFFF"
+      }
+    }
+  }
+}
+```
+
+Supported formats:
+- `#RRGGBB` — RGB hex (e.g., `#FFFFFF` for white)
+- `#RRGGBBAA` — RGBA hex (e.g., `#00000000` for transparent)
+
+Default is `#FBFBFB` (reMarkable paper color). This affects both the `remarkable_image` tool and image resources.
+
 ---
 
 ## Use Cases
