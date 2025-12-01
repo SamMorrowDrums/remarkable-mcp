@@ -6,6 +6,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
+from urllib.parse import unquote
 
 from mcp.server.fastmcp import FastMCP
 
@@ -13,27 +14,40 @@ logger = logging.getLogger(__name__)
 
 
 class RemarkableMCP(FastMCP):
-    """Custom FastMCP server that handles VS Code's version query params.
+    """Custom FastMCP server that handles VS Code's URI quirks.
 
-    VS Code appends ?version=... to resource URIs for cache busting.
-    This subclass strips query parameters before resource lookup.
+    VS Code:
+    - Appends ?version=... to resource URIs for cache busting
+    - URL-encodes spaces as %20 in URIs
+
+    This subclass normalizes URIs before resource lookup.
     """
 
     async def read_resource(self, uri):
-        """Read a resource, stripping query parameters from the URI.
+        """Read a resource, normalizing the URI for lookup.
 
-        VS Code appends ?version=timestamp to resource URIs which causes
-        FastMCP's exact-match lookup to fail. We strip the query string
-        before passing to the parent implementation.
+        Handles:
+        - Query parameters: ?version=timestamp -> stripped
+        - URL encoding: %20 -> space (to match registered templates)
         """
         uri_str = str(uri)
 
         # Strip query parameters (e.g., ?version=1764625282944)
         # Use simple string split to preserve URI structure (e.g., triple slashes)
         if "?" in uri_str:
-            clean_uri = uri_str.split("?")[0]
-            logger.debug(f"Stripped query params from resource URI: {uri_str} -> {clean_uri}")
-            uri_str = clean_uri
+            uri_str = uri_str.split("?")[0]
+            logger.debug("Stripped query params from resource URI")
+
+        # URL-decode the path portion (e.g., %20 -> space)
+        # This is needed because VS Code encodes spaces but our templates have spaces
+        if "%" in uri_str:
+            # Split to preserve scheme (remarkableimg://) and decode path
+            if ":///" in uri_str:
+                scheme_end = uri_str.index(":///") + 4
+                scheme = uri_str[:scheme_end]
+                path = uri_str[scheme_end:]
+                uri_str = scheme + unquote(path)
+                logger.debug("URL-decoded resource path")
 
         return await super().read_resource(uri_str)
 
