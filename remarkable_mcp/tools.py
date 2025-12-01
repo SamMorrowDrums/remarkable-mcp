@@ -1247,8 +1247,7 @@ def remarkable_image(
                         error_type="render_failed",
                         message="Failed to render page to image.",
                         suggestion=(
-                            "Make sure 'rmc' and 'cairosvg' are installed. "
-                            "Try: uv add rmc cairosvg"
+                            "Make sure 'rmc' and 'cairosvg' are installed. Try: uv add rmc cairosvg"
                         ),
                     )
 
