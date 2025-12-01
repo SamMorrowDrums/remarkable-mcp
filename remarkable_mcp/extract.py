@@ -155,6 +155,31 @@ def extract_text_from_rm_file(rm_file_path: Path) -> List[str]:
         return []
 
 
+def _parse_hex_color(hex_color: str) -> tuple:
+    """Parse a hex color string to RGBA tuple.
+
+    Supports #RRGGBB (RGB) and #RRGGBBAA (RGBA) formats.
+
+    Args:
+        hex_color: Hex color string (e.g., "#FFFFFF" or "#FFFFFF80")
+
+    Returns:
+        Tuple of (r, g, b, a) values (0-255)
+    """
+    if not hex_color.startswith("#"):
+        return (255, 255, 255, 255)
+
+    hex_str = hex_color.lstrip("#")
+    if len(hex_str) == 6:
+        r, g, b = tuple(int(hex_str[i : i + 2], 16) for i in (0, 2, 4))
+        return (r, g, b, 255)
+    elif len(hex_str) == 8:
+        r, g, b, a = tuple(int(hex_str[i : i + 2], 16) for i in (0, 2, 4, 6))
+        return (r, g, b, a)
+    else:
+        return (255, 255, 255, 255)
+
+
 def _get_svg_content_bounds(svg_path: Path) -> Optional[tuple]:
     """
     Parse SVG file to get the content bounding box from viewBox.
@@ -270,18 +295,19 @@ def render_rm_file_to_png(
             # If background color specified, ensure it's applied properly
             img = PILImage.open(tmp_raw_path)
             if img.mode == "RGBA" and background_color:
-                # Parse hex color
-                if background_color.startswith("#"):
-                    hex_color = background_color.lstrip("#")
-                    if len(hex_color) == 6:
-                        r, g, b = tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
-                    else:
-                        r, g, b = 255, 255, 255
-                else:
-                    r, g, b = 255, 255, 255
-                bg = PILImage.new("RGB", img.size, (r, g, b))
-                bg.paste(img, mask=img.split()[3])
-                img = bg
+                # Parse hex color (supports #RRGGBB and #RRGGBBAA formats)
+                r, g, b, a = _parse_hex_color(background_color)
+                # If fully opaque, composite onto RGB background
+                if a == 255:
+                    bg = PILImage.new("RGB", img.size, (r, g, b))
+                    bg.paste(img, mask=img.split()[3])
+                    img = bg
+                # If semi-transparent, keep RGBA and composite
+                elif a > 0:
+                    bg = PILImage.new("RGBA", img.size, (r, g, b, a))
+                    bg.paste(img, mask=img.split()[3])
+                    img = bg
+                # If fully transparent (a == 0), return as-is
             img.save(tmp_png_path)
 
             with open(tmp_png_path, "rb") as f:
@@ -416,6 +442,56 @@ def _add_svg_background(svg_content: str, background_color: str) -> str:
     return svg_content[:insert_pos] + bg_rect + svg_content[insert_pos:]
 
 
+def _get_ordered_rm_files(tmpdir_path: Path) -> List[Path]:
+    """Extract and order .rm files from an extracted document directory.
+
+    Reads the .content file to determine page order and returns .rm files
+    sorted accordingly. Falls back to filesystem order if no page order found.
+
+    Args:
+        tmpdir_path: Path to the extracted document directory
+
+    Returns:
+        List of .rm file paths in correct page order
+    """
+    # Get page order from .content file
+    page_order = []
+    for content_file in tmpdir_path.glob("*.content"):
+        try:
+            data = json.loads(content_file.read_text())
+            # New format: cPages.pages array
+            if "cPages" in data and "pages" in data["cPages"]:
+                page_order = [p["id"] for p in data["cPages"]["pages"]]
+            # Fallback: pages array directly
+            elif "pages" in data and isinstance(data["pages"], list):
+                page_order = data["pages"]
+        except Exception:
+            # Ignore errors reading/parsing .content file; fallback to default page order
+            pass
+        break
+
+    rm_files = list(tmpdir_path.glob("**/*.rm"))
+
+    # Sort rm_files by page order if available
+    if page_order:
+        rm_by_id = {}
+        for rm_file in rm_files:
+            page_id = rm_file.stem
+            rm_by_id[page_id] = rm_file
+
+        ordered_rm_files = []
+        for page_id in page_order:
+            if page_id in rm_by_id:
+                ordered_rm_files.append(rm_by_id[page_id])
+        # Add any remaining files not in page order
+        for rm_file in rm_files:
+            if rm_file not in ordered_rm_files:
+                ordered_rm_files.append(rm_file)
+        return ordered_rm_files
+
+    return rm_files
+
+
 def render_page_from_document_zip_svg(
     zip_path: Path, page: int = 1, background_color: Optional[str] = None
 ) -> Optional[str]:
@@ -437,39 +513,7 @@ def render_page_from_document_zip_svg(
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(tmpdir_path)
 
-        # Get page order from .content file
-        page_order = []
-        for content_file in tmpdir_path.glob("*.content"):
-            try:
-                data = json.loads(content_file.read_text())
-                # New format: cPages.pages array
-                if "cPages" in data and "pages" in data["cPages"]:
-                    page_order = [p["id"] for p in data["cPages"]["pages"]]
-                # Fallback: pages array directly
-                elif "pages" in data and isinstance(data["pages"], list):
-                    page_order = data["pages"]
-            except Exception:
-                pass
-            break
-
-        rm_files = list(tmpdir_path.glob("**/*.rm"))
-
-        # Sort rm_files by page order if available
-        if page_order:
-            rm_by_id = {}
-            for rm_file in rm_files:
-                page_id = rm_file.stem
-                rm_by_id[page_id] = rm_file
-
-            ordered_rm_files = []
-            for page_id in page_order:
-                if page_id in rm_by_id:
-                    ordered_rm_files.append(rm_by_id[page_id])
-            # Add any remaining files not in page order
-            for rm_file in rm_files:
-                if rm_file not in ordered_rm_files:
-                    ordered_rm_files.append(rm_file)
-            rm_files = ordered_rm_files
+        rm_files = _get_ordered_rm_files(tmpdir_path)
 
         # Validate page number
         if page < 1 or page > len(rm_files):
@@ -501,39 +545,7 @@ def render_page_from_document_zip(
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(tmpdir_path)
 
-        # Get page order from .content file
-        page_order = []
-        for content_file in tmpdir_path.glob("*.content"):
-            try:
-                data = json.loads(content_file.read_text())
-                # New format: cPages.pages array
-                if "cPages" in data and "pages" in data["cPages"]:
-                    page_order = [p["id"] for p in data["cPages"]["pages"]]
-                # Fallback: pages array directly
-                elif "pages" in data and isinstance(data["pages"], list):
-                    page_order = data["pages"]
-            except Exception:
-                pass
-            break
-
-        rm_files = list(tmpdir_path.glob("**/*.rm"))
-
-        # Sort rm_files by page order if available
-        if page_order:
-            rm_by_id = {}
-            for rm_file in rm_files:
-                page_id = rm_file.stem
-                rm_by_id[page_id] = rm_file
-
-            ordered_rm_files = []
-            for page_id in page_order:
-                if page_id in rm_by_id:
-                    ordered_rm_files.append(rm_by_id[page_id])
-            # Add any remaining files not in page order
-            for rm_file in rm_files:
-                if rm_file not in ordered_rm_files:
-                    ordered_rm_files.append(rm_file)
-            rm_files = ordered_rm_files
+        rm_files = _get_ordered_rm_files(tmpdir_path)
 
         # Validate page number
         if page < 1 or page > len(rm_files):
@@ -617,6 +629,7 @@ def extract_text_from_document_zip(
                 elif "pages" in data and isinstance(data["pages"], list):
                     page_order = data["pages"]
             except Exception:
+                # Malformed .content file - continue without page order
                 pass
             break  # Only process first .content file
 
@@ -656,6 +669,7 @@ def extract_text_from_document_zip(
                 if content.strip():
                     result["typed_text"].append(content)
             except Exception:
+                # File read failed - skip this file and continue
                 pass
 
         for md_file in tmpdir_path.glob("**/*.md"):
@@ -664,6 +678,7 @@ def extract_text_from_document_zip(
                 if content.strip():
                     result["typed_text"].append(content)
             except Exception:
+                # File read failed - skip this file and continue
                 pass
 
         # Extract from .content files (metadata with text)
@@ -673,6 +688,7 @@ def extract_text_from_document_zip(
                 if "text" in data:
                     result["typed_text"].append(data["text"])
             except Exception:
+                # Malformed JSON or read error - skip this file
                 pass
 
         # Extract PDF highlights
@@ -684,6 +700,7 @@ def extract_text_from_document_zip(
                         if "text" in h and h["text"]:
                             result["highlights"].append(h["text"])
             except Exception:
+                # Malformed JSON - skip this file
                 pass
 
         # OCR for handwritten content (optional)
@@ -840,10 +857,12 @@ def _ocr_google_vision_rest(rm_files: List[Path], api_key: str) -> Optional[List
                 return _ocr_tesseract(rm_files)
 
         except subprocess.TimeoutExpired:
+            # Page rendering timed out - skip this page and continue
             pass
         except FileNotFoundError:
             return None
         except Exception:
+            # API call or rendering failed - skip this page and continue
             pass
         finally:
             if tmp_svg_path:
@@ -940,6 +959,7 @@ def _ocr_google_vision_sdk(rm_files: List[Path]) -> Optional[List[str]]:
                     ocr_results.append(response.full_text_annotation.text.strip())
 
             except subprocess.TimeoutExpired:
+                # Page rendering timed out - skip this page and continue
                 pass
             except FileNotFoundError:
                 # rmc not installed
@@ -1054,6 +1074,7 @@ def _ocr_tesseract(rm_files: List[Path]) -> Optional[List[str]]:
                     ocr_results.append(text.strip())
 
             except subprocess.TimeoutExpired:
+                # Page rendering timed out - skip this page and continue
                 pass
             except FileNotFoundError:
                 # rmc not installed

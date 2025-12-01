@@ -1097,7 +1097,7 @@ def remarkable_image(
     document: str,
     page: int = 1,
     background: Optional[str] = None,
-    format: str = "png",
+    output_format: str = "png",
 ):
     """
     <usecase>Get an image of a specific page from a reMarkable document.</usecase>
@@ -1119,14 +1119,14 @@ def remarkable_image(
     - background: Background color as hex code. Supports RGB (#RRGGBB) or RGBA (#RRGGBBAA).
       Default is "#FBFBFB" (reMarkable paper color), or set REMARKABLE_BACKGROUND_COLOR
       env var to override. Use "#00000000" for transparent.
-    - format: Output format - "png" (default) or "svg" for vector graphics
+    - output_format: Output format - "png" (default) or "svg" for vector graphics
     </parameters>
     <examples>
     - remarkable_image("UI Mockup")  # Get first page with reMarkable paper background
     - remarkable_image("Meeting Notes", page=2)  # Get second page
     - remarkable_image("/Work/Designs/Wireframe", background="#FFFFFF")  # White background
     - remarkable_image("Sketch", background="#00000000")  # Transparent background
-    - remarkable_image("Diagram", format="svg")  # Get as SVG for editing
+    - remarkable_image("Diagram", output_format="svg")  # Get as SVG for editing
     </examples>
     """
     try:
@@ -1186,12 +1186,12 @@ def remarkable_image(
 
         try:
             # Validate format parameter
-            format_lower = format.lower()
+            format_lower = output_format.lower()
             if format_lower not in ("png", "svg"):
                 return make_error(
                     error_type="invalid_format",
-                    message=f"Invalid format: '{format}'. Supported formats: png, svg",
-                    suggestion="Use format='png' for raster images or format='svg' for vectors.",
+                    message=f"Invalid format: '{output_format}'. Supported formats: png, svg",
+                    suggestion="Use output_format='png' for raster or 'svg' for vectors.",
                 )
 
             # Get total page count
@@ -1224,13 +1224,13 @@ def remarkable_image(
                     return make_error(
                         error_type="render_failed",
                         message="Failed to render page to SVG.",
-                        suggestion="Make sure 'rmc' is installed. Try: pip install rmc",
+                        suggestion="Make sure 'rmc' is installed. Try: uv add rmc",
                     )
 
                 # Return SVG as text content
                 hint = (
                     f"Page {page}/{total_pages} as SVG. "
-                    f"Use remarkable_image('{document}', format='png') for raster."
+                    f"Use remarkable_image('{document}', output_format='png') for raster."
                 )
                 return make_response(
                     {"svg": svg_content, "page": page, "total_pages": total_pages},
@@ -1248,7 +1248,7 @@ def remarkable_image(
                         message="Failed to render page to image.",
                         suggestion=(
                             "Make sure 'rmc' and 'cairosvg' are installed. "
-                            "Try: pip install rmc cairosvg"
+                            "Try: uv add rmc cairosvg"
                         ),
                     )
 
