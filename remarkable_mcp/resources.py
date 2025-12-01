@@ -73,6 +73,7 @@ _registered_docs: Set[str] = set()  # Track document IDs for text resources
 _registered_raw: Set[str] = set()  # Track document IDs for raw resources
 _registered_img: Set[str] = set()  # Track document IDs for image resources
 _registered_uris: Set[str] = set()  # Track URIs for collision detection
+_img_uri_to_doc: dict[str, tuple] = {}  # Map image URI template -> (client, doc) for page count
 
 
 def _is_ssh_mode() -> bool:
@@ -334,6 +335,9 @@ def _register_document(
         _registered_img.add(doc_id)
         _registered_uris.add(final_img_uri)
 
+        # Store mapping for completion handler to look up page counts
+        _img_uri_to_doc[final_img_uri] = (client, doc)
+
     return True
 
 
@@ -521,7 +525,7 @@ async def handle_completion(ref, argument, context):
     """Provide completions for resource template parameters.
 
     Currently handles:
-    - remarkableimg:// page parameter: suggests page numbers 1-10
+    - remarkableimg:// page parameter: looks up actual page count for the document
     """
     if isinstance(ref, ResourceTemplateReference):
         uri = ref.uri if hasattr(ref, "uri") else str(ref)
@@ -531,11 +535,34 @@ async def handle_completion(ref, argument, context):
             # Extract any partial value the user has typed
             partial = argument.value or ""
 
-            # Suggest page numbers 1-10 that match the partial input
-            suggestions = [str(i) for i in range(1, 11)]
+            # Try to find the matching URI template and get actual page count
+            page_count = 1  # Default to 1 if we can't determine
+            for template_uri, (client, doc) in _img_uri_to_doc.items():
+                # Check if the request URI matches this template (ignoring the {page} part)
+                # Template: remarkableimg:///Drawing/Frogalina.page-{page}.png
+                # Request:  remarkableimg:///Drawing/Frogalina.page-{page}.png
+                if template_uri == uri:
+                    try:
+                        # Download and count pages
+                        from remarkable_mcp.extract import get_document_page_count
+
+                        raw_doc = client.download(doc)
+                        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                            tmp.write(raw_doc)
+                            tmp_path = Path(tmp.name)
+                        try:
+                            page_count = get_document_page_count(tmp_path)
+                        finally:
+                            tmp_path.unlink(missing_ok=True)
+                    except Exception as e:
+                        logger.debug(f"Failed to get page count for completion: {e}")
+                    break
+
+            # Suggest page numbers up to the actual count
+            suggestions = [str(i) for i in range(1, page_count + 1)]
             if partial:
                 suggestions = [s for s in suggestions if s.startswith(partial)]
 
-            return Completion(values=suggestions[:10], hasMore=True)
+            return Completion(values=suggestions[:10], hasMore=len(suggestions) > 10)
 
     return None
