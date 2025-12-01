@@ -99,10 +99,12 @@ class SSHClient:
         host: str = DEFAULT_SSH_HOST,
         user: str = DEFAULT_SSH_USER,
         port: int = DEFAULT_SSH_PORT,
+        password: Optional[str] = None,
     ):
         self.host = host
         self.user = user
         self.port = port
+        self.password = password
         self._documents: List[Document] = []
         self._documents_by_id: Dict[str, Document] = {}
 
@@ -110,8 +112,6 @@ class SSHClient:
         """Execute a command on the tablet via SSH."""
         ssh_args = [
             "ssh",
-            "-o",
-            "BatchMode=yes",
             "-o",
             "ConnectTimeout=5",
             "-o",
@@ -121,6 +121,14 @@ class SSHClient:
             f"{self.user}@{self.host}",
             command,
         ]
+
+        # If no password, use BatchMode for key-based auth
+        if not self.password:
+            ssh_args.insert(1, "-o")
+            ssh_args.insert(2, "BatchMode=yes")
+        else:
+            # Use sshpass for password authentication
+            ssh_args = ["sshpass", "-p", self.password] + ssh_args
 
         try:
             result = subprocess.run(
@@ -134,7 +142,14 @@ class SSHClient:
             return result.stdout
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"SSH command timed out after {timeout}s")
-        except FileNotFoundError:
+        except FileNotFoundError as e:
+            if self.password and "sshpass" in str(e):
+                raise RuntimeError(
+                    "sshpass not found. Install it with: "
+                    "apt install sshpass (Debian/Ubuntu), "
+                    "brew install hudochenkov/sshpass/sshpass (macOS), "
+                    "or set up SSH key authentication instead."
+                )
             raise RuntimeError("SSH client not found. Install openssh-client.")
 
     def _scp_download(self, remote_path: str, timeout: int = 60) -> bytes:
@@ -144,8 +159,6 @@ class SSHClient:
         ssh_args = [
             "ssh",
             "-o",
-            "BatchMode=yes",
-            "-o",
             "ConnectTimeout=5",
             "-o",
             "StrictHostKeyChecking=accept-new",
@@ -154,6 +167,14 @@ class SSHClient:
             f"{self.user}@{self.host}",
             f"cat '{remote_path}'",
         ]
+
+        # If no password, use BatchMode for key-based auth
+        if not self.password:
+            ssh_args.insert(1, "-o")
+            ssh_args.insert(2, "BatchMode=yes")
+        else:
+            # Use sshpass for password authentication
+            ssh_args = ["sshpass", "-p", self.password] + ssh_args
 
         try:
             result = subprocess.run(
@@ -444,6 +465,7 @@ def create_ssh_client(
     host: Optional[str] = None,
     user: Optional[str] = None,
     port: Optional[int] = None,
+    password: Optional[str] = None,
 ) -> SSHClient:
     """
     Create an SSH client with settings from environment or defaults.
@@ -452,9 +474,11 @@ def create_ssh_client(
     - REMARKABLE_SSH_HOST: SSH host (default: 10.11.99.1)
     - REMARKABLE_SSH_USER: SSH user (default: root)
     - REMARKABLE_SSH_PORT: SSH port (default: 22)
+    - REMARKABLE_SSH_PASSWORD: SSH password (optional, key-based auth recommended)
     """
     return SSHClient(
         host=host or os.environ.get("REMARKABLE_SSH_HOST", DEFAULT_SSH_HOST),
         user=user or os.environ.get("REMARKABLE_SSH_USER", DEFAULT_SSH_USER),
         port=port or int(os.environ.get("REMARKABLE_SSH_PORT", str(DEFAULT_SSH_PORT))),
+        password=password or os.environ.get("REMARKABLE_SSH_PASSWORD"),
     )

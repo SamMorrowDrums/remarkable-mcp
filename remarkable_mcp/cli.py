@@ -42,9 +42,14 @@ Examples:
   REMARKABLE_SSH_HOST="remarkable" uvx remarkable-mcp --ssh
 
 SSH Environment Variables:
-  REMARKABLE_SSH_HOST  SSH host (default: 10.11.99.1 for USB)
-  REMARKABLE_SSH_USER  SSH user (default: root)
-  REMARKABLE_SSH_PORT  SSH port (default: 22)
+  REMARKABLE_SSH_HOST      SSH host (default: 10.11.99.1 for USB)
+  REMARKABLE_SSH_USER      SSH user (default: root)
+  REMARKABLE_SSH_PORT      SSH port (default: 22)
+  REMARKABLE_SSH_PASSWORD  SSH password (optional, requires sshpass)
+
+Security Note:
+  For better security, set up SSH key authentication instead of using
+  a password. See: https://github.com/SamMorrowDrums/remarkable-mcp/blob/main/docs/ssh-setup.md
 """,
     )
     parser.add_argument(
