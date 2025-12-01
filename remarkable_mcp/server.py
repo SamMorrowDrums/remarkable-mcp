@@ -12,6 +12,32 @@ from mcp.server.fastmcp import FastMCP
 logger = logging.getLogger(__name__)
 
 
+class RemarkableMCP(FastMCP):
+    """Custom FastMCP server that handles VS Code's version query params.
+
+    VS Code appends ?version=... to resource URIs for cache busting.
+    This subclass strips query parameters before resource lookup.
+    """
+
+    async def read_resource(self, uri):
+        """Read a resource, stripping query parameters from the URI.
+
+        VS Code appends ?version=timestamp to resource URIs which causes
+        FastMCP's exact-match lookup to fail. We strip the query string
+        before passing to the parent implementation.
+        """
+        uri_str = str(uri)
+
+        # Strip query parameters (e.g., ?version=1764625282944)
+        # Use simple string split to preserve URI structure (e.g., triple slashes)
+        if "?" in uri_str:
+            clean_uri = uri_str.split("?")[0]
+            logger.debug(f"Stripped query params from resource URI: {uri_str} -> {clean_uri}")
+            uri_str = clean_uri
+
+        return await super().read_resource(uri_str)
+
+
 def _build_instructions() -> str:
     """Build server instructions based on current configuration."""
     # Check environment
@@ -154,7 +180,7 @@ async def lifespan(app: FastMCP) -> AsyncIterator[None]:
 
 
 # Initialize FastMCP server with lifespan and instructions
-mcp = FastMCP("remarkable", instructions=_build_instructions(), lifespan=lifespan)
+mcp = RemarkableMCP("remarkable", instructions=_build_instructions(), lifespan=lifespan)
 
 # Import tools, resources, and prompts to register them
 from remarkable_mcp import (  # noqa: E402
