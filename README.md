@@ -175,6 +175,12 @@ remarkable_recent(limit=10)
 
 # Get a page image (for visual content like UI mockups or diagrams)
 remarkable_image("UI Mockup", page=1)
+
+# Get SVG for editing in design tools
+remarkable_image("Wireframe", format="svg")
+
+# Transparent background for compositing
+remarkable_image("Logo Sketch", background="#00000000")
 ```
 
 ---
@@ -189,6 +195,7 @@ Documents are automatically registered as MCP resources:
 | `remarkableraw:///{path}.pdf` | Original PDF file (SSH only) |
 | `remarkableraw:///{path}.epub` | Original EPUB file (SSH only) |
 | `remarkableimg:///{path}.page-{N}.png` | PNG image of page N (notebooks only) |
+| `remarkablesvg:///{path}.page-{N}.svg` | SVG vector image of page N (notebooks only) |
 
 📖 **[Full Resources Documentation](docs/resources.md)**
 

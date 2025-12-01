@@ -304,14 +304,18 @@ def render_rm_file_to_png(
             tmp_raw_path.unlink(missing_ok=True)
 
 
-def render_rm_file_to_svg(rm_file_path: Path) -> Optional[str]:
+def render_rm_file_to_svg(
+    rm_file_path: Path, background_color: Optional[str] = None
+) -> Optional[str]:
     """
     Render a .rm file to SVG string.
 
-    Uses rmc to convert .rm to SVG.
+    Uses rmc to convert .rm to SVG, optionally adding a background.
 
     Args:
         rm_file_path: Path to the .rm file
+        background_color: Background color (e.g., "#FFFFFF", None for transparent).
+                         Use REMARKABLE_BACKGROUND_COLOR for the standard paper color.
 
     Returns:
         SVG content as string, or None if rendering failed
@@ -335,8 +339,14 @@ def render_rm_file_to_svg(rm_file_path: Path) -> Optional[str]:
         if result.returncode != 0:
             return None
 
-        # Read and return SVG content
-        return tmp_svg_path.read_text()
+        # Read SVG content
+        svg_content = tmp_svg_path.read_text()
+
+        # Add background rectangle if color specified
+        if background_color:
+            svg_content = _add_svg_background(svg_content, background_color)
+
+        return svg_content
 
     except subprocess.TimeoutExpired:
         return None
@@ -350,13 +360,61 @@ def render_rm_file_to_svg(rm_file_path: Path) -> Optional[str]:
             tmp_svg_path.unlink(missing_ok=True)
 
 
-def render_page_from_document_zip_svg(zip_path: Path, page: int = 1) -> Optional[str]:
+def _add_svg_background(svg_content: str, background_color: str) -> str:
+    """Add a background rectangle to an SVG.
+
+    Inserts a rect element as the first child of the SVG to act as background.
+
+    Args:
+        svg_content: Original SVG content
+        background_color: Background color (e.g., "#FFFFFF")
+
+    Returns:
+        SVG content with background added
+    """
+    import re
+
+    # Find the opening <svg> tag and its attributes
+    svg_match = re.search(r"(<svg[^>]*>)", svg_content, re.IGNORECASE)
+    if not svg_match:
+        return svg_content
+
+    svg_tag = svg_match.group(1)
+
+    # Extract viewBox or width/height for the background rect dimensions
+    viewbox_match = re.search(r'viewBox="([^"]*)"', svg_tag)
+    if viewbox_match:
+        viewbox = viewbox_match.group(1)
+        parts = viewbox.split()
+        if len(parts) == 4:
+            x, y, width, height = parts
+            bg_rect = (
+                f'<rect x="{x}" y="{y}" width="{width}" '
+                f'height="{height}" fill="{background_color}"/>'
+            )
+        else:
+            # Fallback to full page
+            bg_rect = f'<rect x="0" y="0" width="100%" height="100%" fill="{background_color}"/>'
+    else:
+        # No viewBox, use 100% dimensions
+        bg_rect = f'<rect x="0" y="0" width="100%" height="100%" fill="{background_color}"/>'
+
+    # Insert background rect right after the opening svg tag
+    insert_pos = svg_match.end()
+    return svg_content[:insert_pos] + bg_rect + svg_content[insert_pos:]
+
+
+def render_page_from_document_zip_svg(
+    zip_path: Path, page: int = 1, background_color: Optional[str] = None
+) -> Optional[str]:
     """
     Render a specific page from a reMarkable document zip to SVG.
 
     Args:
         zip_path: Path to the document zip file
         page: Page number (1-indexed)
+        background_color: Background color (e.g., "#FFFFFF", None for transparent).
+                         Use REMARKABLE_BACKGROUND_COLOR for the standard paper color.
 
     Returns:
         SVG content as string, or None if rendering failed or page doesn't exist
@@ -407,7 +465,7 @@ def render_page_from_document_zip_svg(zip_path: Path, page: int = 1) -> Optional
 
         # Render the requested page
         target_rm_file = rm_files[page - 1]
-        return render_rm_file_to_svg(target_rm_file)
+        return render_rm_file_to_svg(target_rm_file, background_color=background_color)
 
 
 def render_page_from_document_zip(
