@@ -15,10 +15,10 @@ Developer mode is required to enable SSH access on your reMarkable.
 
 > ⚠️ **Warning:** Enabling developer mode will **factory reset** your device. Make sure your documents are synced to the cloud before proceeding.
 
-1. Go to **Settings → General → Software**
-2. Tap **Developer mode**
-3. Follow the prompts to enable it
-4. Your device will reset and restart
+Follow the official instructions to enable developer mode:
+
+- **[Official reMarkable Support: Developer Mode](https://support.remarkable.com/s/article/Developer-mode)** — Official guide from reMarkable
+- **[Remarkable Guide: Developer Mode](https://remarkable.guide/tech/developer-mode.html)** — Community documentation with additional context
 
 ### 2. USB Connection
 
