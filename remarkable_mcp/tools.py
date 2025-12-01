@@ -1091,7 +1091,7 @@ def remarkable_status() -> str:
 
 
 @mcp.tool(annotations=IMAGE_ANNOTATIONS)
-def remarkable_image(document: str, page: int = 1):
+def remarkable_image(document: str, page: int = 1, background: Optional[str] = None):
     """
     <usecase>Get a PNG image of a specific page from a reMarkable document.</usecase>
     <instructions>
@@ -1108,11 +1108,15 @@ def remarkable_image(document: str, page: int = 1):
     <parameters>
     - document: Document name or path (use remarkable_browse to find documents)
     - page: Page number (default: 1, 1-indexed)
+    - background: Background color as hex code (e.g., "#FFFFFF" for white, "#FBFBFB" for
+      reMarkable paper color). Supports RGB (#RRGGBB) or RGBA (#RRGGBBAA) formats.
+      Default is transparent (None).
     </parameters>
     <examples>
-    - remarkable_image("UI Mockup")  # Get first page of UI mockup
+    - remarkable_image("UI Mockup")  # Get first page with transparent background
     - remarkable_image("Meeting Notes", page=2)  # Get second page
-    - remarkable_image("/Work/Designs/Wireframe")  # By path
+    - remarkable_image("/Work/Designs/Wireframe", background="#FFFFFF")  # White background
+    - remarkable_image("Sketch", background="#FBFBFB")  # reMarkable paper color
     </examples>
     """
     try:
@@ -1188,7 +1192,7 @@ def remarkable_image(document: str, page: int = 1):
                 )
 
             # Render the page
-            png_data = render_page_from_document_zip(tmp_path, page)
+            png_data = render_page_from_document_zip(tmp_path, page, background_color=background)
 
             if png_data is None:
                 return make_error(
