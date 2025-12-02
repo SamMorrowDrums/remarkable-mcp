@@ -5,6 +5,7 @@ All tools are read-only and idempotent - they only retrieve data from the
 reMarkable Cloud and do not modify any documents.
 """
 
+import base64
 import os
 import re
 import tempfile
@@ -1098,6 +1099,7 @@ def remarkable_image(
     page: int = 1,
     background: Optional[str] = None,
     output_format: str = "png",
+    embed: bool = True,
 ):
     """
     <usecase>Get an image of a specific page from a reMarkable document.</usecase>
@@ -1112,6 +1114,12 @@ def remarkable_image(
 
     Note: This works best with notebooks and handwritten content. For PDFs/EPUBs,
     the annotations layer is rendered (not the underlying PDF content).
+
+    ## Embedded vs JSON Response
+
+    By default (embed=True), PNG images are returned as embedded ImageContent which
+    most modern MCP clients can display inline. If your client doesn't support
+    embedded images, use embed=False to get base64 data in a JSON response.
     </instructions>
     <parameters>
     - document: Document name or path (use remarkable_browse to find documents)
@@ -1120,6 +1128,9 @@ def remarkable_image(
       Default is "#FBFBFB" (reMarkable paper color), or set REMARKABLE_BACKGROUND_COLOR
       env var to override. Use "#00000000" for transparent.
     - output_format: Output format - "png" (default) or "svg" for vector graphics
+    - embed: If True (default), return as embedded ImageContent. If False, return
+      base64-encoded data in JSON response. Use False for clients that don't support
+      embedded resources in tool responses.
     </parameters>
     <examples>
     - remarkable_image("UI Mockup")  # Get first page with reMarkable paper background
@@ -1127,6 +1138,7 @@ def remarkable_image(
     - remarkable_image("/Work/Designs/Wireframe", background="#FFFFFF")  # White background
     - remarkable_image("Sketch", background="#00000000")  # Transparent background
     - remarkable_image("Diagram", output_format="svg")  # Get as SVG for editing
+    - remarkable_image("Notes", embed=False)  # Base64 JSON (no embedded image support)
     </examples>
     """
     try:
@@ -1227,7 +1239,7 @@ def remarkable_image(
                         suggestion="Make sure 'rmc' is installed. Try: uv add rmc",
                     )
 
-                # Return SVG as text content
+                # Return SVG as text content (always JSON, no embed option for SVG)
                 hint = (
                     f"Page {page}/{total_pages} as SVG. "
                     f"Use remarkable_image('{document}', output_format='png') for raster."
@@ -1251,8 +1263,26 @@ def remarkable_image(
                         ),
                     )
 
-                # Return the image using FastMCP's Image class
-                return Image(data=png_data, format="png")
+                if embed:
+                    # Return the image using FastMCP's Image class (embedded ImageContent)
+                    return Image(data=png_data, format="png")
+                else:
+                    # Return base64-encoded PNG in JSON response
+                    # For clients that don't support embedded images in tool responses
+                    png_base64 = base64.b64encode(png_data).decode("utf-8")
+                    hint = (
+                        f"Page {page}/{total_pages} as base64-encoded PNG. "
+                        f"Use embed=True for embedded ImageContent if your client supports it."
+                    )
+                    return make_response(
+                        {
+                            "image_base64": png_base64,
+                            "mime_type": "image/png",
+                            "page": page,
+                            "total_pages": total_pages,
+                        },
+                        hint,
+                    )
 
         finally:
             tmp_path.unlink(missing_ok=True)
