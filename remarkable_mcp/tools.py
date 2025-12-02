@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Literal, Optional
 
+from mcp.server.fastmcp import Context
 from mcp.types import (
     BlobResourceContents,
     EmbeddedResource,
@@ -40,6 +41,11 @@ from remarkable_mcp.extract import (
     render_page_from_document_zip_svg,
 )
 from remarkable_mcp.responses import make_error, make_response
+from remarkable_mcp.sampling import (
+    get_ocr_backend,
+    ocr_via_sampling,
+    should_use_sampling_ocr,
+)
 from remarkable_mcp.server import mcp
 
 
@@ -153,6 +159,91 @@ def _is_cloud_archived(item) -> bool:
     # Cloud mode: check parent == "trash"
     parent = item.Parent if hasattr(item, "Parent") else getattr(item, "parent", "")
     return parent == "trash"
+
+
+def _ocr_png_tesseract(png_path: Path) -> Optional[str]:
+    """
+    OCR a PNG file using Tesseract.
+
+    Args:
+        png_path: Path to the PNG file
+
+    Returns:
+        Extracted text, or None if OCR failed
+    """
+    try:
+        import pytesseract
+        from PIL import Image as PILImage
+        from PIL import ImageFilter, ImageOps
+
+        img = PILImage.open(png_path)
+
+        # Convert to grayscale
+        img = img.convert("L")
+
+        # Increase contrast
+        img = ImageOps.autocontrast(img, cutoff=2)
+
+        # Slight sharpening
+        img = img.filter(ImageFilter.SHARPEN)
+
+        # Run OCR with settings optimized for sparse handwriting
+        custom_config = r"--psm 11 --oem 3"
+        text = pytesseract.image_to_string(img, config=custom_config)
+
+        return text.strip() if text.strip() else None
+
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+def _ocr_png_google_vision(png_path: Path) -> Optional[str]:
+    """
+    OCR a PNG file using Google Cloud Vision API.
+
+    Args:
+        png_path: Path to the PNG file
+
+    Returns:
+        Extracted text, or None if OCR failed
+    """
+    import base64
+
+    import requests
+
+    api_key = os.environ.get("GOOGLE_VISION_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        with open(png_path, "rb") as f:
+            image_content = base64.b64encode(f.read()).decode("utf-8")
+
+        url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
+        payload = {
+            "requests": [
+                {
+                    "image": {"content": image_content},
+                    "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
+                }
+            ]
+        }
+
+        response = requests.post(url, json=payload, timeout=60)
+        if response.status_code == 200:
+            data = response.json()
+            if "responses" in data and data["responses"]:
+                resp = data["responses"][0]
+                if "fullTextAnnotation" in resp:
+                    text = resp["fullTextAnnotation"]["text"]
+                    return text.strip() if text.strip() else None
+
+    except Exception:
+        pass
+
+    return None
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
@@ -1099,12 +1190,14 @@ def remarkable_status() -> str:
 
 
 @mcp.tool(annotations=IMAGE_ANNOTATIONS)
-def remarkable_image(
+async def remarkable_image(
     document: str,
     page: int = 1,
     background: Optional[str] = None,
     output_format: str = "png",
     compatibility: bool = False,
+    include_ocr: bool = False,
+    ctx: Context = None,
 ):
     """
     <usecase>Get an image of a specific page from a reMarkable document.</usecase>
@@ -1126,6 +1219,10 @@ def remarkable_image(
     compatibility=True to receive a JSON response with just the resource URI.
     The client can then fetch the resource separately.
 
+    Optionally, enable include_ocr=True to extract text from the image using OCR.
+    When REMARKABLE_OCR_BACKEND=sampling is set and the client supports sampling,
+    the client's own LLM will be used for OCR (no API keys needed).
+
     Note: This works best with notebooks and handwritten content. For PDFs/EPUBs,
     the annotations layer is rendered (not the underlying PDF content).
     </instructions>
@@ -1138,6 +1235,8 @@ def remarkable_image(
     - output_format: Output format - "png" (default) or "svg" for vector graphics
     - compatibility: If True, return resource URI in JSON instead of embedded resource.
       Use this if your client doesn't support embedded resources in tool responses.
+    - include_ocr: Enable OCR text extraction from the image (default: False).
+      When REMARKABLE_OCR_BACKEND=sampling, uses the client's LLM via MCP sampling.
     </parameters>
     <examples>
     - remarkable_image("UI Mockup")  # Get first page as embedded PNG resource
@@ -1146,6 +1245,7 @@ def remarkable_image(
     - remarkable_image("Sketch", background="#00000000")  # Transparent background
     - remarkable_image("Diagram", output_format="svg")  # Get as embedded SVG resource
     - remarkable_image("Notes", compatibility=True)  # Return resource URI for retry
+    - remarkable_image("Notes", include_ocr=True)  # Get image with OCR text extraction
     </examples>
     """
     try:
@@ -1297,8 +1397,46 @@ def remarkable_image(
                         ),
                     )
 
+                # Handle OCR if requested - extract text from the image
+                ocr_text = None
+                ocr_backend_used = None
+                if include_ocr:
+                    # Try sampling-based OCR if configured and available
+                    # This sends the image to the client's LLM to extract text
+                    if ctx and should_use_sampling_ocr(ctx):
+                        ocr_text = await ocr_via_sampling(ctx, png_data)
+                        if ocr_text:
+                            ocr_backend_used = "sampling"
+
+                    # Fall back to traditional OCR if sampling failed or not available
+                    if ocr_text is None:
+                        # Need to temporarily save PNG to file for tesseract/google
+                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as ocr_tmp:
+                            ocr_tmp.write(png_data)
+                            ocr_tmp_path = Path(ocr_tmp.name)
+                        try:
+                            backend = get_ocr_backend()
+                            if backend == "google" or (
+                                backend == "auto" and os.environ.get("GOOGLE_VISION_API_KEY")
+                            ):
+                                ocr_text = _ocr_png_google_vision(ocr_tmp_path)
+                                ocr_backend_used = "google"
+                            else:
+                                ocr_text = _ocr_png_tesseract(ocr_tmp_path)
+                                ocr_backend_used = "tesseract"
+                        finally:
+                            ocr_tmp_path.unlink(missing_ok=True)
+
                 resource_uri = f"remarkableimg:///{uri_path}.page-{page}.png"
                 png_base64 = base64.b64encode(png_data).decode("utf-8")
+
+                # Build OCR info for response if OCR was requested
+                ocr_info = {}
+                if include_ocr:
+                    ocr_info["ocr_text"] = ocr_text
+                    ocr_info["ocr_backend"] = ocr_backend_used
+                    if ocr_text is None:
+                        ocr_info["ocr_message"] = "No text detected in image"
 
                 if compatibility:
                     # Return base64 PNG in JSON for clients without embedded resource support
@@ -1309,17 +1447,24 @@ def remarkable_image(
                         f"Use 'data_uri' directly in HTML img src. "
                         f"Use compatibility=False for embedded resource format."
                     )
-                    return make_response(
-                        {
-                            "data_uri": data_uri,
-                            "image_base64": png_base64,
-                            "mime_type": "image/png",
-                            "page": page,
-                            "total_pages": total_pages,
-                            "resource_uri": resource_uri,
-                        },
-                        hint,
-                    )
+                    if include_ocr and ocr_text:
+                        hint = (
+                            f"Page {page}/{total_pages} with OCR text "
+                            f"(backend: {ocr_backend_used})."
+                        )
+                    elif include_ocr:
+                        hint = f"Page {page}/{total_pages}. No text detected via OCR."
+
+                    response_data = {
+                        "data_uri": data_uri,
+                        "image_base64": png_base64,
+                        "mime_type": "image/png",
+                        "page": page,
+                        "total_pages": total_pages,
+                        "resource_uri": resource_uri,
+                        **ocr_info,
+                    }
+                    return make_response(response_data, hint)
                 else:
                     # Return PNG as embedded BlobResourceContents with info hint
                     blob_resource = BlobResourceContents(
@@ -1328,11 +1473,15 @@ def remarkable_image(
                         blob=png_base64,
                     )
                     embedded = EmbeddedResource(type="resource", resource=blob_resource)
-                    info = TextContent(
-                        type="text",
-                        text=f"Page {page}/{total_pages} of '{target_doc.VissibleName}' as PNG. "
-                        f"Resource URI: {resource_uri}",
-                    )
+
+                    info_text = f"Page {page}/{total_pages} of '{target_doc.VissibleName}' as PNG. "
+                    info_text += f"Resource URI: {resource_uri}"
+                    if include_ocr and ocr_text:
+                        info_text += f"\n\nOCR Text (via {ocr_backend_used}):\n{ocr_text}"
+                    elif include_ocr:
+                        info_text += "\n\nOCR: No text detected in image."
+
+                    info = TextContent(type="text", text=info_text)
                     return [info, embedded]
 
         finally:

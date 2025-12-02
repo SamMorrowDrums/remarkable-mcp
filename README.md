@@ -139,7 +139,7 @@ AI assistants use the tools to read documents, search content, and more:
 | `remarkable_search` | Search content across multiple documents |
 | `remarkable_recent` | Get recently modified documents |
 | `remarkable_status` | Check connection status |
-| `remarkable_image` | Get a PNG image of a specific page (for visual content like diagrams or UI mockups) |
+| `remarkable_image` | Get a PNG image of a specific page (supports OCR via sampling) |
 
 All tools are **read-only** and return structured JSON with hints for next actions.
 
@@ -151,6 +151,7 @@ All tools are **read-only** and return structured JSON with hints for next actio
 - **Auto-OCR** — Notebooks with no typed text automatically enable OCR
 - **Batch search** — Search across multiple documents in one call
 - **Vision support** — Get page images for visual context (diagrams, mockups, sketches)
+- **Sampling OCR** — Use client's AI for OCR on images (no API key needed)
 
 ### Example Usage
 
@@ -179,6 +180,9 @@ remarkable_image("UI Mockup", page=1)
 # Get SVG for editing in design tools
 remarkable_image("Wireframe", output_format="svg")
 
+# Get image with OCR text extraction (uses sampling if configured)
+remarkable_image("Handwritten Notes", include_ocr=True)
+
 # Transparent background for compositing
 remarkable_image("Logo Sketch", background="#00000000")
 
@@ -206,7 +210,36 @@ Documents are automatically registered as MCP resources:
 
 ## OCR for Handwriting
 
-### Google Cloud Vision (Strongly Recommended)
+### Sampling OCR (No API Key Required)
+
+When using a client that supports MCP sampling (like VS Code with Copilot), you can use the client's own AI model for OCR. This requires no additional API keys or services.
+
+**Setup:**
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--ssh"],
+      "env": {
+        "REMARKABLE_OCR_BACKEND": "sampling"
+      }
+    }
+  }
+}
+```
+
+**Benefits:**
+- No additional API keys needed
+- Uses your client's AI capabilities
+- Often produces high-quality results
+
+**Limitations:**
+- Only available with clients that support MCP sampling
+- Falls back to Tesseract if sampling is unavailable
+
+### Google Cloud Vision (Recommended for Best Quality)
 
 Google Vision provides **far superior handwriting recognition** compared to Tesseract. Unless your handwriting is exceptionally neat, use Google Vision.
 
@@ -223,6 +256,16 @@ Google Vision provides **far superior handwriting recognition** compared to Tess
 ### Tesseract (Fallback)
 
 Tesseract is designed for printed text, not handwriting. Use only as a fallback for offline OCR or printed documents.
+
+### OCR Backend Priority
+
+When `REMARKABLE_OCR_BACKEND=auto` (default):
+1. Google Vision (if `GOOGLE_VISION_API_KEY` is set)
+2. Tesseract (fallback)
+
+When `REMARKABLE_OCR_BACKEND=sampling`:
+1. Sampling via client's LLM (if client supports it)
+2. Falls back to Google/Tesseract if sampling unavailable
 
 ---
 
