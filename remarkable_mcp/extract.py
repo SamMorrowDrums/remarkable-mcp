@@ -719,14 +719,23 @@ def extract_handwriting_ocr(rm_files: List[Path]) -> Optional[List[str]]:
     Extract handwritten text using OCR.
 
     Supports multiple backends (set REMARKABLE_OCR_BACKEND env var):
-    - "google" (default if API key provided): Google Cloud Vision - best for handwriting
+    - "sampling": Uses client's LLM via MCP sampling (requires async context, tools only)
+    - "google": Google Cloud Vision - best for handwriting
     - "tesseract": pytesseract - basic OCR, requires rmc + cairosvg
+    - "auto" (default): Google if API key provided, else Tesseract
 
-    Google Vision can be enabled by setting GOOGLE_VISION_API_KEY env var.
+    Note: "sampling" backend requires async context and is only available via tools,
+    not via MCP resources. When sampling is configured but this sync function is called
+    (e.g., from resources), it falls back to the auto-detection logic.
     """
     import os
 
     backend = os.environ.get("REMARKABLE_OCR_BACKEND", "auto").lower()
+
+    # Sampling backend requires async context - can't be used from sync functions
+    # Fall back to auto-detection for resources and other sync callers
+    if backend == "sampling":
+        backend = "auto"
 
     # Auto-detect best available backend
     if backend == "auto":
