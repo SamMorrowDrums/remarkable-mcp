@@ -177,10 +177,13 @@ remarkable_recent(limit=10)
 remarkable_image("UI Mockup", page=1)
 
 # Get SVG for editing in design tools
-remarkable_image("Wireframe", format="svg")
+remarkable_image("Wireframe", output_format="svg")
 
 # Transparent background for compositing
 remarkable_image("Logo Sketch", background="#00000000")
+
+# Compatibility mode: return resource URI instead of embedded resource
+remarkable_image("Diagram", compatibility=True)
 ```
 
 ---
@@ -337,6 +340,61 @@ uv run pytest test_server.py -v
 ```
 
 📖 **[Development Guide](docs/development.md)**
+
+---
+
+## MCP Capability Negotiation
+
+This server supports the MCP capability negotiation protocol. During the initialization handshake, clients declare their capabilities and the server responds with its supported features.
+
+### Checking Client Capabilities
+
+Tools can check what the connected client supports using the capability utilities:
+
+```python
+from mcp.server.fastmcp import Context
+from remarkable_mcp import (
+    get_client_capabilities,
+    client_supports_sampling,
+    client_supports_elicitation,
+    get_client_info,
+)
+
+@mcp.tool()
+async def my_tool(ctx: Context) -> str:
+    # Check if client supports specific features
+    if client_supports_sampling(ctx):
+        # Client can handle LLM sampling requests
+        pass
+
+    if client_supports_elicitation(ctx):
+        # Client can handle interactive user prompts
+        pass
+
+    # Get full capabilities object
+    caps = get_client_capabilities(ctx)
+
+    # Get client info (name, version, protocol)
+    info = get_client_info(ctx)
+
+    return "result"
+```
+
+### Available Capability Checks
+
+| Function | Description |
+|----------|-------------|
+| `get_client_capabilities(ctx)` | Get the full ClientCapabilities object |
+| `client_supports_sampling(ctx)` | Check if client supports LLM sampling |
+| `client_supports_elicitation(ctx)` | Check if client supports user prompts |
+| `client_supports_roots(ctx)` | Check if client supports filesystem roots |
+| `client_supports_experimental(ctx, feature)` | Check for experimental features |
+| `get_client_info(ctx)` | Get client name, version, protocol |
+| `get_protocol_version(ctx)` | Get negotiated protocol version |
+
+### Note on Embedded Resources
+
+The MCP protocol does not have a specific capability flag for embedded resources in tool responses. Support for `EmbeddedResource` and `ImageContent` in tool results is part of the base protocol. All clients supporting protocol version `2024-11-05` or later should handle embedded resources, though actual client implementations may vary.
 
 ---
 
