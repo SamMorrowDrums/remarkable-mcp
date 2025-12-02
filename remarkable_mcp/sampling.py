@@ -7,8 +7,8 @@ allowing the host application's LLM to extract text from images.
 ## Usage
 
 Sampling OCR is only available when:
-1. The client supports the sampling capability
-2. REMARKABLE_OCR_BACKEND is set to "sampling" or "auto" (and no Google Vision key is set)
+1. REMARKABLE_OCR_BACKEND is explicitly set to "sampling"
+2. The client supports the sampling capability
 
 The key advantage of sampling-based OCR is that it uses the client's own model,
 which may provide better results for handwriting without requiring additional
@@ -18,7 +18,7 @@ API keys or services.
 
 - Sampling is asynchronous and requires a Context object from tool execution
 - The prompt is carefully crafted to return ONLY the extracted text
-- Falls back to tesseract if sampling is not available or fails
+- Falls back to tesseract/google if sampling is not available or fails
 """
 
 import base64
@@ -158,13 +158,13 @@ async def ocr_pages_via_sampling(
 
 def get_ocr_backend() -> str:
     """
-    Get the configured OCR backend.
+    Get the configured OCR backend from the environment.
 
-    Returns one of: "sampling", "google", "tesseract", "auto"
+    Returns the raw value from REMARKABLE_OCR_BACKEND env var (default: "auto").
+    Possible values: "sampling", "google", "tesseract", "auto"
 
-    The "auto" mode selects the best available backend:
-    1. Google Vision if GOOGLE_VISION_API_KEY is set
-    2. Tesseract otherwise
+    Note: This function only returns the configured string. The actual backend
+    selection logic (for "auto" mode) is implemented in the tool functions.
 
     To use sampling OCR, explicitly set REMARKABLE_OCR_BACKEND=sampling.
     Sampling OCR requires a client that supports the sampling capability.
