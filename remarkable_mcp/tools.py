@@ -31,11 +31,13 @@ from remarkable_mcp.api import (
     get_rmapi,
 )
 from remarkable_mcp.extract import (
+    cache_ocr_result,
     extract_text_from_document_zip,
     extract_text_from_epub,
     extract_text_from_pdf,
     find_similar_documents,
     get_background_color,
+    get_cached_ocr_result,
     get_document_page_count,
     render_page_from_document_zip,
     render_page_from_document_zip_svg,
@@ -380,89 +382,92 @@ async def remarkable_read(
         # Get annotations/typed text (for "text" or "annotations" mode)
         notebook_pages = []  # List of page content for notebook pagination
         ocr_backend_used = None  # Track which OCR backend was used
+        content = None  # Will hold extraction result
 
         if content_type in ("text", "annotations"):
-            raw_doc = client.download(target_doc)
-            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                tmp.write(raw_doc)
-                tmp_path = Path(tmp.name)
-
             # For notebooks (no PDF/EPUB), use page-based pagination
             is_notebook = file_type not in ("pdf", "epub")
 
-            # Try sampling OCR for notebooks if requested and available
-            sampling_ocr_used = False
-            if is_notebook and include_ocr and ctx and should_use_sampling_ocr(ctx):
-                try:
-                    # Render all pages to PNG for sampling OCR
-                    total_pages = get_document_page_count(tmp_path)
-                    if total_pages > 0:
-                        png_pages = []
-                        for pg_num in range(1, total_pages + 1):
-                            png_data = render_page_from_document_zip(tmp_path, pg_num)
-                            if png_data:
-                                png_pages.append(png_data)
-                            else:
-                                png_pages.append(b"")  # Placeholder for failed pages
+            # Check cache first for notebooks with OCR
+            if is_notebook and include_ocr:
+                cached = get_cached_ocr_result(target_doc.ID, include_ocr=True)
+                if cached and cached.get("handwritten_text"):
+                    notebook_pages = cached["handwritten_text"]
+                    ocr_backend_used = cached.get("ocr_backend")
+                    content = cached
 
-                        if png_pages:
-                            # Use sampling OCR for all pages
-                            ocr_results = await ocr_pages_via_sampling(ctx, png_pages)
-                            if ocr_results:
-                                notebook_pages = ocr_results
-                                sampling_ocr_used = True
-                                ocr_backend_used = "sampling"
-                except Exception as e:
-                    # Log the exception for debugging, then fall back to sync OCR
-                    import sys
-                    print(f"Sampling OCR failed with exception: {e}", file=sys.stderr)
-                    pass
+            # If not cached, perform extraction
+            if not notebook_pages:
+                raw_doc = client.download(target_doc)
+                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                    tmp.write(raw_doc)
+                    tmp_path = Path(tmp.name)
 
-            # Use sync extraction if sampling wasn't used
-            if not sampling_ocr_used:
                 try:
-                    content = extract_text_from_document_zip(
-                        tmp_path, include_ocr=include_ocr, doc_id=target_doc.ID
-                    )
+                    # Try sampling OCR for notebooks if requested and available
+                    if is_notebook and include_ocr and ctx and should_use_sampling_ocr(ctx):
+                        # Render all pages to PNG for sampling OCR
+                        total_pages = get_document_page_count(tmp_path)
+                        if total_pages > 0:
+                            png_pages = []
+                            for pg_num in range(1, total_pages + 1):
+                                png_data = render_page_from_document_zip(tmp_path, pg_num)
+                                if png_data:
+                                    png_pages.append(png_data)
+                                else:
+                                    png_pages.append(b"")  # Placeholder for failed pages
+
+                            if png_pages:
+                                # Use sampling OCR for all pages
+                                ocr_results = await ocr_pages_via_sampling(ctx, png_pages)
+                                if ocr_results:
+                                    notebook_pages = ocr_results
+                                    ocr_backend_used = "sampling"
+                                    # Cache the sampling result
+                                    content = {
+                                        "typed_text": [],
+                                        "highlights": [],
+                                        "handwritten_text": notebook_pages,
+                                        "pages": total_pages,
+                                        "page_ids": [],
+                                        "ocr_backend": "sampling",
+                                    }
+                                    cache_ocr_result(target_doc.ID, content, include_ocr=True)
+
+                    # Fall back to sync extraction if sampling wasn't used or failed
+                    if not notebook_pages:
+                        content = extract_text_from_document_zip(
+                            tmp_path, include_ocr=include_ocr, doc_id=target_doc.ID
+                        )
+                        if is_notebook and content.get("handwritten_text"):
+                            notebook_pages = content["handwritten_text"]
+                            ocr_backend_used = content.get("ocr_backend")
                 finally:
                     tmp_path.unlink(missing_ok=True)
 
-                if is_notebook and content["handwritten_text"]:
-                    # Each item in handwritten_text is one notebook page
-                    notebook_pages = content["handwritten_text"]
-                    if include_ocr and notebook_pages:
-                        # Determine which backend was used for non-sampling OCR
-                        backend = get_ocr_backend()
-                        if backend == "google" or (
-                            backend == "auto" and os.environ.get("GOOGLE_VISION_API_KEY")
-                        ):
-                            ocr_backend_used = "google"
-                        else:
-                            ocr_backend_used = "tesseract"
-            else:
-                # Clean up temp file if we used sampling
-                tmp_path.unlink(missing_ok=True)
-                # Create empty content dict for fallback paths
-                content = {
-                    "typed_text": [],
-                    "highlights": [],
-                    "handwritten_text": notebook_pages,
-                }
-                # Ensure ocr_backend_used is set for sampling path
-                if not ocr_backend_used:
-                    ocr_backend_used = "sampling"
+            # For non-notebooks or when no OCR pages, build annotation sections
+            if not (is_notebook and notebook_pages):
+                if content is None:
+                    # Need to extract if we haven't already
+                    raw_doc = client.download(target_doc)
+                    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                        tmp.write(raw_doc)
+                        tmp_path = Path(tmp.name)
+                    try:
+                        content = extract_text_from_document_zip(
+                            tmp_path, include_ocr=include_ocr, doc_id=target_doc.ID
+                        )
+                    finally:
+                        tmp_path.unlink(missing_ok=True)
 
-            if is_notebook and notebook_pages:
-                pass  # notebook_pages already set
-            else:
                 # Add annotations section
                 annotation_parts = []
-                if content["typed_text"]:
+                if content.get("typed_text"):
                     annotation_parts.extend(content["typed_text"])
-                if content["highlights"]:
+                if content.get("highlights"):
                     annotation_parts.append("\n--- Highlights ---")
                     annotation_parts.extend(content["highlights"])
-                if content["handwritten_text"]:
+                if content.get("handwritten_text"):
                     annotation_parts.append("\n--- Handwritten (OCR) ---")
                     annotation_parts.extend(content["handwritten_text"])
 
