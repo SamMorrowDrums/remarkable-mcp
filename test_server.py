@@ -922,5 +922,175 @@ class TestCapabilityChecking:
         assert callable(get_protocol_version)
 
 
+# =============================================================================
+# Test Sampling OCR
+# =============================================================================
+
+
+class TestSamplingOCR:
+    """Test sampling-based OCR functionality."""
+
+    def test_get_ocr_backend_default(self):
+        """Test default OCR backend is auto."""
+        import os
+
+        from remarkable_mcp.sampling import get_ocr_backend
+
+        # Clear any env var
+        env_backup = os.environ.get("REMARKABLE_OCR_BACKEND")
+        if "REMARKABLE_OCR_BACKEND" in os.environ:
+            del os.environ["REMARKABLE_OCR_BACKEND"]
+
+        try:
+            result = get_ocr_backend()
+            assert result == "auto"
+        finally:
+            if env_backup is not None:
+                os.environ["REMARKABLE_OCR_BACKEND"] = env_backup
+
+    def test_get_ocr_backend_sampling(self):
+        """Test OCR backend can be set to sampling."""
+        import os
+
+        from remarkable_mcp.sampling import get_ocr_backend
+
+        env_backup = os.environ.get("REMARKABLE_OCR_BACKEND")
+        os.environ["REMARKABLE_OCR_BACKEND"] = "sampling"
+
+        try:
+            result = get_ocr_backend()
+            assert result == "sampling"
+        finally:
+            if env_backup is not None:
+                os.environ["REMARKABLE_OCR_BACKEND"] = env_backup
+            elif "REMARKABLE_OCR_BACKEND" in os.environ:
+                del os.environ["REMARKABLE_OCR_BACKEND"]
+
+    def test_should_use_sampling_ocr_false_when_not_configured(self):
+        """Test should_use_sampling_ocr returns False when not configured."""
+        import os
+
+        from mcp.types import ClientCapabilities, SamplingCapability
+
+        from remarkable_mcp.sampling import should_use_sampling_ocr
+
+        env_backup = os.environ.get("REMARKABLE_OCR_BACKEND")
+        if "REMARKABLE_OCR_BACKEND" in os.environ:
+            del os.environ["REMARKABLE_OCR_BACKEND"]
+
+        try:
+            # Create mock context with sampling capability
+            mock_caps = ClientCapabilities(sampling=SamplingCapability())
+            mock_ctx = Mock()
+            mock_ctx.session = Mock()
+            mock_ctx.session.client_params = Mock()
+            mock_ctx.session.client_params.capabilities = mock_caps
+
+            # Should return False because backend is "auto", not "sampling"
+            result = should_use_sampling_ocr(mock_ctx)
+            assert result is False
+        finally:
+            if env_backup is not None:
+                os.environ["REMARKABLE_OCR_BACKEND"] = env_backup
+
+    def test_should_use_sampling_ocr_true_when_configured(self):
+        """Test should_use_sampling_ocr returns True when configured and client supports it."""
+        import os
+
+        from mcp.types import ClientCapabilities, SamplingCapability
+
+        from remarkable_mcp.sampling import should_use_sampling_ocr
+
+        env_backup = os.environ.get("REMARKABLE_OCR_BACKEND")
+        os.environ["REMARKABLE_OCR_BACKEND"] = "sampling"
+
+        try:
+            # Create mock context with sampling capability
+            mock_caps = ClientCapabilities(sampling=SamplingCapability())
+            mock_ctx = Mock()
+            mock_ctx.session = Mock()
+            mock_ctx.session.client_params = Mock()
+            mock_ctx.session.client_params.capabilities = mock_caps
+
+            result = should_use_sampling_ocr(mock_ctx)
+            assert result is True
+        finally:
+            if env_backup is not None:
+                os.environ["REMARKABLE_OCR_BACKEND"] = env_backup
+            elif "REMARKABLE_OCR_BACKEND" in os.environ:
+                del os.environ["REMARKABLE_OCR_BACKEND"]
+
+    def test_should_use_sampling_ocr_false_when_client_doesnt_support(self):
+        """Test should_use_sampling_ocr returns False when client doesn't support sampling."""
+        import os
+
+        from mcp.types import ClientCapabilities
+
+        from remarkable_mcp.sampling import should_use_sampling_ocr
+
+        env_backup = os.environ.get("REMARKABLE_OCR_BACKEND")
+        os.environ["REMARKABLE_OCR_BACKEND"] = "sampling"
+
+        try:
+            # Create mock context WITHOUT sampling capability
+            mock_caps = ClientCapabilities(sampling=None)
+            mock_ctx = Mock()
+            mock_ctx.session = Mock()
+            mock_ctx.session.client_params = Mock()
+            mock_ctx.session.client_params.capabilities = mock_caps
+
+            result = should_use_sampling_ocr(mock_ctx)
+            assert result is False
+        finally:
+            if env_backup is not None:
+                os.environ["REMARKABLE_OCR_BACKEND"] = env_backup
+            elif "REMARKABLE_OCR_BACKEND" in os.environ:
+                del os.environ["REMARKABLE_OCR_BACKEND"]
+
+    def test_ocr_system_prompt_structure(self):
+        """Test the OCR system prompt is properly structured."""
+        from remarkable_mcp.sampling import OCR_SYSTEM_PROMPT, OCR_USER_PROMPT
+
+        # Check that system prompt contains key instructions
+        assert "OCR" in OCR_SYSTEM_PROMPT
+        assert "ONLY" in OCR_SYSTEM_PROMPT
+        assert "[NO TEXT DETECTED]" in OCR_SYSTEM_PROMPT
+        assert "reMarkable" in OCR_SYSTEM_PROMPT
+
+        # Check user prompt is concise
+        assert "text" in OCR_USER_PROMPT.lower()
+        assert len(OCR_USER_PROMPT) < 200  # Should be short and focused
+
+    @pytest.mark.asyncio
+    async def test_ocr_via_sampling_returns_none_without_session(self):
+        """Test ocr_via_sampling returns None when session is not available."""
+        from remarkable_mcp.sampling import ocr_via_sampling
+
+        mock_ctx = Mock()
+        mock_ctx.session = None
+
+        result = await ocr_via_sampling(mock_ctx, b"fake_png_data")
+        assert result is None
+
+    def test_sampling_imports_from_module(self):
+        """Test that sampling utilities can be imported."""
+        from remarkable_mcp.sampling import (
+            OCR_SYSTEM_PROMPT,
+            OCR_USER_PROMPT,
+            get_ocr_backend,
+            ocr_pages_via_sampling,
+            ocr_via_sampling,
+            should_use_sampling_ocr,
+        )
+
+        # Verify all functions/constants are accessible
+        assert callable(ocr_via_sampling)
+        assert callable(ocr_pages_via_sampling)
+        assert callable(get_ocr_backend)
+        assert callable(should_use_sampling_ocr)
+        assert isinstance(OCR_SYSTEM_PROMPT, str)
+        assert isinstance(OCR_USER_PROMPT, str)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -57,6 +57,7 @@ def _build_instructions() -> str:
     # Check environment
     ssh_mode = os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
     has_google_vision = bool(os.environ.get("GOOGLE_VISION_API_KEY"))
+    ocr_backend = os.environ.get("REMARKABLE_OCR_BACKEND", "auto").lower()
 
     instructions = """# reMarkable MCP Server
 
@@ -68,7 +69,7 @@ Access documents from your reMarkable tablet. All operations are read-only.
 - `remarkable_read(document, content_type, page, grep)` - Read document content with pagination
 - `remarkable_recent(limit)` - Get recently modified documents
 - `remarkable_status()` - Check connection and diagnose issues
-- `remarkable_image(document, page)` - Get a PNG image of a specific page
+- `remarkable_image(document, page, include_ocr)` - Get a PNG image with optional OCR
 
 ## Recommended Workflows
 
@@ -85,6 +86,7 @@ Use `remarkable_image` when you need visual context:
 - Implementing designs based on hand-drawn wireframes
 
 Example: `remarkable_image("UI Mockup", page=1)` returns a PNG image
+Example: `remarkable_image("Notes", include_ocr=True)` returns image with extracted text
 
 ### For Large Documents
 Use pagination to avoid overwhelming context. The response includes:
@@ -132,8 +134,16 @@ Connected via reMarkable Cloud API. Some features require SSH mode:
 For faster access and raw files, consider SSH mode: `uvx remarkable-mcp --ssh`
 """
 
-    # Add OCR instructions
-    if has_google_vision:
+    # Add OCR instructions based on configuration
+    if ocr_backend == "sampling":
+        instructions += """
+## OCR (Sampling Mode Active)
+
+OCR is configured to use this client's AI model via MCP sampling.
+Use `remarkable_image("Document", include_ocr=True)` to extract text from images.
+This requires no external API keys - it uses your client's capabilities.
+"""
+    elif has_google_vision:
         instructions += """
 ## OCR (Google Vision Active)
 
@@ -145,7 +155,9 @@ Use `include_ocr=True` with `remarkable_read()` to extract handwritten content.
 ## OCR (Tesseract Fallback)
 
 Google Vision is not configured. Tesseract will be used for OCR but works poorly
-on handwriting. For better results, configure GOOGLE_VISION_API_KEY.
+on handwriting. For better results, either:
+- Configure GOOGLE_VISION_API_KEY for Google Vision
+- Set REMARKABLE_OCR_BACKEND=sampling to use this client's AI for OCR
 """
 
     return instructions
