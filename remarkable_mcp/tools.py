@@ -1513,13 +1513,16 @@ async def remarkable_image(
                             ocr_tmp_path = Path(ocr_tmp.name)
                         try:
                             backend = get_ocr_backend()
-                            if backend == "google" or (
+                            # When backend is "sampling" but sampling failed, fall through to
+                            # Google (if API key available) or Tesseract as per documented behavior
+                            if backend in ("sampling", "google") or (
                                 backend == "auto" and os.environ.get("GOOGLE_VISION_API_KEY")
                             ):
                                 ocr_text = _ocr_png_google_vision(ocr_tmp_path)
                                 if ocr_text:
                                     ocr_backend_used = "google"
-                            else:
+                            # Fall through to Tesseract if Google not available or returned None
+                            if ocr_text is None:
                                 ocr_text = _ocr_png_tesseract(ocr_tmp_path)
                                 if ocr_text:
                                     ocr_backend_used = "tesseract"

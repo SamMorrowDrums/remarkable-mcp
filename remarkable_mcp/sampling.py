@@ -28,7 +28,6 @@ from mcp.types import ImageContent, ModelHint, ModelPreferences, SamplingMessage
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
-    from mcp.types import CreateMessageResult
 
 
 # Model preferences for OCR tasks - prioritize intelligence for better vision/OCR
@@ -125,7 +124,7 @@ async def ocr_via_sampling(
 
         # Request completion from the client's LLM
         # Use model preferences to request a capable vision model
-        result: "CreateMessageResult" = await session.create_message(
+        result = await session.create_message(
             messages=messages,
             system_prompt=OCR_SYSTEM_PROMPT,
             max_tokens=max_tokens,
@@ -149,7 +148,10 @@ async def ocr_via_sampling(
         return None
 
     except Exception:
-        # Sampling failed, caller should fall back to other OCR methods
+        # Sampling may fail for various reasons: client doesn't support sampling,
+        # session is not available, model doesn't support vision, network issues, etc.
+        # We intentionally swallow all exceptions and return None so the caller can
+        # fall back to other OCR methods (Google Vision, Tesseract).
         return None
 
 

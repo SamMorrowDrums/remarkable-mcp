@@ -244,7 +244,7 @@ Uses your MCP client's AI model for OCR. Works with clients that support MCP sam
 
 **Cons:**
 - Only available with sampling-capable clients
-- Falls back to Tesseract if sampling unavailable
+- Falls back to Google Vision (if API key configured) or Tesseract if sampling unavailable
 
 </details>
 
