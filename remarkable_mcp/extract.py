@@ -19,6 +19,7 @@ REMARKABLE_HEIGHT = 1872
 # Can be overridden via REMARKABLE_BACKGROUND_COLOR environment variable
 _DEFAULT_BACKGROUND_COLOR = "#FBFBFB"
 
+
 def get_background_color() -> str:
     """Get the background color, checking env var for override."""
     return os.environ.get("REMARKABLE_BACKGROUND_COLOR", _DEFAULT_BACKGROUND_COLOR)
@@ -34,10 +35,15 @@ CONTENT_MARGIN = 50
 # Cache TTL in seconds (5 minutes)
 CACHE_TTL_SECONDS = 300
 
-# Module-level cache for OCR results
+# Module-level cache for OCR results (full document)
 # Key: doc_id
 # Value: {"result": extraction_result, "include_ocr": bool, "timestamp": float}
 _extraction_cache: Dict[str, Dict[str, Any]] = {}
+
+# Per-page cache for sampling OCR results
+# Key: (doc_id, page_number, backend)
+# Value: {"text": str, "timestamp": float}
+_page_ocr_cache: Dict[tuple, Dict[str, Any]] = {}
 
 
 def _is_cache_valid(cached: Dict[str, Any]) -> bool:
@@ -57,8 +63,61 @@ def clear_extraction_cache(doc_id: Optional[str] = None) -> None:
     """
     if doc_id:
         _extraction_cache.pop(doc_id, None)
+        # Also clear per-page cache entries for this document
+        keys_to_remove = [k for k in _page_ocr_cache if k[0] == doc_id]
+        for key in keys_to_remove:
+            _page_ocr_cache.pop(key, None)
     else:
         _extraction_cache.clear()
+        _page_ocr_cache.clear()
+
+
+def get_cached_page_ocr(
+    doc_id: str,
+    page: int,
+    backend: str,
+) -> Optional[str]:
+    """
+    Get cached OCR result for a specific page.
+
+    Args:
+        doc_id: Document ID
+        page: Page number (1-indexed)
+        backend: OCR backend used ("sampling", "google", "tesseract")
+
+    Returns:
+        Cached OCR text or None if not cached/expired
+    """
+    cache_key = (doc_id, page, backend)
+    if cache_key in _page_ocr_cache:
+        cached = _page_ocr_cache[cache_key]
+        if _is_cache_valid(cached):
+            return cached["text"]
+        # Expired, remove it
+        _page_ocr_cache.pop(cache_key, None)
+    return None
+
+
+def cache_page_ocr(
+    doc_id: str,
+    page: int,
+    backend: str,
+    text: str,
+) -> None:
+    """
+    Cache OCR result for a specific page.
+
+    Args:
+        doc_id: Document ID
+        page: Page number (1-indexed)
+        backend: OCR backend used ("sampling", "google", "tesseract")
+        text: OCR text result
+    """
+    cache_key = (doc_id, page, backend)
+    _page_ocr_cache[cache_key] = {
+        "text": text,
+        "timestamp": time.time(),
+    }
 
 
 def get_cached_ocr_result(

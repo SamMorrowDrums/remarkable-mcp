@@ -31,13 +31,14 @@ from remarkable_mcp.api import (
     get_rmapi,
 )
 from remarkable_mcp.extract import (
-    cache_ocr_result,
+    cache_page_ocr,
     extract_text_from_document_zip,
     extract_text_from_epub,
     extract_text_from_pdf,
     find_similar_documents,
     get_background_color,
     get_cached_ocr_result,
+    get_cached_page_ocr,
     get_document_page_count,
     render_page_from_document_zip,
     render_page_from_document_zip_svg,
@@ -45,7 +46,6 @@ from remarkable_mcp.extract import (
 from remarkable_mcp.responses import make_error, make_response
 from remarkable_mcp.sampling import (
     get_ocr_backend,
-    ocr_pages_via_sampling,
     ocr_via_sampling,
     should_use_sampling_ocr,
 )
@@ -383,6 +383,7 @@ async def remarkable_read(
         notebook_pages = []  # List of page content for notebook pagination
         ocr_backend_used = None  # Track which OCR backend was used
         content = None  # Will hold extraction result
+        total_notebook_pages = 0  # Track total pages for sampling mode
 
         if content_type in ("text", "annotations"):
             # For notebooks (no PDF/EPUB), use page-based pagination
@@ -391,63 +392,82 @@ async def remarkable_read(
             # Determine if we should use sampling OCR
             use_sampling = is_notebook and include_ocr and ctx and should_use_sampling_ocr(ctx)
 
-            # Check cache first for notebooks with OCR - must match requested backend
-            if is_notebook and include_ocr:
-                requested_backend = "sampling" if use_sampling else None
-                cached = get_cached_ocr_result(
-                    target_doc.ID, include_ocr=True, ocr_backend=requested_backend
-                )
+            # For sampling OCR: use per-page caching and only OCR requested page
+            if use_sampling:
+                # Check per-page cache first
+                cached_text = get_cached_page_ocr(target_doc.ID, page, "sampling")
+                if cached_text is not None:
+                    # We have cached OCR for this page
+                    # Still need to get total page count
+                    raw_doc = client.download(target_doc)
+                    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                        tmp.write(raw_doc)
+                        tmp_path = Path(tmp.name)
+                    try:
+                        total_notebook_pages = get_document_page_count(tmp_path)
+                    finally:
+                        tmp_path.unlink(missing_ok=True)
+
+                    # Build notebook_pages list with just the cached page
+                    notebook_pages = [""] * total_notebook_pages
+                    notebook_pages[page - 1] = cached_text
+                    ocr_backend_used = "sampling"
+                else:
+                    # No cache - render and OCR just the requested page
+                    raw_doc = client.download(target_doc)
+                    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                        tmp.write(raw_doc)
+                        tmp_path = Path(tmp.name)
+
+                    try:
+                        total_notebook_pages = get_document_page_count(tmp_path)
+
+                        if page > total_notebook_pages:
+                            return make_error(
+                                error_type="page_out_of_range",
+                                message=f"Page {page} does not exist. "
+                                f"Document has {total_notebook_pages} notebook page(s).",
+                                suggestion=f"Use page=1 to {total_notebook_pages} "
+                                "to read different pages.",
+                            )
+
+                        # Render just the requested page
+                        png_data = render_page_from_document_zip(tmp_path, page)
+                        if png_data:
+                            # OCR the single page
+                            ocr_text = await ocr_via_sampling(ctx, png_data)
+                            if ocr_text:
+                                # Cache the result
+                                cache_page_ocr(target_doc.ID, page, "sampling", ocr_text)
+                                # Build notebook_pages list
+                                notebook_pages = [""] * total_notebook_pages
+                                notebook_pages[page - 1] = ocr_text
+                                ocr_backend_used = "sampling"
+                    finally:
+                        tmp_path.unlink(missing_ok=True)
+
+            # For non-sampling: check full document cache or extract all
+            if not use_sampling and is_notebook and include_ocr:
+                cached = get_cached_ocr_result(target_doc.ID, include_ocr=True, ocr_backend=None)
                 if cached and cached.get("handwritten_text"):
                     notebook_pages = cached["handwritten_text"]
                     ocr_backend_used = cached.get("ocr_backend")
                     content = cached
 
-            # If not cached, perform extraction
-            if not notebook_pages:
+            # If not cached (non-sampling), perform extraction
+            if not notebook_pages and is_notebook:
                 raw_doc = client.download(target_doc)
                 with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                     tmp.write(raw_doc)
                     tmp_path = Path(tmp.name)
 
                 try:
-                    # Try sampling OCR for notebooks if requested and available
-                    if use_sampling:
-                        # Render all pages to PNG for sampling OCR
-                        total_pages = get_document_page_count(tmp_path)
-                        if total_pages > 0:
-                            png_pages = []
-                            for pg_num in range(1, total_pages + 1):
-                                png_data = render_page_from_document_zip(tmp_path, pg_num)
-                                if png_data:
-                                    png_pages.append(png_data)
-                                else:
-                                    png_pages.append(b"")  # Placeholder for failed pages
-
-                            if png_pages:
-                                # Use sampling OCR for all pages
-                                ocr_results = await ocr_pages_via_sampling(ctx, png_pages)
-                                if ocr_results:
-                                    notebook_pages = ocr_results
-                                    ocr_backend_used = "sampling"
-                                    # Cache the sampling result
-                                    content = {
-                                        "typed_text": [],
-                                        "highlights": [],
-                                        "handwritten_text": notebook_pages,
-                                        "pages": total_pages,
-                                        "page_ids": [],
-                                        "ocr_backend": "sampling",
-                                    }
-                                    cache_ocr_result(target_doc.ID, content, include_ocr=True)
-
-                    # Fall back to sync extraction if sampling wasn't used or failed
-                    if not notebook_pages:
-                        content = extract_text_from_document_zip(
-                            tmp_path, include_ocr=include_ocr, doc_id=target_doc.ID
-                        )
-                        if is_notebook and content.get("handwritten_text"):
-                            notebook_pages = content["handwritten_text"]
-                            ocr_backend_used = content.get("ocr_backend")
+                    content = extract_text_from_document_zip(
+                        tmp_path, include_ocr=include_ocr, doc_id=target_doc.ID
+                    )
+                    if content.get("handwritten_text"):
+                        notebook_pages = content["handwritten_text"]
+                        ocr_backend_used = content.get("ocr_backend")
                 finally:
                     tmp_path.unlink(missing_ok=True)
 

@@ -24,11 +24,36 @@ API keys or services.
 import base64
 from typing import TYPE_CHECKING, List, Optional
 
-from mcp.types import ImageContent, SamplingMessage, TextContent
+from mcp.types import ImageContent, ModelHint, ModelPreferences, SamplingMessage, TextContent
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
     from mcp.types import CreateMessageResult
+
+
+# Model preferences for OCR tasks - prioritize intelligence for better vision/OCR
+# Hints are matched as substrings, ordered by preference for vision capabilities
+OCR_MODEL_PREFERENCES = ModelPreferences(
+    hints=[
+        # Top tier - best vision/OCR capabilities
+        ModelHint(name="claude-opus-4.5"),
+        ModelHint(name="claude-sonnet-4.5"),
+        ModelHint(name="gemini-3-pro"),
+        ModelHint(name="gpt-5.1"),
+        # Second tier - very capable
+        ModelHint(name="claude-opus-4"),
+        ModelHint(name="gpt-5"),
+        ModelHint(name="gemini-2.5-pro"),
+        ModelHint(name="claude-sonnet-4"),
+        # Third tier - good fallbacks
+        ModelHint(name="gpt-4o"),
+        ModelHint(name="claude-3-5-sonnet"),
+        ModelHint(name="gemini-1.5-pro"),
+    ],
+    intelligencePriority=1.0,  # Maximize intelligence for OCR accuracy
+    speedPriority=0.2,  # Speed is not critical for OCR
+    costPriority=0.0,  # Cost doesn't matter - we need accuracy
+)
 
 
 # The OCR prompt is carefully designed to extract ONLY the text content
@@ -99,11 +124,13 @@ async def ocr_via_sampling(
         ]
 
         # Request completion from the client's LLM
+        # Use model preferences to request a capable vision model
         result: "CreateMessageResult" = await session.create_message(
             messages=messages,
             system_prompt=OCR_SYSTEM_PROMPT,
             max_tokens=max_tokens,
             temperature=0.0,  # Use low temperature for consistency
+            model_preferences=OCR_MODEL_PREFERENCES,
         )
 
         # Extract text from the result
@@ -146,6 +173,11 @@ async def ocr_pages_via_sampling(
     has_any_result = False
 
     for png_data in png_data_list:
+        # Skip empty PNG data (failed renders) - just mark as empty string
+        if not png_data:
+            results.append("")
+            continue
+
         text = await ocr_via_sampling(ctx, png_data, max_tokens)
         if text:
             results.append(text)
