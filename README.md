@@ -177,10 +177,13 @@ remarkable_recent(limit=10)
 remarkable_image("UI Mockup", page=1)
 
 # Get SVG for editing in design tools
-remarkable_image("Wireframe", format="svg")
+remarkable_image("Wireframe", output_format="svg")
 
 # Transparent background for compositing
 remarkable_image("Logo Sketch", background="#00000000")
+
+# Return base64 PNG in JSON (for clients without embedded image support)
+remarkable_image("Diagram", embed=False)
 ```
 
 ---
