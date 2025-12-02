@@ -15,6 +15,7 @@ from typing import Literal, Optional
 from mcp.types import (
     BlobResourceContents,
     EmbeddedResource,
+    TextContent,
     TextResourceContents,
     ToolAnnotations,
 )
@@ -1268,13 +1269,19 @@ def remarkable_image(
                         hint,
                     )
                 else:
-                    # Return SVG as embedded TextResourceContents
+                    # Return SVG as embedded TextResourceContents with info hint
                     text_resource = TextResourceContents(
                         uri=resource_uri,
                         mimeType="image/svg+xml",
                         text=svg_content,
                     )
-                    return EmbeddedResource(type="resource", resource=text_resource)
+                    embedded = EmbeddedResource(type="resource", resource=text_resource)
+                    info = TextContent(
+                        type="text",
+                        text=f"Page {page}/{total_pages} of '{target_doc.VissibleName}' as SVG. "
+                        f"Resource URI: {resource_uri}",
+                    )
+                    return [info, embedded]
             else:
                 # PNG format
                 png_data = render_page_from_document_zip(
@@ -1314,13 +1321,19 @@ def remarkable_image(
                         hint,
                     )
                 else:
-                    # Return PNG as embedded BlobResourceContents (base64)
+                    # Return PNG as embedded BlobResourceContents with info hint
                     blob_resource = BlobResourceContents(
                         uri=resource_uri,
                         mimeType="image/png",
                         blob=png_base64,
                     )
-                    return EmbeddedResource(type="resource", resource=blob_resource)
+                    embedded = EmbeddedResource(type="resource", resource=blob_resource)
+                    info = TextContent(
+                        type="text",
+                        text=f"Page {page}/{total_pages} of '{target_doc.VissibleName}' as PNG. "
+                        f"Resource URI: {resource_uri}",
+                    )
+                    return [info, embedded]
 
         finally:
             tmp_path.unlink(missing_ok=True)
