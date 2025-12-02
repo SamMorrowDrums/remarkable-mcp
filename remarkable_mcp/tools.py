@@ -244,6 +244,7 @@ def _ocr_png_google_vision(png_path: Path) -> Optional[str]:
                     return text.strip() if text.strip() else None
 
     except Exception:
+        # Silently fail - OCR is best-effort and caller will handle None
         pass
 
     return None
@@ -256,7 +257,7 @@ async def remarkable_read(
     page: int = 1,
     grep: Optional[str] = None,
     include_ocr: bool = False,
-    ctx: Context = None,
+    ctx: Optional[Context] = None,
 ) -> str:
     """
     <usecase>Read and extract text content from a reMarkable document.</usecase>
@@ -1293,7 +1294,7 @@ async def remarkable_image(
     output_format: str = "png",
     compatibility: bool = False,
     include_ocr: bool = False,
-    ctx: Context = None,
+    ctx: Optional[Context] = None,
 ):
     """
     <usecase>Get an image of a specific page from a reMarkable document.</usecase>
@@ -1516,10 +1517,12 @@ async def remarkable_image(
                                 backend == "auto" and os.environ.get("GOOGLE_VISION_API_KEY")
                             ):
                                 ocr_text = _ocr_png_google_vision(ocr_tmp_path)
-                                ocr_backend_used = "google"
+                                if ocr_text:
+                                    ocr_backend_used = "google"
                             else:
                                 ocr_text = _ocr_png_tesseract(ocr_tmp_path)
-                                ocr_backend_used = "tesseract"
+                                if ocr_text:
+                                    ocr_backend_used = "tesseract"
                         finally:
                             ocr_tmp_path.unlink(missing_ok=True)
 
