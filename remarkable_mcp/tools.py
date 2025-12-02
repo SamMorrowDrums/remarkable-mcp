@@ -1295,12 +1295,16 @@ def remarkable_image(
 
                 if compatibility:
                     # Return base64 PNG in JSON for clients without embedded resource support
+                    # Include data URI format for direct use in HTML <img> tags
+                    data_uri = f"data:image/png;base64,{png_base64}"
                     hint = (
                         f"Page {page}/{total_pages} as base64-encoded PNG. "
+                        f"Use 'data_uri' directly in HTML img src. "
                         f"Use compatibility=False for embedded resource format."
                     )
                     return make_response(
                         {
+                            "data_uri": data_uri,
                             "image_base64": png_base64,
                             "mime_type": "image/png",
                             "page": page,
