@@ -388,9 +388,15 @@ async def remarkable_read(
             # For notebooks (no PDF/EPUB), use page-based pagination
             is_notebook = file_type not in ("pdf", "epub")
 
-            # Check cache first for notebooks with OCR
+            # Determine if we should use sampling OCR
+            use_sampling = is_notebook and include_ocr and ctx and should_use_sampling_ocr(ctx)
+
+            # Check cache first for notebooks with OCR - must match requested backend
             if is_notebook and include_ocr:
-                cached = get_cached_ocr_result(target_doc.ID, include_ocr=True)
+                requested_backend = "sampling" if use_sampling else None
+                cached = get_cached_ocr_result(
+                    target_doc.ID, include_ocr=True, ocr_backend=requested_backend
+                )
                 if cached and cached.get("handwritten_text"):
                     notebook_pages = cached["handwritten_text"]
                     ocr_backend_used = cached.get("ocr_backend")
@@ -405,7 +411,7 @@ async def remarkable_read(
 
                 try:
                     # Try sampling OCR for notebooks if requested and available
-                    if is_notebook and include_ocr and ctx and should_use_sampling_ocr(ctx):
+                    if use_sampling:
                         # Render all pages to PNG for sampling OCR
                         total_pages = get_document_page_count(tmp_path)
                         if total_pages > 0:
