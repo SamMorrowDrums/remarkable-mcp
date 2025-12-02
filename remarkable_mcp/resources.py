@@ -105,8 +105,10 @@ def _make_doc_resource(client, document):
                 tmp.write(raw)
                 tmp_path = Path(tmp.name)
             try:
-                # First try without OCR (faster)
-                content = extract_text_from_document_zip(tmp_path, include_ocr=False)
+                # First try without OCR (faster) - use doc_id to leverage cache
+                content = extract_text_from_document_zip(
+                    tmp_path, include_ocr=False, doc_id=document.ID
+                )
 
                 if content["typed_text"]:
                     text_parts.extend(content["typed_text"])
@@ -118,7 +120,9 @@ def _make_doc_resource(client, document):
                 # If no text found and document has pages, try OCR for handwritten
                 # Note: sampling OCR not available here, falls back to google/tesseract
                 if not text_parts and content["pages"] > 0:
-                    content = extract_text_from_document_zip(tmp_path, include_ocr=True)
+                    content = extract_text_from_document_zip(
+                        tmp_path, include_ocr=True, doc_id=document.ID
+                    )
                     if content["handwritten_text"]:
                         text_parts.extend(content["handwritten_text"])
 
