@@ -6,7 +6,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from mcp.server.fastmcp import FastMCP
 
@@ -18,9 +18,10 @@ class RemarkableMCP(FastMCP):
 
     VS Code:
     - Appends ?version=... to resource URIs for cache busting
-    - URL-encodes spaces as %20 in URIs
+    - May send URIs with spaces or URL-encoded (%20)
 
-    This subclass normalizes URIs before resource lookup.
+    Pydantic's AnyUrl stores URIs with URL-encoded paths, so we need to
+    normalize incoming URIs to match.
     """
 
     async def read_resource(self, uri):
@@ -28,26 +29,29 @@ class RemarkableMCP(FastMCP):
 
         Handles:
         - Query parameters: ?version=timestamp -> stripped
-        - URL encoding: %20 -> space (to match registered templates)
+        - Spaces in path: encode to %20 to match stored URIs
         """
         uri_str = str(uri)
 
         # Strip query parameters (e.g., ?version=1764625282944)
-        # Use simple string split to preserve URI structure (e.g., triple slashes)
         if "?" in uri_str:
             uri_str = uri_str.split("?")[0]
             logger.debug("Stripped query params from resource URI")
 
-        # URL-decode the path portion (e.g., %20 -> space)
-        # This is needed because VS Code encodes spaces but our templates have spaces
-        if "%" in uri_str:
-            # Split to preserve scheme (remarkableimg://) and decode path
-            if ":///" in uri_str:
-                scheme_end = uri_str.index(":///") + 4
-                scheme = uri_str[:scheme_end]
-                path = uri_str[scheme_end:]
-                uri_str = scheme + unquote(path)
-                logger.debug("URL-decoded resource path")
+        # Normalize path encoding - Pydantic AnyUrl stores with %20 for spaces
+        # VS Code may send either spaces or %20, so normalize to %20
+        if ":///" in uri_str:
+            scheme_end = uri_str.index(":///") + 4
+            scheme = uri_str[:scheme_end]
+            path = uri_str[scheme_end:]
+
+            # First decode any existing encoding, then re-encode consistently
+            # This handles both "November 2025" and "November%202025" inputs
+            decoded_path = unquote(path)
+            # quote with safe='/' preserves path separators but encodes spaces
+            encoded_path = quote(decoded_path, safe="/:")
+            uri_str = scheme + encoded_path
+            logger.debug(f"Normalized resource URI path: {path} -> {encoded_path}")
 
         return await super().read_resource(uri_str)
 
