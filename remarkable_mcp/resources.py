@@ -89,17 +89,13 @@ def _make_doc_resource(client, document):
     and OCR for handwritten content. Does NOT include original PDF/EPUB text.
     Use raw resources for original document text.
 
-    Supports sampling OCR when REMARKABLE_OCR_BACKEND=sampling is configured
-    and the client supports the sampling capability.
+    Note: Sampling OCR is not available for resources (requires async Context).
+    When REMARKABLE_OCR_BACKEND=sampling, resources fall back to google/tesseract.
+    Use the remarkable_read tool with include_ocr=True for sampling OCR.
     """
-    from mcp.server.fastmcp import Context
+    from remarkable_mcp.extract import extract_text_from_document_zip
 
-    from remarkable_mcp.extract import (
-        extract_text_from_document_zip,
-        render_page_from_document_zip,
-    )
-
-    async def doc_resource(ctx: Context = None) -> str:
+    def doc_resource() -> str:
         try:
             text_parts = []
 
@@ -120,41 +116,11 @@ def _make_doc_resource(client, document):
                     text_parts.extend(content["highlights"])
 
                 # If no text found and document has pages, try OCR for handwritten
+                # Note: sampling OCR not available here, falls back to google/tesseract
                 if not text_parts and content["pages"] > 0:
-                    # Check if we should use sampling OCR
-                    ocr_text = None
-                    if ctx is not None:
-                        from remarkable_mcp.sampling import (
-                            ocr_pages_via_sampling,
-                            should_use_sampling_ocr,
-                        )
-
-                        if should_use_sampling_ocr(ctx):
-                            # Render pages and use sampling OCR
-                            from remarkable_mcp.extract import get_background_color
-
-                            png_pages = []
-                            for page_num in range(1, content["pages"] + 1):
-                                png_data = render_page_from_document_zip(
-                                    tmp_path,
-                                    page_num,
-                                    background_color=get_background_color(),
-                                )
-                                if png_data:
-                                    png_pages.append(png_data)
-
-                            if png_pages:
-                                ocr_results = await ocr_pages_via_sampling(ctx, png_pages)
-                                if ocr_results:
-                                    ocr_text = [t for t in ocr_results if t]
-
-                    # Fall back to standard OCR if sampling didn't work
-                    if ocr_text:
-                        text_parts.extend(ocr_text)
-                    else:
-                        content = extract_text_from_document_zip(tmp_path, include_ocr=True)
-                        if content["handwritten_text"]:
-                            text_parts.extend(content["handwritten_text"])
+                    content = extract_text_from_document_zip(tmp_path, include_ocr=True)
+                    if content["handwritten_text"]:
+                        text_parts.extend(content["handwritten_text"])
 
                 return "\n\n".join(text_parts) if text_parts else "(No user content)"
             finally:
