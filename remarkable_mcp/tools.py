@@ -412,8 +412,10 @@ async def remarkable_read(
                                 notebook_pages = ocr_results
                                 sampling_ocr_used = True
                                 ocr_backend_used = "sampling"
-                except Exception:
-                    # Fall back to sync OCR on any error
+                except Exception as e:
+                    # Log the exception for debugging, then fall back to sync OCR
+                    import sys
+                    print(f"Sampling OCR failed with exception: {e}", file=sys.stderr)
                     pass
 
             # Use sync extraction if sampling wasn't used
@@ -446,6 +448,9 @@ async def remarkable_read(
                     "highlights": [],
                     "handwritten_text": notebook_pages,
                 }
+                # Ensure ocr_backend_used is set for sampling path
+                if not ocr_backend_used:
+                    ocr_backend_used = "sampling"
 
             if is_notebook and notebook_pages:
                 pass  # notebook_pages already set
