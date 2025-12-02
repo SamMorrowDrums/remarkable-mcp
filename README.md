@@ -182,8 +182,8 @@ remarkable_image("Wireframe", output_format="svg")
 # Transparent background for compositing
 remarkable_image("Logo Sketch", background="#00000000")
 
-# Return base64 PNG in JSON (for clients without embedded image support)
-remarkable_image("Diagram", embed=False)
+# Compatibility mode: return resource URI instead of embedded resource
+remarkable_image("Diagram", compatibility=True)
 ```
 
 ---

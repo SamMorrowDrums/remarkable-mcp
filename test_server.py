@@ -520,16 +520,16 @@ class TestRemarkableImage:
         assert data["_error"]["type"] == "document_not_found"
 
     @pytest.mark.asyncio
-    async def test_image_embed_parameter_in_schema(self):
-        """Test that remarkable_image tool has the embed parameter in its schema."""
+    async def test_image_compatibility_parameter_in_schema(self):
+        """Test that remarkable_image tool has the compatibility parameter in its schema."""
         tools = await mcp.list_tools()
         image_tool = next(t for t in tools if t.name == "remarkable_image")
 
-        # Check that embed parameter exists in the input schema
-        assert "embed" in image_tool.inputSchema.get("properties", {})
-        embed_schema = image_tool.inputSchema["properties"]["embed"]
-        assert embed_schema.get("type") == "boolean"
-        assert embed_schema.get("default") is True
+        # Check that compatibility parameter exists in the input schema
+        assert "compatibility" in image_tool.inputSchema.get("properties", {})
+        compat_schema = image_tool.inputSchema["properties"]["compatibility"]
+        assert compat_schema.get("type") == "boolean"
+        assert compat_schema.get("default") is False
 
 
 # =============================================================================
