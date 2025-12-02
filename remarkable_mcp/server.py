@@ -6,7 +6,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from mcp.server.fastmcp import FastMCP
 
@@ -18,9 +18,10 @@ class RemarkableMCP(FastMCP):
 
     VS Code:
     - Appends ?version=... to resource URIs for cache busting
-    - URL-encodes spaces as %20 in URIs
+    - May send URIs with spaces or URL-encoded (%20)
 
-    This subclass normalizes URIs before resource lookup.
+    Pydantic's AnyUrl stores URIs with URL-encoded paths, so we need to
+    normalize incoming URIs to match.
     """
 
     async def read_resource(self, uri):
@@ -28,26 +29,29 @@ class RemarkableMCP(FastMCP):
 
         Handles:
         - Query parameters: ?version=timestamp -> stripped
-        - URL encoding: %20 -> space (to match registered templates)
+        - Spaces in path: encode to %20 to match stored URIs
         """
         uri_str = str(uri)
 
         # Strip query parameters (e.g., ?version=1764625282944)
-        # Use simple string split to preserve URI structure (e.g., triple slashes)
         if "?" in uri_str:
             uri_str = uri_str.split("?")[0]
             logger.debug("Stripped query params from resource URI")
 
-        # URL-decode the path portion (e.g., %20 -> space)
-        # This is needed because VS Code encodes spaces but our templates have spaces
-        if "%" in uri_str:
-            # Split to preserve scheme (remarkableimg://) and decode path
-            if ":///" in uri_str:
-                scheme_end = uri_str.index(":///") + 4
-                scheme = uri_str[:scheme_end]
-                path = uri_str[scheme_end:]
-                uri_str = scheme + unquote(path)
-                logger.debug("URL-decoded resource path")
+        # Normalize path encoding - Pydantic AnyUrl stores with %20 for spaces
+        # VS Code may send either spaces or %20, so normalize to %20
+        if ":///" in uri_str:
+            scheme_end = uri_str.index(":///") + 4
+            scheme = uri_str[:scheme_end]
+            path = uri_str[scheme_end:]
+
+            # First decode any existing encoding, then re-encode consistently
+            # This handles both "November 2025" and "November%202025" inputs
+            decoded_path = unquote(path)
+            # quote with safe='/' preserves path separators but encodes spaces
+            encoded_path = quote(decoded_path, safe="/:")
+            uri_str = scheme + encoded_path
+            logger.debug(f"Normalized resource URI path: {path} -> {encoded_path}")
 
         return await super().read_resource(uri_str)
 
@@ -57,6 +61,7 @@ def _build_instructions() -> str:
     # Check environment
     ssh_mode = os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
     has_google_vision = bool(os.environ.get("GOOGLE_VISION_API_KEY"))
+    ocr_backend = os.environ.get("REMARKABLE_OCR_BACKEND", "auto").lower()
 
     instructions = """# reMarkable MCP Server
 
@@ -68,7 +73,7 @@ Access documents from your reMarkable tablet. All operations are read-only.
 - `remarkable_read(document, content_type, page, grep)` - Read document content with pagination
 - `remarkable_recent(limit)` - Get recently modified documents
 - `remarkable_status()` - Check connection and diagnose issues
-- `remarkable_image(document, page)` - Get a PNG image of a specific page
+- `remarkable_image(document, page, include_ocr)` - Get a PNG image with optional OCR
 
 ## Recommended Workflows
 
@@ -85,6 +90,7 @@ Use `remarkable_image` when you need visual context:
 - Implementing designs based on hand-drawn wireframes
 
 Example: `remarkable_image("UI Mockup", page=1)` returns a PNG image
+Example: `remarkable_image("Notes", include_ocr=True)` returns image with extracted text
 
 ### For Large Documents
 Use pagination to avoid overwhelming context. The response includes:
@@ -132,8 +138,16 @@ Connected via reMarkable Cloud API. Some features require SSH mode:
 For faster access and raw files, consider SSH mode: `uvx remarkable-mcp --ssh`
 """
 
-    # Add OCR instructions
-    if has_google_vision:
+    # Add OCR instructions based on configuration
+    if ocr_backend == "sampling":
+        instructions += """
+## OCR (Sampling Mode Active)
+
+OCR is configured to use this client's AI model via MCP sampling.
+Use `remarkable_image("Document", include_ocr=True)` to extract text from images.
+This requires no external API keys - it uses your client's capabilities.
+"""
+    elif has_google_vision:
         instructions += """
 ## OCR (Google Vision Active)
 
@@ -145,7 +159,9 @@ Use `include_ocr=True` with `remarkable_read()` to extract handwritten content.
 ## OCR (Tesseract Fallback)
 
 Google Vision is not configured. Tesseract will be used for OCR but works poorly
-on handwriting. For better results, configure GOOGLE_VISION_API_KEY.
+on handwriting. For better results, either:
+- Configure GOOGLE_VISION_API_KEY for Google Vision
+- Set REMARKABLE_OCR_BACKEND=sampling to use this client's AI for OCR
 """
 
     return instructions

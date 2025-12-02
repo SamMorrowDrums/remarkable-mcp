@@ -319,7 +319,9 @@ remarkable_status()
 | `document` | string | *required* | Document name or full path |
 | `page` | int | `1` | Page number (1-indexed) |
 | `background` | string | `"#FBFBFB"` | Background color (hex RGB or RGBA) |
-| `format` | string | `"png"` | Output format: `"png"` or `"svg"` |
+| `output_format` | string | `"png"` | Output format: `"png"` or `"svg"` |
+| `include_ocr` | bool | `False` | Enable OCR on the image (uses sampling if configured) |
+| `compatibility` | bool | `False` | Return resource URI instead of embedded resource |
 
 ### Background Colors
 
@@ -346,26 +348,36 @@ remarkable_image("Diagram", background="#FFFFFF")
 remarkable_image("Logo Sketch", background="#00000000")
 
 # SVG format for editing in design tools
-remarkable_image("Wireframe", format="svg")
+remarkable_image("Wireframe", output_format="svg")
 
 # SVG with custom background
-remarkable_image("Sketch", format="svg", background="#F0F0F0")
+remarkable_image("Sketch", output_format="svg", background="#F0F0F0")
+
+# Enable OCR (uses sampling if configured, falls back to other backends)
+remarkable_image("Handwritten Notes", include_ocr=True)
+
+# Compatibility mode: return resource URI instead of embedded resource
+remarkable_image("Diagram", compatibility=True)
 ```
 
 ### Response Format
 
-For PNG format, returns a base64-encoded image that can be displayed inline.
+For PNG format, returns an embedded image resource that can be displayed inline.
 
-For SVG format, returns JSON with the SVG content:
+For SVG format, returns an embedded text resource with the SVG content.
+
+When `compatibility=True`, returns a JSON object with the resource URI:
 
 ```json
 {
-  "svg": "<svg xmlns=...",
+  "resource_uri": "remarkableimg:///path/doc.page-1.png",
   "page": 1,
   "total_pages": 5,
-  "_hint": "Page 1/5 as SVG. Use remarkable_image('Doc', format='png') for raster."
+  "_hint": "Page 1/5. Use resource URI to access the image."
 }
 ```
+
+When `include_ocr=True`, OCR text is included in the response (uses sampling if configured).
 
 ### Notes
 

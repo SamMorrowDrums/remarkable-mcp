@@ -139,7 +139,7 @@ AI assistants use the tools to read documents, search content, and more:
 | `remarkable_search` | Search content across multiple documents |
 | `remarkable_recent` | Get recently modified documents |
 | `remarkable_status` | Check connection status |
-| `remarkable_image` | Get a PNG image of a specific page (for visual content like diagrams or UI mockups) |
+| `remarkable_image` | Get PNG/SVG images of pages (supports OCR via sampling) |
 
 All tools are **read-only** and return structured JSON with hints for next actions.
 
@@ -151,6 +151,7 @@ All tools are **read-only** and return structured JSON with hints for next actio
 - **Auto-OCR** — Notebooks with no typed text automatically enable OCR
 - **Batch search** — Search across multiple documents in one call
 - **Vision support** — Get page images for visual context (diagrams, mockups, sketches)
+- **Sampling OCR** — Use client's AI for OCR on images (no API key needed)
 
 ### Example Usage
 
@@ -179,6 +180,9 @@ remarkable_image("UI Mockup", page=1)
 # Get SVG for editing in design tools
 remarkable_image("Wireframe", output_format="svg")
 
+# Get image with OCR text extraction (uses sampling if configured)
+remarkable_image("Handwritten Notes", include_ocr=True)
+
 # Transparent background for compositing
 remarkable_image("Logo Sketch", background="#00000000")
 
@@ -206,23 +210,84 @@ Documents are automatically registered as MCP resources:
 
 ## OCR for Handwriting
 
-### Google Cloud Vision (Strongly Recommended)
+For handwritten content, remarkable-mcp offers several OCR backends. Choose based on your setup and requirements:
 
-Google Vision provides **far superior handwriting recognition** compared to Tesseract. Unless your handwriting is exceptionally neat, use Google Vision.
+| Backend | Setup | Quality | Offline | Best For |
+|---------|-------|---------|---------|----------|
+| **Sampling** | No API key | Depends on client model | ✅ | Users with capable AI clients |
+| **Google Vision** | API key | Excellent | ❌ | Best handwriting accuracy |
+| **Tesseract** | System install | Poor for handwriting | ✅ | Printed text, offline fallback |
 
-📖 **[Google Vision Setup Guide](docs/google-vision-setup.md)**
+### Quick Setup
 
-**Quick setup:**
+Set `REMARKABLE_OCR_BACKEND` in your MCP config:
 
-1. Enable [Cloud Vision API](https://console.cloud.google.com/apis/library/vision.googleapis.com) in Google Cloud
+```json
+{
+  "env": {
+    "REMARKABLE_OCR_BACKEND": "sampling"
+  }
+}
+```
+
+**Options:** `sampling`, `google`, `tesseract`, `auto`
+
+<details>
+<summary>📖 Sampling OCR (No API Key)</summary>
+
+Uses your MCP client's AI model for OCR. Works with clients that support MCP sampling (VS Code + Copilot, Claude Desktop, etc.).
+
+**Pros:**
+- No additional API keys needed
+- Quality depends on your client's model (GPT-4, Claude, etc.)
+- Private — handwriting stays local to your client
+
+**Cons:**
+- Only available with sampling-capable clients
+- Falls back to Google Vision (if API key configured) or Tesseract if sampling unavailable
+
+</details>
+
+<details>
+<summary>📖 Google Cloud Vision</summary>
+
+Provides consistently excellent handwriting recognition.
+
+**Setup:**
+1. Enable [Cloud Vision API](https://console.cloud.google.com/apis/library/vision.googleapis.com)
 2. Create an [API key](https://console.cloud.google.com/apis/credentials)
-3. Add `GOOGLE_VISION_API_KEY` to your MCP config
+3. Add to config: `"GOOGLE_VISION_API_KEY": "your-key"`
 
-**Cost:** 1,000 free requests/month, then ~$1.50 per 1,000 images.
+**Cost:** 1,000 free requests/month, then ~$1.50 per 1,000.
 
-### Tesseract (Fallback)
+📖 **[Full Google Vision Setup Guide](docs/google-vision-setup.md)**
 
-Tesseract is designed for printed text, not handwriting. Use only as a fallback for offline OCR or printed documents.
+</details>
+
+<details>
+<summary>📖 Tesseract (Fallback)</summary>
+
+Open-source OCR designed for printed text. Poor results with handwriting, but useful as an offline fallback.
+
+```bash
+# Install Tesseract
+# macOS
+brew install tesseract
+
+# Ubuntu/Debian
+sudo apt install tesseract-ocr
+
+# Windows
+choco install tesseract
+```
+
+</details>
+
+### Default Behavior (`auto`)
+
+When `REMARKABLE_OCR_BACKEND=auto` (default):
+1. Google Vision (if `GOOGLE_VISION_API_KEY` is set)
+2. Tesseract (fallback)
 
 ---
 
@@ -325,6 +390,7 @@ Treat your reMarkable as a second brain that AI can access. Combined with tools 
 | [Google Vision Setup](docs/google-vision-setup.md) | Set up handwriting OCR |
 | [Tools Reference](docs/tools.md) | Detailed tool documentation |
 | [Resources Reference](docs/resources.md) | MCP resources documentation |
+| [Capability Negotiation](docs/capabilities.md) | MCP protocol capabilities |
 | [Development](docs/development.md) | Contributing and development setup |
 | [Future Plans](docs/future-plans.md) | Roadmap and planned features |
 
@@ -340,61 +406,6 @@ uv run pytest test_server.py -v
 ```
 
 📖 **[Development Guide](docs/development.md)**
-
----
-
-## MCP Capability Negotiation
-
-This server supports the MCP capability negotiation protocol. During the initialization handshake, clients declare their capabilities and the server responds with its supported features.
-
-### Checking Client Capabilities
-
-Tools can check what the connected client supports using the capability utilities:
-
-```python
-from mcp.server.fastmcp import Context
-from remarkable_mcp import (
-    get_client_capabilities,
-    client_supports_sampling,
-    client_supports_elicitation,
-    get_client_info,
-)
-
-@mcp.tool()
-async def my_tool(ctx: Context) -> str:
-    # Check if client supports specific features
-    if client_supports_sampling(ctx):
-        # Client can handle LLM sampling requests
-        pass
-
-    if client_supports_elicitation(ctx):
-        # Client can handle interactive user prompts
-        pass
-
-    # Get full capabilities object
-    caps = get_client_capabilities(ctx)
-
-    # Get client info (name, version, protocol)
-    info = get_client_info(ctx)
-
-    return "result"
-```
-
-### Available Capability Checks
-
-| Function | Description |
-|----------|-------------|
-| `get_client_capabilities(ctx)` | Get the full ClientCapabilities object |
-| `client_supports_sampling(ctx)` | Check if client supports LLM sampling |
-| `client_supports_elicitation(ctx)` | Check if client supports user prompts |
-| `client_supports_roots(ctx)` | Check if client supports filesystem roots |
-| `client_supports_experimental(ctx, feature)` | Check for experimental features |
-| `get_client_info(ctx)` | Get client name, version, protocol |
-| `get_protocol_version(ctx)` | Get negotiated protocol version |
-
-### Note on Embedded Resources
-
-The MCP protocol does not have a specific capability flag for embedded resources in tool responses. Support for `EmbeddedResource` and `ImageContent` in tool results is part of the base protocol. All clients supporting protocol version `2024-11-05` or later should handle embedded resources, though actual client implementations may vary.
 
 ---
 

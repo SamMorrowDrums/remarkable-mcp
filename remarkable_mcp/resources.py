@@ -88,6 +88,10 @@ def _make_doc_resource(client, document):
     Returns only user-supplied content: typed text, annotations, highlights,
     and OCR for handwritten content. Does NOT include original PDF/EPUB text.
     Use raw resources for original document text.
+
+    Note: Sampling OCR is not available for resources (requires async Context).
+    When REMARKABLE_OCR_BACKEND=sampling, resources fall back to google/tesseract.
+    Use the remarkable_read tool with include_ocr=True for sampling OCR.
     """
     from remarkable_mcp.extract import extract_text_from_document_zip
 
@@ -101,8 +105,10 @@ def _make_doc_resource(client, document):
                 tmp.write(raw)
                 tmp_path = Path(tmp.name)
             try:
-                # First try without OCR (faster)
-                content = extract_text_from_document_zip(tmp_path, include_ocr=False)
+                # First try without OCR (faster) - use doc_id to leverage cache
+                content = extract_text_from_document_zip(
+                    tmp_path, include_ocr=False, doc_id=document.ID
+                )
 
                 if content["typed_text"]:
                     text_parts.extend(content["typed_text"])
@@ -112,8 +118,11 @@ def _make_doc_resource(client, document):
                     text_parts.extend(content["highlights"])
 
                 # If no text found and document has pages, try OCR for handwritten
+                # Note: sampling OCR not available here, falls back to google/tesseract
                 if not text_parts and content["pages"] > 0:
-                    content = extract_text_from_document_zip(tmp_path, include_ocr=True)
+                    content = extract_text_from_document_zip(
+                        tmp_path, include_ocr=True, doc_id=document.ID
+                    )
                     if content["handwritten_text"]:
                         text_parts.extend(content["handwritten_text"])
 
