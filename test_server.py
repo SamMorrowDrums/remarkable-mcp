@@ -519,6 +519,18 @@ class TestRemarkableImage:
         assert "_error" in data
         assert data["_error"]["type"] == "document_not_found"
 
+    @pytest.mark.asyncio
+    async def test_image_compatibility_parameter_in_schema(self):
+        """Test that remarkable_image tool has the compatibility parameter in its schema."""
+        tools = await mcp.list_tools()
+        image_tool = next(t for t in tools if t.name == "remarkable_image")
+
+        # Check that compatibility parameter exists in the input schema
+        assert "compatibility" in image_tool.inputSchema.get("properties", {})
+        compat_schema = image_tool.inputSchema["properties"]["compatibility"]
+        assert compat_schema.get("type") == "boolean"
+        assert compat_schema.get("default") is False
+
 
 # =============================================================================
 # Test Registration
@@ -684,6 +696,230 @@ class TestResponseConsistency:
                 assert "type" in data["_error"], f"Error in {tool_name} missing type"
                 assert "message" in data["_error"], f"Error in {tool_name} missing message"
                 assert "suggestion" in data["_error"], f"Error in {tool_name} missing suggestion"
+
+
+# =============================================================================
+# Test Capability Checking
+# =============================================================================
+
+
+class TestCapabilityChecking:
+    """Test capability checking utilities."""
+
+    def test_get_client_capabilities_without_context(self):
+        """Test get_client_capabilities returns None without valid context."""
+        from remarkable_mcp.capabilities import get_client_capabilities
+
+        # Create mock context without session
+        mock_ctx = Mock()
+        mock_ctx.session = None
+
+        result = get_client_capabilities(mock_ctx)
+        assert result is None
+
+    def test_get_client_capabilities_without_client_params(self):
+        """Test get_client_capabilities returns None without client_params."""
+        from remarkable_mcp.capabilities import get_client_capabilities
+
+        mock_ctx = Mock()
+        mock_ctx.session = Mock()
+        mock_ctx.session.client_params = None
+
+        result = get_client_capabilities(mock_ctx)
+        assert result is None
+
+    def test_get_client_capabilities_with_valid_context(self):
+        """Test get_client_capabilities returns capabilities when available."""
+        from mcp.types import ClientCapabilities, SamplingCapability
+
+        from remarkable_mcp.capabilities import get_client_capabilities
+
+        mock_caps = ClientCapabilities(sampling=SamplingCapability())
+
+        mock_ctx = Mock()
+        mock_ctx.session = Mock()
+        mock_ctx.session.client_params = Mock()
+        mock_ctx.session.client_params.capabilities = mock_caps
+
+        result = get_client_capabilities(mock_ctx)
+        assert result is not None
+        assert result.sampling is not None
+
+    def test_client_supports_sampling_true(self):
+        """Test client_supports_sampling returns True when sampling available."""
+        from mcp.types import ClientCapabilities, SamplingCapability
+
+        from remarkable_mcp.capabilities import client_supports_sampling
+
+        mock_caps = ClientCapabilities(sampling=SamplingCapability())
+
+        mock_ctx = Mock()
+        mock_ctx.session = Mock()
+        mock_ctx.session.client_params = Mock()
+        mock_ctx.session.client_params.capabilities = mock_caps
+
+        result = client_supports_sampling(mock_ctx)
+        assert result is True
+
+    def test_client_supports_sampling_false(self):
+        """Test client_supports_sampling returns False when sampling not available."""
+        from mcp.types import ClientCapabilities
+
+        from remarkable_mcp.capabilities import client_supports_sampling
+
+        mock_caps = ClientCapabilities(sampling=None)
+
+        mock_ctx = Mock()
+        mock_ctx.session = Mock()
+        mock_ctx.session.client_params = Mock()
+        mock_ctx.session.client_params.capabilities = mock_caps
+
+        result = client_supports_sampling(mock_ctx)
+        assert result is False
+
+    def test_client_supports_elicitation(self):
+        """Test client_supports_elicitation."""
+        from mcp.types import ClientCapabilities, ElicitationCapability
+
+        from remarkable_mcp.capabilities import client_supports_elicitation
+
+        # Test with elicitation enabled
+        mock_caps = ClientCapabilities(elicitation=ElicitationCapability())
+
+        mock_ctx = Mock()
+        mock_ctx.session = Mock()
+        mock_ctx.session.client_params = Mock()
+        mock_ctx.session.client_params.capabilities = mock_caps
+
+        assert client_supports_elicitation(mock_ctx) is True
+
+        # Test with elicitation disabled
+        mock_caps = ClientCapabilities(elicitation=None)
+        mock_ctx.session.client_params.capabilities = mock_caps
+
+        assert client_supports_elicitation(mock_ctx) is False
+
+    def test_client_supports_roots(self):
+        """Test client_supports_roots."""
+        from mcp.types import ClientCapabilities, RootsCapability
+
+        from remarkable_mcp.capabilities import client_supports_roots
+
+        # Test with roots enabled
+        mock_caps = ClientCapabilities(roots=RootsCapability())
+
+        mock_ctx = Mock()
+        mock_ctx.session = Mock()
+        mock_ctx.session.client_params = Mock()
+        mock_ctx.session.client_params.capabilities = mock_caps
+
+        assert client_supports_roots(mock_ctx) is True
+
+        # Test with roots disabled
+        mock_caps = ClientCapabilities(roots=None)
+        mock_ctx.session.client_params.capabilities = mock_caps
+
+        assert client_supports_roots(mock_ctx) is False
+
+    def test_client_supports_experimental(self):
+        """Test client_supports_experimental."""
+        from mcp.types import ClientCapabilities
+
+        from remarkable_mcp.capabilities import client_supports_experimental
+
+        # Test with experimental feature present
+        mock_caps = ClientCapabilities(experimental={"my_feature": {}})
+
+        mock_ctx = Mock()
+        mock_ctx.session = Mock()
+        mock_ctx.session.client_params = Mock()
+        mock_ctx.session.client_params.capabilities = mock_caps
+
+        assert client_supports_experimental(mock_ctx, "my_feature") is True
+        assert client_supports_experimental(mock_ctx, "other_feature") is False
+
+        # Test with no experimental features
+        mock_caps = ClientCapabilities(experimental=None)
+        mock_ctx.session.client_params.capabilities = mock_caps
+
+        assert client_supports_experimental(mock_ctx, "my_feature") is False
+
+    def test_get_client_info(self):
+        """Test get_client_info."""
+        from remarkable_mcp.capabilities import get_client_info
+
+        mock_ctx = Mock()
+        mock_ctx.session = Mock()
+        mock_ctx.session.client_params = Mock()
+        mock_ctx.session.client_params.clientInfo = Mock()
+        mock_ctx.session.client_params.clientInfo.name = "Test Client"
+        mock_ctx.session.client_params.clientInfo.version = "1.0.0"
+        mock_ctx.session.client_params.protocolVersion = "2024-11-05"
+
+        result = get_client_info(mock_ctx)
+        assert result is not None
+        assert result["name"] == "Test Client"
+        assert result["version"] == "1.0.0"
+        assert result["protocol_version"] == "2024-11-05"
+
+    def test_get_client_info_without_client_info(self):
+        """Test get_client_info when clientInfo is None."""
+        from remarkable_mcp.capabilities import get_client_info
+
+        mock_ctx = Mock()
+        mock_ctx.session = Mock()
+        mock_ctx.session.client_params = Mock()
+        mock_ctx.session.client_params.clientInfo = None
+        mock_ctx.session.client_params.protocolVersion = "2024-11-05"
+
+        result = get_client_info(mock_ctx)
+        assert result is not None
+        assert result["name"] is None
+        assert result["version"] is None
+        assert result["protocol_version"] == "2024-11-05"
+
+    def test_get_protocol_version(self):
+        """Test get_protocol_version."""
+        from remarkable_mcp.capabilities import get_protocol_version
+
+        mock_ctx = Mock()
+        mock_ctx.session = Mock()
+        mock_ctx.session.client_params = Mock()
+        mock_ctx.session.client_params.protocolVersion = "2024-11-05"
+
+        result = get_protocol_version(mock_ctx)
+        assert result == "2024-11-05"
+
+    def test_get_protocol_version_without_context(self):
+        """Test get_protocol_version returns None without valid context."""
+        from remarkable_mcp.capabilities import get_protocol_version
+
+        mock_ctx = Mock()
+        mock_ctx.session = None
+
+        result = get_protocol_version(mock_ctx)
+        assert result is None
+
+    def test_capability_imports_from_package(self):
+        """Test that capability utilities can be imported from main package."""
+        from remarkable_mcp import (
+            client_supports_elicitation,
+            client_supports_experimental,
+            client_supports_roots,
+            client_supports_sampling,
+            get_client_capabilities,
+            get_client_info,
+            get_protocol_version,
+        )
+
+        # Verify all functions are callable
+        assert callable(get_client_capabilities)
+        assert callable(client_supports_sampling)
+        assert callable(client_supports_elicitation)
+        assert callable(client_supports_roots)
+        assert callable(client_supports_experimental)
+        assert callable(get_client_info)
+        assert callable(get_protocol_version)
 
 
 if __name__ == "__main__":

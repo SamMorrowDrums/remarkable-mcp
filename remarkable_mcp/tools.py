@@ -5,14 +5,20 @@ All tools are read-only and idempotent - they only retrieve data from the
 reMarkable Cloud and do not modify any documents.
 """
 
+import base64
 import os
 import re
 import tempfile
 from pathlib import Path
 from typing import Literal, Optional
 
-from mcp.server.fastmcp import Image
-from mcp.types import ToolAnnotations
+from mcp.types import (
+    BlobResourceContents,
+    EmbeddedResource,
+    TextContent,
+    TextResourceContents,
+    ToolAnnotations,
+)
 
 from remarkable_mcp.api import (
     REMARKABLE_TOKEN,
@@ -1098,6 +1104,7 @@ def remarkable_image(
     page: int = 1,
     background: Optional[str] = None,
     output_format: str = "png",
+    compatibility: bool = False,
 ):
     """
     <usecase>Get an image of a specific page from a reMarkable document.</usecase>
@@ -1108,7 +1115,16 @@ def remarkable_image(
     - Implementing designs based on hand-drawn wireframes
     - SVG format for scalable vector graphics that can be edited
 
-    The image is returned as base64-encoded data that can be displayed inline.
+    ## Response Formats
+
+    By default, images are returned as embedded resources (EmbeddedResource) which
+    include the full image data inline:
+    - PNG: Returned as BlobResourceContents with base64-encoded data
+    - SVG: Returned as TextResourceContents with SVG markup
+
+    If your client doesn't support embedded resources in tool responses, set
+    compatibility=True to receive a JSON response with just the resource URI.
+    The client can then fetch the resource separately.
 
     Note: This works best with notebooks and handwritten content. For PDFs/EPUBs,
     the annotations layer is rendered (not the underlying PDF content).
@@ -1120,13 +1136,16 @@ def remarkable_image(
       Default is "#FBFBFB" (reMarkable paper color), or set REMARKABLE_BACKGROUND_COLOR
       env var to override. Use "#00000000" for transparent.
     - output_format: Output format - "png" (default) or "svg" for vector graphics
+    - compatibility: If True, return resource URI in JSON instead of embedded resource.
+      Use this if your client doesn't support embedded resources in tool responses.
     </parameters>
     <examples>
-    - remarkable_image("UI Mockup")  # Get first page with reMarkable paper background
+    - remarkable_image("UI Mockup")  # Get first page as embedded PNG resource
     - remarkable_image("Meeting Notes", page=2)  # Get second page
     - remarkable_image("/Work/Designs/Wireframe", background="#FFFFFF")  # White background
     - remarkable_image("Sketch", background="#00000000")  # Transparent background
-    - remarkable_image("Diagram", output_format="svg")  # Get as SVG for editing
+    - remarkable_image("Diagram", output_format="svg")  # Get as embedded SVG resource
+    - remarkable_image("Notes", compatibility=True)  # Return resource URI for retry
     </examples>
     """
     try:
@@ -1214,6 +1233,10 @@ def remarkable_image(
                     suggestion=f"Use page=1 to {total_pages} to view different pages.",
                 )
 
+            # Build resource URI for this page
+            doc_path = _apply_root_filter(get_item_path(target_doc, items_by_id))
+            uri_path = doc_path.lstrip("/")
+
             # Render the page based on format
             if format_lower == "svg":
                 svg_content = render_page_from_document_zip_svg(
@@ -1227,15 +1250,38 @@ def remarkable_image(
                         suggestion="Make sure 'rmc' is installed. Try: uv add rmc",
                     )
 
-                # Return SVG as text content
-                hint = (
-                    f"Page {page}/{total_pages} as SVG. "
-                    f"Use remarkable_image('{document}', output_format='png') for raster."
-                )
-                return make_response(
-                    {"svg": svg_content, "page": page, "total_pages": total_pages},
-                    hint,
-                )
+                resource_uri = f"remarkablesvg:///{uri_path}.page-{page}.svg"
+
+                if compatibility:
+                    # Return SVG content in JSON for clients without embedded resource support
+                    hint = (
+                        f"Page {page}/{total_pages} as SVG. "
+                        f"Use compatibility=False for embedded resource format."
+                    )
+                    return make_response(
+                        {
+                            "svg": svg_content,
+                            "mime_type": "image/svg+xml",
+                            "page": page,
+                            "total_pages": total_pages,
+                            "resource_uri": resource_uri,
+                        },
+                        hint,
+                    )
+                else:
+                    # Return SVG as embedded TextResourceContents with info hint
+                    text_resource = TextResourceContents(
+                        uri=resource_uri,
+                        mimeType="image/svg+xml",
+                        text=svg_content,
+                    )
+                    embedded = EmbeddedResource(type="resource", resource=text_resource)
+                    info = TextContent(
+                        type="text",
+                        text=f"Page {page}/{total_pages} of '{target_doc.VissibleName}' as SVG. "
+                        f"Resource URI: {resource_uri}",
+                    )
+                    return [info, embedded]
             else:
                 # PNG format
                 png_data = render_page_from_document_zip(
@@ -1251,8 +1297,43 @@ def remarkable_image(
                         ),
                     )
 
-                # Return the image using FastMCP's Image class
-                return Image(data=png_data, format="png")
+                resource_uri = f"remarkableimg:///{uri_path}.page-{page}.png"
+                png_base64 = base64.b64encode(png_data).decode("utf-8")
+
+                if compatibility:
+                    # Return base64 PNG in JSON for clients without embedded resource support
+                    # Include data URI format for direct use in HTML <img> tags
+                    data_uri = f"data:image/png;base64,{png_base64}"
+                    hint = (
+                        f"Page {page}/{total_pages} as base64-encoded PNG. "
+                        f"Use 'data_uri' directly in HTML img src. "
+                        f"Use compatibility=False for embedded resource format."
+                    )
+                    return make_response(
+                        {
+                            "data_uri": data_uri,
+                            "image_base64": png_base64,
+                            "mime_type": "image/png",
+                            "page": page,
+                            "total_pages": total_pages,
+                            "resource_uri": resource_uri,
+                        },
+                        hint,
+                    )
+                else:
+                    # Return PNG as embedded BlobResourceContents with info hint
+                    blob_resource = BlobResourceContents(
+                        uri=resource_uri,
+                        mimeType="image/png",
+                        blob=png_base64,
+                    )
+                    embedded = EmbeddedResource(type="resource", resource=blob_resource)
+                    info = TextContent(
+                        type="text",
+                        text=f"Page {page}/{total_pages} of '{target_doc.VissibleName}' as PNG. "
+                        f"Resource URI: {resource_uri}",
+                    )
+                    return [info, embedded]
 
         finally:
             tmp_path.unlink(missing_ok=True)
