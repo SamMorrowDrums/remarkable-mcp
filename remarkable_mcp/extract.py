@@ -61,20 +61,31 @@ def clear_extraction_cache(doc_id: Optional[str] = None) -> None:
         _extraction_cache.clear()
 
 
-def get_cached_ocr_result(doc_id: str, include_ocr: bool = True) -> Optional[Dict[str, Any]]:
+def get_cached_ocr_result(
+    doc_id: str,
+    include_ocr: bool = True,
+    ocr_backend: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """
     Get cached OCR result for a document if available and valid.
 
     Args:
         doc_id: Document ID to look up
         include_ocr: Whether OCR content is required
+        ocr_backend: If specified, only return cache if it was produced by this backend.
+                     Use "sampling", "google", or "tesseract". None accepts any backend.
 
     Returns:
-        Cached result dict or None if not cached/expired
+        Cached result dict or None if not cached/expired/wrong backend
     """
     if doc_id in _extraction_cache:
         cached = _extraction_cache[doc_id]
         if (cached["include_ocr"] or not include_ocr) and _is_cache_valid(cached):
+            # Check backend match if specified
+            if ocr_backend is not None:
+                cached_backend = cached["result"].get("ocr_backend")
+                if cached_backend != ocr_backend:
+                    return None
             return cached["result"]
     return None
 
