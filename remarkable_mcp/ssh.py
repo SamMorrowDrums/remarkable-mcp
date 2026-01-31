@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -92,7 +93,12 @@ Folder = Document
 
 
 class SSHClient:
-    """Client for accessing reMarkable tablet via SSH."""
+    """Client for accessing reMarkable tablet via SSH.
+
+    Supports automatic reconnection when the SSH connection is lost and restored.
+    Call ensure_connection() before operations, or use _ssh_command() which
+    automatically retries on connection failure.
+    """
 
     def __init__(
         self,
@@ -107,9 +113,62 @@ class SSHClient:
         self.password = password
         self._documents: List[Document] = []
         self._documents_by_id: Dict[str, Document] = {}
+        self._connection_verified: bool = False
+        self._last_connection_check: float = 0
+        # How long to trust a successful connection check (seconds)
+        self._connection_check_ttl: float = 30.0
 
-    def _ssh_command(self, command: str, timeout: int = 30) -> str:
-        """Execute a command on the tablet via SSH."""
+    def clear_cache(self) -> None:
+        """Clear all cached data. Call this when reconnecting after connection loss."""
+        self._documents = []
+        self._documents_by_id = {}
+        if hasattr(self, "_file_type_cache"):
+            del self._file_type_cache
+        self._connection_verified = False
+        logger.debug("SSH client cache cleared")
+
+    def ensure_connection(self, force_check: bool = False) -> bool:
+        """
+        Verify SSH connection is available, reconnecting if needed.
+
+        Args:
+            force_check: If True, always check connection even if recently verified.
+
+        Returns:
+            True if connection is available, False otherwise.
+
+        This method should be called before performing operations. It will:
+        1. Skip check if connection was recently verified (within TTL)
+        2. Test connection with a simple command
+        3. Clear caches if reconnecting after a failure
+        """
+        now = time.time()
+
+        # Skip check if recently verified and not forced
+        if (
+            not force_check
+            and self._connection_verified
+            and (now - self._last_connection_check) < self._connection_check_ttl
+        ):
+            return True
+
+        # Test connection
+        try:
+            self._ssh_command_internal("echo ok", timeout=5)
+            if not self._connection_verified:
+                # Reconnected after being disconnected - clear stale caches
+                logger.info("SSH connection restored, clearing cached data")
+                self.clear_cache()
+            self._connection_verified = True
+            self._last_connection_check = now
+            return True
+        except Exception as e:
+            logger.debug(f"SSH connection check failed: {e}")
+            self._connection_verified = False
+            return False
+
+    def _ssh_command_internal(self, command: str, timeout: int = 30) -> str:
+        """Execute SSH command without retry logic. Used internally."""
         ssh_args = [
             "ssh",
             "-o",
@@ -152,10 +211,55 @@ class SSHClient:
                 )
             raise RuntimeError("SSH client not found. Install openssh-client.")
 
-    def _scp_download(self, remote_path: str, timeout: int = 60) -> bytes:
-        """Download a file from the tablet via SSH cat (more reliable than SCP)."""
-        # Use SSH + cat instead of SCP for binary file transfer
-        # This avoids issues with /dev/stdout on various platforms
+    def _ssh_command(self, command: str, timeout: int = 30, _retry: bool = True) -> str:
+        """
+        Execute a command on the tablet via SSH with auto-reconnection.
+
+        If the command fails due to a connection error and _retry is True,
+        this will clear caches and retry once after verifying the connection
+        is restored.
+        """
+        try:
+            result = self._ssh_command_internal(command, timeout)
+            # Command succeeded - mark connection as verified
+            self._connection_verified = True
+            self._last_connection_check = time.time()
+            return result
+        except RuntimeError as e:
+            error_msg = str(e).lower()
+            # Check if this is a connection-related error
+            is_connection_error = any(
+                indicator in error_msg
+                for indicator in [
+                    "connection refused",
+                    "connection timed out",
+                    "no route to host",
+                    "network is unreachable",
+                    "host is down",
+                    "connection reset",
+                    "broken pipe",
+                    "timed out",
+                    "ssh_exchange_identification",
+                    "permission denied",
+                ]
+            )
+
+            if is_connection_error and _retry:
+                # Mark connection as lost
+                self._connection_verified = False
+                logger.warning(f"SSH connection lost: {e}. Will retry on next operation.")
+
+                # Try to reconnect
+                if self.ensure_connection(force_check=True):
+                    logger.info("SSH reconnected, retrying command...")
+                    # Retry without further retries to avoid infinite loop
+                    return self._ssh_command(command, timeout, _retry=False)
+
+            # Re-raise if not a connection error or retry failed
+            raise
+
+    def _scp_download_internal(self, remote_path: str, timeout: int = 60) -> bytes:
+        """Download a file via SSH cat without retry logic. Used internally."""
         ssh_args = [
             "ssh",
             "-o",
@@ -188,30 +292,80 @@ class SSHClient:
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"SSH cat timed out after {timeout}s")
 
+    def _scp_download(self, remote_path: str, timeout: int = 60, _retry: bool = True) -> bytes:
+        """
+        Download a file from the tablet via SSH cat with auto-reconnection.
+
+        Uses SSH + cat instead of SCP for binary file transfer.
+        This avoids issues with /dev/stdout on various platforms.
+        """
+        try:
+            result = self._scp_download_internal(remote_path, timeout)
+            # Success - mark connection as verified
+            self._connection_verified = True
+            self._last_connection_check = time.time()
+            return result
+        except RuntimeError as e:
+            error_msg = str(e).lower()
+            # Check if this is a connection-related error
+            is_connection_error = any(
+                indicator in error_msg
+                for indicator in [
+                    "connection refused",
+                    "connection timed out",
+                    "no route to host",
+                    "network is unreachable",
+                    "host is down",
+                    "connection reset",
+                    "broken pipe",
+                    "timed out",
+                    "ssh_exchange_identification",
+                    "permission denied",
+                ]
+            )
+
+            if is_connection_error and _retry:
+                # Mark connection as lost
+                self._connection_verified = False
+                logger.warning(f"SSH connection lost during download: {e}. Will retry...")
+
+                # Try to reconnect
+                if self.ensure_connection(force_check=True):
+                    logger.info("SSH reconnected, retrying download...")
+                    return self._scp_download(remote_path, timeout, _retry=False)
+
+            raise
+
     def check_connection(self) -> bool:
         """Check if SSH connection to tablet is available."""
-        try:
-            self._ssh_command("echo ok", timeout=5)
-            return True
-        except Exception as e:
-            logger.debug(f"SSH connection check failed: {e}")
-            return False
+        return self.ensure_connection(force_check=True)
 
-    def get_meta_items(self, limit: Optional[int] = None) -> List[Document]:
+    def get_meta_items(self, limit: Optional[int] = None, force_refresh: bool = False) -> List[Document]:
         """
         Fetch documents and folders from the tablet via SSH.
 
         Args:
             limit: Maximum number of documents to fetch. If None, fetches all.
+            force_refresh: If True, bypass cache and reload from device.
 
         Returns a list of Document objects.
+
+        Note: If the connection was lost and restored, caches are automatically
+        cleared and documents are reloaded fresh.
         """
+        # Ensure connection is available - this will clear caches if reconnecting
+        if not self.ensure_connection():
+            raise RuntimeError(
+                "Cannot connect to reMarkable tablet via SSH. "
+                "Make sure the tablet is connected via USB and SSH is enabled."
+            )
+
         # Return cached documents if available and no limit specified
-        if self._documents and limit is None:
+        if not force_refresh and self._documents and limit is None:
             return self._documents
 
         # If we have cached docs and limit is within cache, return slice
-        if self._documents and limit is not None and len(self._documents) >= limit:
+        if not force_refresh and self._documents and limit is not None and len(self._documents) >= limit:
             return self._documents[:limit]
 
         # Read all metadata files in a single SSH command for efficiency
