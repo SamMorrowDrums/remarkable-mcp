@@ -10,7 +10,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from mcp.server.fastmcp import Context
 from mcp.types import (
@@ -746,7 +746,7 @@ async def remarkable_read(
 
 @mcp.tool(annotations=BROWSE_ANNOTATIONS)
 def remarkable_browse(
-    path: str = "/", query: Optional[str] = None, tags: Optional[list[str]] = None
+    path: str = "/", query: Optional[str] = None, tags: Optional[List[str]] = None
 ) -> str:
     """
     <usecase>Browse your reMarkable library or search for documents.</usecase>
@@ -1107,7 +1107,7 @@ def remarkable_search(
     grep: Optional[str] = None,
     limit: int = 5,
     include_ocr: bool = False,
-    tags: Optional[list[str]] = None,
+    tags: Optional[List[str]] = None,
 ) -> str:
     """
     <usecase>Search across multiple documents and return matching content.</usecase>

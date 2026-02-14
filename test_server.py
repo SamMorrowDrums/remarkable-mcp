@@ -1189,8 +1189,8 @@ class TestTagSupport:
                 assert data["filter_tags"] == ["work"]
 
     @pytest.mark.asyncio
-    async def test_search_includes_tags(self):
-        """Test that remarkable_search includes tags in results."""
+    async def test_browse_search_mode_includes_tags(self):
+        """Test that remarkable_browse in search mode includes tags in results."""
         mock_client = Mock()
         mock_doc = Mock()
         mock_doc.VissibleName = "Meeting Notes"
@@ -1213,8 +1213,8 @@ class TestTagSupport:
                 assert data["results"][0]["tags"] == ["meeting", "important"]
 
     @pytest.mark.asyncio
-    async def test_search_filter_by_tags(self):
-        """Test that remarkable_search can filter by tags."""
+    async def test_browse_search_mode_filter_by_tags(self):
+        """Test that remarkable_browse in search mode can filter by tags."""
         mock_client = Mock()
 
         mock_doc1 = Mock()
