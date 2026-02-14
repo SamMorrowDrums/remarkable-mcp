@@ -701,7 +701,7 @@ async def remarkable_read(
                 target_doc.ModifiedClient if hasattr(target_doc, "ModifiedClient") else None
             ),
         }
-        
+
         # Add tags if present
         if hasattr(target_doc, "tags") and target_doc.tags:
             result["tags"] = target_doc.tags
@@ -804,7 +804,9 @@ def remarkable_browse(
                     continue
                 # Filter by tags if provided
                 if tags:
-                    item_tags_lower = [t.lower() for t in (item.tags if hasattr(item, "tags") else [])]
+                    item_tags_lower = [
+                        t.lower() for t in (item.tags if hasattr(item, "tags") else [])
+                    ]
                     if not any(tag.lower() in item_tags_lower for tag in tags):
                         continue
                 if query_lower in item.VissibleName.lower():
@@ -950,9 +952,7 @@ def remarkable_browse(
                 doc_info = {
                     "name": item.VissibleName,
                     "id": item.ID,
-                    "modified": (
-                        item.ModifiedClient if hasattr(item, "ModifiedClient") else None
-                    ),
+                    "modified": (item.ModifiedClient if hasattr(item, "ModifiedClient") else None),
                 }
                 # Add tags if present
                 if hasattr(item, "tags") and item.tags:
@@ -1210,7 +1210,10 @@ def remarkable_search(
         tag_desc = f" with tags {tags}" if tags else ""
         if grep:
             matches = sum(d.get("grep_matches", 0) for d in docs_with_content)
-            hint = f"Found {len(docs_with_content)} document(s){tag_desc} with {matches} grep match(es)."
+            hint = (
+                f"Found {len(docs_with_content)} document(s){tag_desc} "
+                f"with {matches} grep match(es)."
+            )
         else:
             hint = f"Found {len(docs_with_content)} document(s) matching '{query}'{tag_desc}."
 
