@@ -9,7 +9,16 @@ from typing import Any, Dict, List
 
 # Configuration - check env var first, then fall back to file
 REMARKABLE_TOKEN = os.environ.get("REMARKABLE_TOKEN")
-REMARKABLE_USE_SSH = os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
+REMARKABLE_USE_SSH = os.environ.get("REMARKABLE_USE_SSH", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+REMARKABLE_USE_USB_WEB = os.environ.get("REMARKABLE_USE_USB_WEB", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 REMARKABLE_CONFIG_DIR = Path.home() / ".remarkable"
 REMARKABLE_TOKEN_FILE = REMARKABLE_CONFIG_DIR / "token"
 CACHE_DIR = REMARKABLE_CONFIG_DIR / "cache"
@@ -19,9 +28,19 @@ def get_rmapi():
     """
     Get or initialize the reMarkable API client.
 
-    Uses SSH transport if REMARKABLE_USE_SSH=1, otherwise cloud API.
-    Returns either RemarkableClient or SSHClient (both have compatible interfaces).
+    Priority order:
+    1. USB web interface (if REMARKABLE_USE_USB_WEB=1)
+    2. SSH (if REMARKABLE_USE_SSH=1)
+    3. Cloud API (default, requires token)
+
+    Returns RemarkableClient, SSHClient, or USBWebClient (all have compatible interfaces).
     """
+    # Try USB web interface first (no auth required)
+    if REMARKABLE_USE_USB_WEB:
+        from remarkable_mcp.usb_web import create_usb_web_client
+
+        return create_usb_web_client()
+
     # Check if SSH mode is enabled
     if REMARKABLE_USE_SSH:
         from remarkable_mcp.ssh import create_ssh_client
@@ -45,7 +64,9 @@ def get_rmapi():
             "No reMarkable token found. Register first:\n"
             "  uvx remarkable-mcp --register <code>\n\n"
             "Get a code from: https://my.remarkable.com/device/desktop/connect\n\n"
-            "Or use SSH mode (requires USB connection):\n"
+            "Or use USB web interface (no dev mode required):\n"
+            "  uvx remarkable-mcp --usb-web\n\n"
+            "Or use SSH mode (requires USB connection + developer mode):\n"
             "  uvx remarkable-mcp --ssh"
         )
 
