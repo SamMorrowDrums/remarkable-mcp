@@ -1092,5 +1092,162 @@ class TestSamplingOCR:
         assert isinstance(OCR_USER_PROMPT, str)
 
 
+# =============================================================================
+# Test Tag Support
+# =============================================================================
+
+
+class TestTagSupport:
+    """Test tag-related functionality."""
+
+    @pytest.mark.asyncio
+    async def test_document_has_tags_field(self):
+        """Test that Document dataclass includes tags field."""
+        from remarkable_mcp.sync import Document
+
+        doc = Document(
+            id="test-id",
+            hash="test-hash",
+            name="Test Doc",
+            doc_type="DocumentType",
+            tags=["work", "important"],
+        )
+        assert hasattr(doc, "tags")
+        assert doc.tags == ["work", "important"]
+
+    @pytest.mark.asyncio
+    async def test_document_tags_default_empty(self):
+        """Test that Document tags default to empty list."""
+        from remarkable_mcp.sync import Document
+
+        doc = Document(
+            id="test-id",
+            hash="test-hash",
+            name="Test Doc",
+            doc_type="DocumentType",
+        )
+        assert hasattr(doc, "tags")
+        assert doc.tags == []
+
+    @pytest.mark.asyncio
+    async def test_browse_includes_tags(self):
+        """Test that remarkable_browse includes tags in response."""
+        mock_client = Mock()
+        mock_doc = Mock()
+        mock_doc.VissibleName = "Tagged Doc"
+        mock_doc.ID = "doc-1"
+        mock_doc.Parent = ""
+        mock_doc.is_folder = False
+        mock_doc.ModifiedClient = None
+        mock_doc.tags = ["work", "project"]
+
+        mock_client.get_meta_items.return_value = [mock_doc]
+
+        with patch("remarkable_mcp.tools.get_rmapi", return_value=mock_client):
+            with patch("remarkable_mcp.tools._is_cloud_archived", return_value=False):
+                result = await mcp.call_tool("remarkable_browse", {"path": "/"})
+                data = json.loads(result[0][0].text)
+
+                assert data["mode"] == "browse"
+                assert len(data["documents"]) == 1
+                assert data["documents"][0]["name"] == "Tagged Doc"
+                assert "tags" in data["documents"][0]
+                assert data["documents"][0]["tags"] == ["work", "project"]
+
+    @pytest.mark.asyncio
+    async def test_browse_filter_by_tags(self):
+        """Test that remarkable_browse can filter documents by tags."""
+        mock_client = Mock()
+
+        mock_doc1 = Mock()
+        mock_doc1.VissibleName = "Work Doc"
+        mock_doc1.ID = "doc-1"
+        mock_doc1.Parent = ""
+        mock_doc1.is_folder = False
+        mock_doc1.ModifiedClient = None
+        mock_doc1.tags = ["work"]
+
+        mock_doc2 = Mock()
+        mock_doc2.VissibleName = "Personal Doc"
+        mock_doc2.ID = "doc-2"
+        mock_doc2.Parent = ""
+        mock_doc2.is_folder = False
+        mock_doc2.ModifiedClient = None
+        mock_doc2.tags = ["personal"]
+
+        mock_client.get_meta_items.return_value = [mock_doc1, mock_doc2]
+
+        with patch("remarkable_mcp.tools.get_rmapi", return_value=mock_client):
+            with patch("remarkable_mcp.tools._is_cloud_archived", return_value=False):
+                result = await mcp.call_tool("remarkable_browse", {"path": "/", "tags": ["work"]})
+                data = json.loads(result[0][0].text)
+
+                assert data["mode"] == "browse"
+                assert len(data["documents"]) == 1
+                assert data["documents"][0]["name"] == "Work Doc"
+                assert "filter_tags" in data
+                assert data["filter_tags"] == ["work"]
+
+    @pytest.mark.asyncio
+    async def test_browse_search_mode_includes_tags(self):
+        """Test that remarkable_browse in search mode includes tags in results."""
+        mock_client = Mock()
+        mock_doc = Mock()
+        mock_doc.VissibleName = "Meeting Notes"
+        mock_doc.ID = "doc-1"
+        mock_doc.Parent = ""
+        mock_doc.is_folder = False
+        mock_doc.ModifiedClient = None
+        mock_doc.tags = ["meeting", "important"]
+
+        mock_client.get_meta_items.return_value = [mock_doc]
+
+        with patch("remarkable_mcp.tools.get_rmapi", return_value=mock_client):
+            with patch("remarkable_mcp.tools._is_cloud_archived", return_value=False):
+                result = await mcp.call_tool("remarkable_browse", {"query": "meeting"})
+                data = json.loads(result[0][0].text)
+
+                assert data["mode"] == "search"
+                assert len(data["results"]) == 1
+                assert "tags" in data["results"][0]
+                assert data["results"][0]["tags"] == ["meeting", "important"]
+
+    @pytest.mark.asyncio
+    async def test_browse_search_mode_filter_by_tags(self):
+        """Test that remarkable_browse in search mode can filter by tags."""
+        mock_client = Mock()
+
+        mock_doc1 = Mock()
+        mock_doc1.VissibleName = "Work Meeting"
+        mock_doc1.ID = "doc-1"
+        mock_doc1.Parent = ""
+        mock_doc1.is_folder = False
+        mock_doc1.ModifiedClient = None
+        mock_doc1.tags = ["work", "meeting"]
+
+        mock_doc2 = Mock()
+        mock_doc2.VissibleName = "Personal Meeting"
+        mock_doc2.ID = "doc-2"
+        mock_doc2.Parent = ""
+        mock_doc2.is_folder = False
+        mock_doc2.ModifiedClient = None
+        mock_doc2.tags = ["personal", "meeting"]
+
+        mock_client.get_meta_items.return_value = [mock_doc1, mock_doc2]
+
+        with patch("remarkable_mcp.tools.get_rmapi", return_value=mock_client):
+            with patch("remarkable_mcp.tools._is_cloud_archived", return_value=False):
+                result = await mcp.call_tool(
+                    "remarkable_browse", {"query": "meeting", "tags": ["work"]}
+                )
+                data = json.loads(result[0][0].text)
+
+                assert data["mode"] == "search"
+                assert len(data["results"]) == 1
+                assert data["results"][0]["name"] == "Work Meeting"
+                assert "filter_tags" in data
+                assert data["filter_tags"] == ["work"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

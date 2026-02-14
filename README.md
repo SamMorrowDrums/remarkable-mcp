@@ -135,8 +135,8 @@ AI assistants use the tools to read documents, search content, and more:
 | Tool | Description |
 |------|-------------|
 | `remarkable_read` | Read and extract text from documents (with pagination and search) |
-| `remarkable_browse` | Navigate folders or search by document name |
-| `remarkable_search` | Search content across multiple documents |
+| `remarkable_browse` | Navigate folders, search by document name, or filter by tags |
+| `remarkable_search` | Search content across multiple documents (with tag filtering) |
 | `remarkable_recent` | Get recently modified documents |
 | `remarkable_status` | Check connection status |
 | `remarkable_image` | Get PNG/SVG images of pages (supports OCR via sampling) |
@@ -152,6 +152,7 @@ All tools are **read-only** and return structured JSON with hints for next actio
 - **Batch search** — Search across multiple documents in one call
 - **Vision support** — Get page images for visual context (diagrams, mockups, sketches)
 - **Sampling OCR** — Use client's AI for OCR on images (no API key needed)
+- **Tag support** — Filter and organize documents by tags
 
 ### Example Usage
 
@@ -168,8 +169,15 @@ remarkable_read("Journal", include_ocr=True)
 # Browse your library
 remarkable_browse("/Work/Projects")
 
+# Filter by tags
+remarkable_browse("/", tags=["important"])
+remarkable_browse("/Work", tags=["project", "active"])
+
 # Search across documents
 remarkable_search("meeting", grep="action items")
+
+# Search with tag filter
+remarkable_search("project", tags=["work"])
 
 # Get recent documents
 remarkable_recent(limit=10)
