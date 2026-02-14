@@ -1196,10 +1196,16 @@ def remarkable_status() -> str:
     """
     import os
 
-    from remarkable_mcp.api import REMARKABLE_USE_SSH
+    from remarkable_mcp.api import REMARKABLE_USE_SSH, REMARKABLE_USE_USB_WEB
 
     # Determine transport mode
-    if REMARKABLE_USE_SSH:
+    if REMARKABLE_USE_USB_WEB:
+        from remarkable_mcp.usb_web import DEFAULT_USB_HOST
+
+        transport = "usb-web"
+        usb_host = os.environ.get("REMARKABLE_USB_HOST", DEFAULT_USB_HOST)
+        connection_info = f"USB web interface at {usb_host}"
+    elif REMARKABLE_USE_SSH:
         from remarkable_mcp.ssh import (
             DEFAULT_SSH_HOST,
             DEFAULT_SSH_PORT,
