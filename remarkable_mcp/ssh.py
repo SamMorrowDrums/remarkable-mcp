@@ -49,6 +49,7 @@ class Document:
     last_modified: Optional[datetime] = None
     size: int = 0
     files: List[Dict[str, Any]] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
     # SSH-specific: local path to the document folder
     local_path: Optional[str] = None
 
@@ -300,6 +301,7 @@ class SSHClient:
                 synced=metadata.get("synced", True),
                 last_modified=last_modified,
                 size=0,
+                tags=metadata.get("tags", []),
                 local_path=f"{XOCHITL_PATH}/{doc_id}",
             )
 

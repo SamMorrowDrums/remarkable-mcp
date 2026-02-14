@@ -701,6 +701,10 @@ async def remarkable_read(
                 target_doc.ModifiedClient if hasattr(target_doc, "ModifiedClient") else None
             ),
         }
+        
+        # Add tags if present
+        if hasattr(target_doc, "tags") and target_doc.tags:
+            result["tags"] = target_doc.tags
 
         if has_more:
             result["next_page"] = page + 1
@@ -741,18 +745,23 @@ async def remarkable_read(
 
 
 @mcp.tool(annotations=BROWSE_ANNOTATIONS)
-def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
+def remarkable_browse(
+    path: str = "/", query: Optional[str] = None, tags: Optional[list[str]] = None
+) -> str:
     """
     <usecase>Browse your reMarkable library or search for documents.</usecase>
     <instructions>
-    Two modes:
+    Three modes:
     1. Browse mode (default): List contents of a folder
        - Use path="/" for root folder
        - Use path="/FolderName" to navigate into folders
     2. Search mode: Find documents by name
        - Set query="search term" to search across all documents
+    3. Filter by tags: Find documents with specific tags
+       - Set tags=["tag1", "tag2"] to filter by tags
+       - Works in both browse and search modes
 
-    Results include document names, types, and modification dates.
+    Results include document names, types, modification dates, and tags.
 
     Note: If REMARKABLE_ROOT_PATH is configured, only documents within that
     folder are accessible. Paths are relative to the root path.
@@ -760,11 +769,14 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
     <parameters>
     - path: Folder path to browse (default: "/" for root)
     - query: Search term to find documents by name (optional, triggers search mode)
+    - tags: List of tags to filter documents (optional, case-insensitive)
     </parameters>
     <examples>
     - remarkable_browse()  # List root folder
     - remarkable_browse("/Work")  # List Work folder
     - remarkable_browse(query="meeting")  # Search for "meeting"
+    - remarkable_browse(tags=["important"])  # Show documents with "important" tag
+    - remarkable_browse(query="project", tags=["work"])  # Search with tag filter
     </examples>
     """
     try:
@@ -790,21 +802,30 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
                 # Filter by root path
                 if not _is_within_root(item_path, root):
                     continue
+                # Filter by tags if provided
+                if tags:
+                    item_tags_lower = [t.lower() for t in (item.tags if hasattr(item, "tags") else [])]
+                    if not any(tag.lower() in item_tags_lower for tag in tags):
+                        continue
                 if query_lower in item.VissibleName.lower():
-                    matches.append(
-                        {
-                            "name": item.VissibleName,
-                            "path": _apply_root_filter(item_path),
-                            "type": "folder" if item.is_folder else "document",
-                            "modified": (
-                                item.ModifiedClient if hasattr(item, "ModifiedClient") else None
-                            ),
-                        }
-                    )
+                    match_info = {
+                        "name": item.VissibleName,
+                        "path": _apply_root_filter(item_path),
+                        "type": "folder" if item.is_folder else "document",
+                        "modified": (
+                            item.ModifiedClient if hasattr(item, "ModifiedClient") else None
+                        ),
+                    }
+                    # Add tags if present
+                    if hasattr(item, "tags") and item.tags:
+                        match_info["tags"] = item.tags
+                    matches.append(match_info)
 
             matches.sort(key=lambda x: x["name"])
 
             result = {"mode": "search", "query": query, "count": len(matches), "results": matches}
+            if tags:
+                result["filter_tags"] = tags
 
             if matches:
                 first_doc = next((m for m in matches if m["type"] == "document"), None)
@@ -819,8 +840,9 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
                         f"To browse one: remarkable_browse('{matches[0]['path']}')."
                     )
             else:
+                filter_desc = f" with tags {tags}" if tags else ""
                 hint = (
-                    f"No results for '{query}'. "
+                    f"No results for '{query}'{filter_desc}. "
                     "Try remarkable_browse('/') to see all files, "
                     "or use a different search term."
                 )
@@ -917,23 +939,33 @@ def remarkable_browse(path: str = "/", query: Optional[str] = None) -> str:
             # Skip cloud-archived items
             if _is_cloud_archived(item):
                 continue
+            # Filter by tags if provided
+            if tags and not item.is_folder:
+                item_tags_lower = [t.lower() for t in (item.tags if hasattr(item, "tags") else [])]
+                if not any(tag.lower() in item_tags_lower for tag in tags):
+                    continue
             if item.is_folder:
                 folders.append({"name": item.VissibleName, "id": item.ID})
             else:
-                documents.append(
-                    {
-                        "name": item.VissibleName,
-                        "id": item.ID,
-                        "modified": (
-                            item.ModifiedClient if hasattr(item, "ModifiedClient") else None
-                        ),
-                    }
-                )
+                doc_info = {
+                    "name": item.VissibleName,
+                    "id": item.ID,
+                    "modified": (
+                        item.ModifiedClient if hasattr(item, "ModifiedClient") else None
+                    ),
+                }
+                # Add tags if present
+                if hasattr(item, "tags") and item.tags:
+                    doc_info["tags"] = item.tags
+                documents.append(doc_info)
 
         result = {"mode": "browse", "path": path, "folders": folders, "documents": documents}
+        if tags:
+            result["filter_tags"] = tags
 
         # Build helpful hint
-        hint_parts = [f"Found {len(folders)} folder(s) and {len(documents)} document(s)."]
+        tag_desc = f" with tags {tags}" if tags else ""
+        hint_parts = [f"Found {len(folders)} folder(s) and {len(documents)} document(s){tag_desc}."]
 
         if documents:
             hint_parts.append(f"To read a document: remarkable_read('{documents[0]['name']}').")
@@ -1011,6 +1043,9 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
                 "path": _apply_root_filter(doc_path),
                 "modified": (doc.ModifiedClient if hasattr(doc, "ModifiedClient") else None),
             }
+            # Add tags if present
+            if hasattr(doc, "tags") and doc.tags:
+                doc_info["tags"] = doc.tags
 
             if include_preview:
                 # Download and extract preview (skip notebooks - they need slow OCR)
@@ -1072,11 +1107,13 @@ def remarkable_search(
     grep: Optional[str] = None,
     limit: int = 5,
     include_ocr: bool = False,
+    tags: Optional[list[str]] = None,
 ) -> str:
     """
     <usecase>Search across multiple documents and return matching content.</usecase>
     <instructions>
     Searches document names for the query, then optionally searches content with grep.
+    Can filter by tags to narrow results.
     Returns summaries from multiple documents in a single call.
 
     This is efficient for finding information across your library without
@@ -1092,11 +1129,13 @@ def remarkable_search(
     - grep: Optional pattern to search within document content
     - limit: Max documents to return (default: 5, max: 5)
     - include_ocr: Enable OCR for handwritten content (default: False)
+    - tags: List of tags to filter documents (optional, case-insensitive)
     </parameters>
     <examples>
     - remarkable_search("meeting")  # Find docs with "meeting" in name
     - remarkable_search("journal", grep="project")  # Find "project" in journals
     - remarkable_search("notes", include_ocr=True)  # Search with OCR enabled
+    - remarkable_search("project", tags=["work"])  # Find work-tagged projects
     </examples>
     """
     import json
@@ -1106,7 +1145,7 @@ def remarkable_search(
         limit = min(max(1, limit), 5)
 
         # First, find matching documents
-        browse_result = remarkable_browse(query=query)
+        browse_result = remarkable_browse(query=query, tags=tags)
         browse_data = json.loads(browse_result)
 
         if "_error" in browse_data:
@@ -1130,6 +1169,9 @@ def remarkable_search(
                 "path": doc["path"],
                 "modified": doc.get("modified"),
             }
+            # Include tags if present
+            if "tags" in doc:
+                doc_result["tags"] = doc["tags"]
 
             try:
                 read_result = remarkable_read(
@@ -1160,14 +1202,17 @@ def remarkable_search(
             "count": len(search_results),
             "documents": search_results,
         }
+        if tags:
+            result["filter_tags"] = tags
 
         # Build hint
         docs_with_content = [d for d in search_results if "content" in d]
+        tag_desc = f" with tags {tags}" if tags else ""
         if grep:
             matches = sum(d.get("grep_matches", 0) for d in docs_with_content)
-            hint = f"Found {len(docs_with_content)} document(s) with {matches} grep match(es)."
+            hint = f"Found {len(docs_with_content)} document(s){tag_desc} with {matches} grep match(es)."
         else:
-            hint = f"Found {len(docs_with_content)} document(s) matching '{query}'."
+            hint = f"Found {len(docs_with_content)} document(s) matching '{query}'{tag_desc}."
 
         if docs_with_content:
             hint += f" To read more: remarkable_read('{docs_with_content[0]['path']}')."
