@@ -1179,9 +1179,7 @@ class TestTagSupport:
 
         with patch("remarkable_mcp.tools.get_rmapi", return_value=mock_client):
             with patch("remarkable_mcp.tools._is_cloud_archived", return_value=False):
-                result = await mcp.call_tool(
-                    "remarkable_browse", {"path": "/", "tags": ["work"]}
-                )
+                result = await mcp.call_tool("remarkable_browse", {"path": "/", "tags": ["work"]})
                 data = json.loads(result[0][0].text)
 
                 assert data["mode"] == "browse"
@@ -1206,9 +1204,7 @@ class TestTagSupport:
 
         with patch("remarkable_mcp.tools.get_rmapi", return_value=mock_client):
             with patch("remarkable_mcp.tools._is_cloud_archived", return_value=False):
-                result = await mcp.call_tool(
-                    "remarkable_browse", {"query": "meeting"}
-                )
+                result = await mcp.call_tool("remarkable_browse", {"query": "meeting"})
                 data = json.loads(result[0][0].text)
 
                 assert data["mode"] == "search"
