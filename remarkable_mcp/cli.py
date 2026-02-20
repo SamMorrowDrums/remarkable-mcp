@@ -35,11 +35,18 @@ Examples:
   # Run with token from environment
   REMARKABLE_TOKEN="your-token" uvx remarkable-mcp
 
-  # Run with SSH transport (direct USB connection)
+  # Run with USB web interface (no dev mode or subscription!)
+  uvx remarkable-mcp --usb-web
+
+  # Run with SSH transport (direct USB connection, requires dev mode)
   uvx remarkable-mcp --ssh
 
   # SSH with custom host (e.g., using SSH config)
   REMARKABLE_SSH_HOST="remarkable" uvx remarkable-mcp --ssh
+
+USB Web Interface Environment Variables:
+  REMARKABLE_USB_HOST      USB web interface host (default: http://10.11.99.1)
+  REMARKABLE_USB_TIMEOUT   Request timeout in seconds (default: 10)
 
 SSH Environment Variables:
   REMARKABLE_SSH_HOST      SSH host (default: 10.11.99.1 for USB)
@@ -60,7 +67,12 @@ Security Note:
     parser.add_argument(
         "--ssh",
         action="store_true",
-        help="Use SSH transport instead of cloud API (for USB connection)",
+        help="Use SSH transport instead of cloud API (requires developer mode)",
+    )
+    parser.add_argument(
+        "--usb-web",
+        action="store_true",
+        help="Use USB web interface (no developer mode or subscription required)",
     )
 
     args = parser.parse_args()
@@ -96,6 +108,12 @@ Security Note:
         except Exception as e:
             print(f"❌ Registration failed: {e}", file=sys.stderr)
             sys.exit(1)
+    elif args.usb_web:
+        # USB web mode - set environment variable and run server
+        os.environ["REMARKABLE_USE_USB_WEB"] = "1"
+        from remarkable_mcp.server import run
+
+        run()
     elif args.ssh:
         # SSH mode - set environment variable and run server
         os.environ["REMARKABLE_USE_SSH"] = "1"

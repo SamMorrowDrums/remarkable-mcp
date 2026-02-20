@@ -1094,3 +1094,165 @@ class TestSamplingOCR:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# =============================================================================
+# Test USB Web Interface
+# =============================================================================
+
+
+class TestUSBWebInterface:
+    """Test USB web interface client."""
+
+    @patch("requests.request")
+    def test_usb_web_check_connection(self, mock_request):
+        """Test USB web interface connection check."""
+        from remarkable_mcp.usb_web import USBWebClient
+
+        # Mock successful response
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = []
+        mock_request.return_value = mock_response
+
+        client = USBWebClient()
+        assert client.check_connection() is True
+
+        # Verify request was made
+        mock_request.assert_called_once()
+
+    @patch("requests.request")
+    def test_usb_web_connection_error(self, mock_request):
+        """Test USB web interface connection error."""
+        from remarkable_mcp.usb_web import USBWebClient
+
+        # Mock connection error
+        mock_request.side_effect = Exception("Connection refused")
+
+        client = USBWebClient()
+        assert client.check_connection() is False
+
+    @patch("requests.request")
+    def test_usb_web_get_meta_items(self, mock_request):
+        """Test fetching documents via USB web interface."""
+        from remarkable_mcp.usb_web import USBWebClient
+
+        # Mock successful response with documents
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            {"ID": "doc1", "VissibleName": "Test Doc", "Type": "DocumentType"},
+            {"ID": "folder1", "VissibleName": "Test Folder", "Type": "CollectionType"},
+        ]
+        mock_request.return_value = mock_response
+
+        client = USBWebClient()
+        docs = client.get_meta_items()
+
+        assert len(docs) >= 2
+        assert any(d.name == "Test Doc" for d in docs)
+        assert any(d.is_folder for d in docs)
+
+    @patch("requests.request")
+    def test_usb_web_download(self, mock_request):
+        """Test downloading document via USB web interface."""
+        from remarkable_mcp.usb_web import Document, USBWebClient
+
+        # Mock successful download response
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.content = b"fake zip content"
+        mock_request.return_value = mock_response
+
+        client = USBWebClient()
+        doc = Document(id="doc1", hash="doc1", name="Test", doc_type="DocumentType")
+
+        content = client.download(doc)
+        assert content == b"fake zip content"
+
+    @patch("remarkable_mcp.usb_web.create_usb_web_client")
+    def test_get_rmapi_usb_web_mode(self, mock_create_client):
+        """Test get_rmapi in USB web mode."""
+        import os
+        import sys
+
+        # Set USB web mode before importing
+        os.environ["REMARKABLE_USE_USB_WEB"] = "1"
+
+        # Reload the module to pick up the new env var
+        if "remarkable_mcp.api" in sys.modules:
+            import importlib
+
+            import remarkable_mcp.api
+
+            importlib.reload(remarkable_mcp.api)
+            from remarkable_mcp.api import get_rmapi
+        else:
+            from remarkable_mcp.api import get_rmapi
+
+        # Mock USB web client
+        mock_client = Mock()
+        mock_create_client.return_value = mock_client
+
+        try:
+            client = get_rmapi()
+            assert client == mock_client
+            mock_create_client.assert_called_once()
+        finally:
+            # Clean up
+            if "REMARKABLE_USE_USB_WEB" in os.environ:
+                del os.environ["REMARKABLE_USE_USB_WEB"]
+            # Reload to reset
+            if "remarkable_mcp.api" in sys.modules:
+                import importlib
+
+                import remarkable_mcp.api
+
+                importlib.reload(remarkable_mcp.api)
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_status_usb_web_mode(self, mock_get_rmapi):
+        """Test remarkable_status in USB web mode."""
+        import os
+        import sys
+
+        # Set USB web mode before importing
+        os.environ["REMARKABLE_USE_USB_WEB"] = "1"
+
+        # Reload the modules to pick up the new env var
+        if "remarkable_mcp.api" in sys.modules:
+            import importlib
+
+            import remarkable_mcp.api
+
+            importlib.reload(remarkable_mcp.api)
+
+        try:
+            # Mock USB web client
+            mock_client = Mock()
+            mock_doc = Mock()
+            mock_doc.is_folder = False
+            mock_doc.VissibleName = "Test"
+            mock_doc.ID = "doc1"
+            mock_doc.Parent = ""
+            mock_client.get_meta_items.return_value = [mock_doc]
+            mock_get_rmapi.return_value = mock_client
+
+            result = await mcp.call_tool("remarkable_status", {})
+            data = json.loads(result[0][0].text)
+
+            assert data["authenticated"] is True
+            assert data["transport"] == "usb-web"
+            assert "USB web interface" in data["connection"]
+        finally:
+            # Clean up
+            if "REMARKABLE_USE_USB_WEB" in os.environ:
+                del os.environ["REMARKABLE_USE_USB_WEB"]
+            # Reload to reset
+            if "remarkable_mcp.api" in sys.modules:
+                import importlib
+
+                import remarkable_mcp.api
+
+                importlib.reload(remarkable_mcp.api)
