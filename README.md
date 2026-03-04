@@ -207,7 +207,13 @@ remarkable-mcp works as an [OpenClaw](https://github.com/openclaw/openclaw) skil
 }
 ```
 
-A `SKILL.md` is included in the repository for use with OpenClaw's skill system. Copy the repo to your `~/.openclaw/skills/` directory or install via ClawHub.
+Install from [ClawHub](https://clawhub.ai):
+
+```bash
+clawhub install remarkable-mcp
+```
+
+Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remarkable-mcp/` directory.
 
 ---
 
