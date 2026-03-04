@@ -347,6 +347,15 @@ def _render_rm_v5_to_svg(rm_file_path: Path) -> Optional[str]:
     """
     import struct
 
+    # Pen IDs that are highlighters (both old and v5 mappings)
+    HIGHLIGHTER_PENS = {5, 18}
+    # Pen IDs that are erasers — skip rendering
+    ERASER_PENS = {6, 7, 8}
+
+    # Color mapping by pen type
+    STROKE_COLORS = {0: "black", 1: "gray", 2: "white"}
+    HIGHLIGHT_COLORS = {0: "#FFD700", 1: "#FFD700", 2: "#FFD700"}
+
     try:
         with open(rm_file_path, "rb") as f:
             header = f.read(43)
@@ -370,9 +379,21 @@ def _render_rm_v5_to_svg(rm_file_path: Path) -> Optional[str]:
                     if not segments:
                         continue
 
-                    stroke_color = {0: "black", 1: "gray", 2: "white"}.get(color, "black")
-                    avg_width = sum(s[2] for s in segments) / len(segments)
-                    stroke_width = max(0.5, min(avg_width * 0.8, 5.0))
+                    # Skip eraser strokes
+                    if pen in ERASER_PENS:
+                        continue
+
+                    is_highlighter = pen in HIGHLIGHTER_PENS
+                    if is_highlighter:
+                        stroke_color = HIGHLIGHT_COLORS.get(color, "#FFD700")
+                        avg_width = sum(s[2] for s in segments) / len(segments)
+                        stroke_width = max(10.0, min(avg_width * 2.0, 40.0))
+                        opacity = ' opacity="0.35"'
+                    else:
+                        stroke_color = STROKE_COLORS.get(color, "black")
+                        avg_width = sum(s[2] for s in segments) / len(segments)
+                        stroke_width = max(0.5, min(avg_width * 0.8, 5.0))
+                        opacity = ""
 
                     d = f"M {segments[0][0]:.1f} {segments[0][1]:.1f}"
                     d += "".join(f" L {s[0]:.1f} {s[1]:.1f}" for s in segments[1:])
@@ -381,8 +402,110 @@ def _render_rm_v5_to_svg(rm_file_path: Path) -> Optional[str]:
                         f'<path d="{d}" stroke="{stroke_color}" '
                         f'stroke-width="{stroke_width:.1f}" '
                         f'fill="none" stroke-linecap="round" '
-                        f'stroke-linejoin="round"/>'
+                        f'stroke-linejoin="round"{opacity}/>'
                     )
+
+        w, h = REMARKABLE_WIDTH, REMARKABLE_HEIGHT
+        return (
+            f'<?xml version="1.0" encoding="UTF-8"?>'
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'viewBox="0 0 {w} {h}" width="{w}" height="{h}">'
+            f"{''.join(paths)}</svg>"
+        )
+    except Exception:
+        return None
+
+
+def _render_rm_v6_to_svg(rm_file_path: Path) -> Optional[str]:
+    """
+    Render a v6 .rm file to SVG using rmscene to parse the CRDT block format.
+
+    This handles newer reMarkable firmware that uses the v6 format with
+    scene tree blocks, including proper highlighter and color support.
+    """
+    try:
+        from rmscene import read_blocks
+    except ImportError:
+        return None
+
+    # Use integer values for pen/color matching (rmscene exposes ints on blocks)
+    HIGHLIGHTER_PENS = {5, 18}  # HIGHLIGHTER_1, HIGHLIGHTER_2
+    ERASER_PENS = {6, 8}  # ERASER, ERASER_AREA
+
+    COLOR_MAP = {
+        0: "black",  # BLACK
+        1: "#808080",  # GRAY
+        2: "white",  # WHITE
+        3: "#FFD700",  # YELLOW
+        4: "#00A000",  # GREEN
+        5: "#FF69B4",  # PINK
+        6: "#4169E1",  # BLUE
+        7: "#E00000",  # RED
+        8: "#A0A0A0",  # GRAY_OVERLAP
+        9: "#FFD700",  # HIGHLIGHT
+        10: "#00C000",  # GREEN_2
+        11: "#00CED1",  # CYAN
+        12: "#FF00FF",  # MAGENTA
+        13: "#FFD700",  # YELLOW_2
+    }
+
+    try:
+        with open(rm_file_path, "rb") as f:
+            header = f.read(43)
+            if b"version=6" not in header:
+                return None
+            f.seek(0)
+            blocks = list(read_blocks(f))
+
+        paths = []
+        for block in blocks:
+            if not hasattr(block, "item") or not hasattr(block.item, "value"):
+                continue
+            line = block.item.value
+            if not hasattr(line, "points") or not line.points:
+                continue
+
+            tool = line.tool if hasattr(line, "tool") else None
+            color = line.color if hasattr(line, "color") else 0
+            # Convert enums to int if needed
+            tool = tool.value if hasattr(tool, "value") else tool
+            color = color.value if hasattr(color, "value") else color
+
+            if tool in ERASER_PENS:
+                continue
+
+            is_highlighter = tool in HIGHLIGHTER_PENS
+            stroke_color = COLOR_MAP.get(color, "black")
+
+            if is_highlighter:
+                avg_width = (
+                    sum(p.width for p in line.points) / len(line.points)
+                    if all(hasattr(p, "width") for p in line.points)
+                    else 20.0
+                )
+                stroke_width = max(10.0, min(avg_width * 2.0, 40.0))
+                opacity = ' opacity="0.35"'
+            else:
+                avg_width = (
+                    sum(p.width for p in line.points) / len(line.points)
+                    if all(hasattr(p, "width") for p in line.points)
+                    else 2.0
+                )
+                stroke_width = max(0.5, min(avg_width * 0.8, 5.0))
+                opacity = ""
+
+            d = f"M {line.points[0].x:.1f} {line.points[0].y:.1f}"
+            d += "".join(f" L {p.x:.1f} {p.y:.1f}" for p in line.points[1:])
+
+            paths.append(
+                f'<path d="{d}" stroke="{stroke_color}" '
+                f'stroke-width="{stroke_width:.1f}" '
+                f'fill="none" stroke-linecap="round" '
+                f'stroke-linejoin="round"{opacity}/>'
+            )
+
+        if not paths:
+            return None
 
         w, h = REMARKABLE_WIDTH, REMARKABLE_HEIGHT
         return (
@@ -434,8 +557,8 @@ def render_rm_file_to_png(
             timeout=30,
         )
         if result.returncode != 0:
-            # Try v5 fallback renderer
-            svg_content = _render_rm_v5_to_svg(rm_file_path)
+            # Try v5 fallback renderer, then v6
+            svg_content = _render_rm_v5_to_svg(rm_file_path) or _render_rm_v6_to_svg(rm_file_path)
             if svg_content is None:
                 return None
             tmp_svg_path.write_text(svg_content)
@@ -557,8 +680,8 @@ def render_rm_file_to_svg(
             timeout=30,
         )
         if result.returncode != 0:
-            # Try v5 fallback renderer
-            v5_svg = _render_rm_v5_to_svg(rm_file_path)
+            # Try v5 fallback renderer, then v6
+            v5_svg = _render_rm_v5_to_svg(rm_file_path) or _render_rm_v6_to_svg(rm_file_path)
             if v5_svg is None:
                 return None
             tmp_svg_path.write_text(v5_svg)
@@ -746,6 +869,9 @@ def get_document_page_count(zip_path: Path) -> int:
     """
     Get the number of pages in a reMarkable document zip.
 
+    Uses the .content metadata file for accurate page count (includes
+    user-added pages in PDFs). Falls back to counting .rm files.
+
     Args:
         zip_path: Path to the document zip file
 
@@ -758,6 +884,19 @@ def get_document_page_count(zip_path: Path) -> int:
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(tmpdir_path)
 
+        # Try .content metadata first — it's the authoritative page list
+        for content_file in tmpdir_path.glob("*.content"):
+            try:
+                data = json.loads(content_file.read_text())
+                if "cPages" in data and "pages" in data["cPages"]:
+                    return len(data["cPages"]["pages"])
+                if "pages" in data and isinstance(data["pages"], list):
+                    return len(data["pages"])
+            except Exception:
+                pass
+            break
+
+        # Fallback to counting .rm files
         return len(list(tmpdir_path.glob("**/*.rm")))
 
 
@@ -1001,11 +1140,10 @@ def _ocr_google_vision_rest(rm_files: List[Path], api_key: str) -> Optional[List
                 timeout=30,
             )
             if result.returncode != 0:
-                v5_svg = _render_rm_v5_to_svg(rm_file)
+                v5_svg = _render_rm_v5_to_svg(rm_file) or _render_rm_v6_to_svg(rm_file)
                 if v5_svg is None:
                     continue
                 tmp_svg_path.write_text(v5_svg)
-
             # Convert SVG to PNG
             try:
                 import cairosvg
@@ -1117,12 +1255,10 @@ def _ocr_google_vision_sdk(rm_files: List[Path]) -> Optional[List[str]]:
                     timeout=30,
                 )
                 if result.returncode != 0:
-                    v5_svg = _render_rm_v5_to_svg(rm_file)
+                    v5_svg = _render_rm_v5_to_svg(rm_file) or _render_rm_v6_to_svg(rm_file)
                     if v5_svg is None:
                         continue
                     tmp_svg_path.write_text(v5_svg)
-
-                # Convert SVG to PNG using cairosvg
                 try:
                     import cairosvg
                     from PIL import Image as PILImage
@@ -1230,7 +1366,7 @@ def _ocr_tesseract(rm_files: List[Path]) -> Optional[List[str]]:
                     timeout=30,
                 )
                 if result.returncode != 0:
-                    v5_svg = _render_rm_v5_to_svg(rm_file)
+                    v5_svg = _render_rm_v5_to_svg(rm_file) or _render_rm_v6_to_svg(rm_file)
                     if v5_svg is None:
                         continue
                     tmp_svg_path.write_text(v5_svg)
