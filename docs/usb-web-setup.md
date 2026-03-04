@@ -7,7 +7,6 @@ The USB web interface is the **easiest way** to connect remarkable-mcp to your t
 The USB web interface is an official reMarkable feature that provides HTTP API access when your tablet is connected via USB. This gives you:
 
 - ✅ **No subscription needed** — Works without reMarkable Connect
-- ✅ **No subscription needed** — Works without reMarkable Connect
 - ✅ **Fast offline access** — Direct USB connection
 - ✅ **Officially supported** — Part of the standard reMarkable OS
 - ✅ **Simple setup** — Just enable in Settings and connect

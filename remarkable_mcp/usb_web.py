@@ -114,11 +114,13 @@ class USBWebClient:
         self._documents: List[Document] = []
         self._documents_by_id: Dict[str, Document] = {}
 
-    def _request(self, endpoint: str, method: str = "GET") -> requests.Response:
+    def _request(
+        self, endpoint: str, method: str = "GET", timeout: int | None = None
+    ) -> requests.Response:
         """Make an HTTP request to the USB web interface."""
         url = f"{self.host}{endpoint}"
         try:
-            response = requests.request(method, url, timeout=self.timeout)
+            response = requests.request(method, url, timeout=timeout or self.timeout)
             response.raise_for_status()
             return response
         except requests.Timeout:
@@ -244,6 +246,9 @@ class USBWebClient:
             self.get_meta_items()
         return self._documents_by_id.get(doc_id)
 
+    # Downloads can be large — use a longer timeout
+    DOWNLOAD_TIMEOUT = 120
+
     def download(self, doc: Document) -> bytes:
         """
         Download a document's content as a zip file.
@@ -253,7 +258,7 @@ class USBWebClient:
         """
         endpoint = DOWNLOAD_URL.format(guid=doc.id)
         try:
-            response = self._request(endpoint)
+            response = self._request(endpoint, timeout=self.DOWNLOAD_TIMEOUT)
             return response.content
         except RuntimeError as e:
             # If rmdoc format fails, try PDF as fallback
@@ -261,7 +266,7 @@ class USBWebClient:
                 logger.debug("rmdoc format not available, trying PDF fallback")
                 try:
                     pdf_endpoint = DOWNLOAD_PDF_URL.format(guid=doc.id)
-                    response = self._request(pdf_endpoint)
+                    response = self._request(pdf_endpoint, timeout=self.DOWNLOAD_TIMEOUT)
                     return response.content
                 except Exception as pdf_e:
                     raise RuntimeError(
@@ -296,7 +301,7 @@ class USBWebClient:
         if ext == "pdf":
             try:
                 endpoint = DOWNLOAD_PDF_URL.format(guid=doc.id)
-                response = self._request(endpoint)
+                response = self._request(endpoint, timeout=self.DOWNLOAD_TIMEOUT)
                 return response.content
             except Exception as e:
                 logger.debug(f"Failed to download PDF for {doc.id}: {e}")
