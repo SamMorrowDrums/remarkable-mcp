@@ -1450,7 +1450,10 @@ async def remarkable_image(
                     return make_error(
                         error_type="render_failed",
                         message="Failed to render page to SVG.",
-                        suggestion="Make sure 'rmc' is installed. Try: uv add rmc",
+                        suggestion=(
+                            "This may be an older notebook format (v5) not supported by rmc. "
+                            "Try remarkable_read() to extract text instead."
+                        ),
                     )
 
                 resource_uri = f"remarkablesvg:///{uri_path}.page-{page}.svg"
@@ -1496,7 +1499,8 @@ async def remarkable_image(
                         error_type="render_failed",
                         message="Failed to render page to image.",
                         suggestion=(
-                            "Make sure 'rmc' and 'cairosvg' are installed. Try: uv add rmc cairosvg"
+                            "This may be an older notebook format (v5) not supported by rmc. "
+                            "Try remarkable_read() to extract text instead."
                         ),
                     )
 
