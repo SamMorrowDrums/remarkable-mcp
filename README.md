@@ -192,6 +192,31 @@ Choose the connection method that works best for you:
 
 ---
 
+## OpenClaw Integration
+
+remarkable-mcp works as an [OpenClaw](https://github.com/openclaw/openclaw) skill. Add to your `openclaw.json`:
+
+```json
+{
+  "mcpServers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--usb"]
+    }
+  }
+}
+```
+
+Install from [ClawHub](https://clawhub.ai):
+
+```bash
+clawhub install remarkable-mcp
+```
+
+Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remarkable-mcp/` directory.
+
+---
+
 ## Tools
 
 | Tool | Description |
