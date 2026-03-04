@@ -337,6 +337,64 @@ def _get_svg_content_bounds(svg_path: Path) -> Optional[tuple]:
         return None
 
 
+def _render_rm_v5_to_svg(rm_file_path: Path) -> Optional[str]:
+    """
+    Render a v5 .rm file (reMarkable .lines format) to SVG.
+
+    The v5 binary format stores layers of strokes, where each stroke
+    has pen/color metadata and a sequence of (x, y, speed, tilt, width,
+    pressure) segments.
+    """
+    import struct
+
+    try:
+        with open(rm_file_path, "rb") as f:
+            header = f.read(43)
+            if b"version=5" not in header:
+                return None
+
+            nlayers = struct.unpack("<I", f.read(4))[0]
+            paths = []
+
+            for _ in range(nlayers):
+                nstrokes = struct.unpack("<I", f.read(4))[0]
+
+                for _ in range(nstrokes):
+                    pen, color, _pad, _w, _unk, nsegments = struct.unpack("<IIIIfI", f.read(24))
+
+                    segments = []
+                    for _ in range(nsegments):
+                        x, y, speed, tilt, width, pressure = struct.unpack("<ffffff", f.read(24))
+                        segments.append((x, y, width, pressure))
+
+                    if not segments:
+                        continue
+
+                    stroke_color = {0: "black", 1: "gray", 2: "white"}.get(color, "black")
+                    avg_width = sum(s[2] for s in segments) / len(segments)
+                    stroke_width = max(0.5, min(avg_width * 0.8, 5.0))
+
+                    d = f"M {segments[0][0]:.1f} {segments[0][1]:.1f}"
+                    d += "".join(f" L {s[0]:.1f} {s[1]:.1f}" for s in segments[1:])
+
+                    paths.append(
+                        f'<path d="{d}" stroke="{stroke_color}" '
+                        f'stroke-width="{stroke_width:.1f}" '
+                        f'fill="none" stroke-linecap="round" '
+                        f'stroke-linejoin="round"/>'
+                    )
+
+        w, h = REMARKABLE_WIDTH, REMARKABLE_HEIGHT
+        return (
+            f'<?xml version="1.0" encoding="UTF-8"?>'
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'viewBox="0 0 {w} {h}" width="{w}" height="{h}">'
+            f"{''.join(paths)}</svg>"
+        )
+    except Exception:
+        return None
+
+
 def render_rm_file_to_png(
     rm_file_path: Path, background_color: Optional[str] = None
 ) -> Optional[bytes]:
@@ -376,7 +434,11 @@ def render_rm_file_to_png(
             timeout=30,
         )
         if result.returncode != 0:
-            return None
+            # Try v5 fallback renderer
+            svg_content = _render_rm_v5_to_svg(rm_file_path)
+            if svg_content is None:
+                return None
+            tmp_svg_path.write_text(svg_content)
 
         # Get content bounds from SVG
         bounds = _get_svg_content_bounds(tmp_svg_path)
@@ -495,7 +557,11 @@ def render_rm_file_to_svg(
             timeout=30,
         )
         if result.returncode != 0:
-            return None
+            # Try v5 fallback renderer
+            v5_svg = _render_rm_v5_to_svg(rm_file_path)
+            if v5_svg is None:
+                return None
+            tmp_svg_path.write_text(v5_svg)
 
         # Read SVG content
         svg_content = tmp_svg_path.read_text()
@@ -935,7 +1001,10 @@ def _ocr_google_vision_rest(rm_files: List[Path], api_key: str) -> Optional[List
                 timeout=30,
             )
             if result.returncode != 0:
-                continue
+                v5_svg = _render_rm_v5_to_svg(rm_file)
+                if v5_svg is None:
+                    continue
+                tmp_svg_path.write_text(v5_svg)
 
             # Convert SVG to PNG
             try:
@@ -1048,7 +1117,10 @@ def _ocr_google_vision_sdk(rm_files: List[Path]) -> Optional[List[str]]:
                     timeout=30,
                 )
                 if result.returncode != 0:
-                    continue
+                    v5_svg = _render_rm_v5_to_svg(rm_file)
+                    if v5_svg is None:
+                        continue
+                    tmp_svg_path.write_text(v5_svg)
 
                 # Convert SVG to PNG using cairosvg
                 try:
@@ -1158,7 +1230,10 @@ def _ocr_tesseract(rm_files: List[Path]) -> Optional[List[str]]:
                     timeout=30,
                 )
                 if result.returncode != 0:
-                    continue
+                    v5_svg = _render_rm_v5_to_svg(rm_file)
+                    if v5_svg is None:
+                        continue
+                    tmp_svg_path.write_text(v5_svg)
 
                 # Convert SVG to PNG with higher resolution for better OCR
                 try:
