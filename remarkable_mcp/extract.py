@@ -347,6 +347,15 @@ def _render_rm_v5_to_svg(rm_file_path: Path) -> Optional[str]:
     """
     import struct
 
+    # Pen IDs that are highlighters (both old and v5 mappings)
+    HIGHLIGHTER_PENS = {5, 18}
+    # Pen IDs that are erasers — skip rendering
+    ERASER_PENS = {6, 7, 8}
+
+    # Color mapping by pen type
+    STROKE_COLORS = {0: "black", 1: "gray", 2: "white"}
+    HIGHLIGHT_COLORS = {0: "#FFD700", 1: "#FFD700", 2: "#FFD700"}
+
     try:
         with open(rm_file_path, "rb") as f:
             header = f.read(43)
@@ -370,9 +379,21 @@ def _render_rm_v5_to_svg(rm_file_path: Path) -> Optional[str]:
                     if not segments:
                         continue
 
-                    stroke_color = {0: "black", 1: "gray", 2: "white"}.get(color, "black")
-                    avg_width = sum(s[2] for s in segments) / len(segments)
-                    stroke_width = max(0.5, min(avg_width * 0.8, 5.0))
+                    # Skip eraser strokes
+                    if pen in ERASER_PENS:
+                        continue
+
+                    is_highlighter = pen in HIGHLIGHTER_PENS
+                    if is_highlighter:
+                        stroke_color = HIGHLIGHT_COLORS.get(color, "#FFD700")
+                        avg_width = sum(s[2] for s in segments) / len(segments)
+                        stroke_width = max(10.0, min(avg_width * 2.0, 40.0))
+                        opacity = ' opacity="0.35"'
+                    else:
+                        stroke_color = STROKE_COLORS.get(color, "black")
+                        avg_width = sum(s[2] for s in segments) / len(segments)
+                        stroke_width = max(0.5, min(avg_width * 0.8, 5.0))
+                        opacity = ""
 
                     d = f"M {segments[0][0]:.1f} {segments[0][1]:.1f}"
                     d += "".join(f" L {s[0]:.1f} {s[1]:.1f}" for s in segments[1:])
@@ -381,7 +402,7 @@ def _render_rm_v5_to_svg(rm_file_path: Path) -> Optional[str]:
                         f'<path d="{d}" stroke="{stroke_color}" '
                         f'stroke-width="{stroke_width:.1f}" '
                         f'fill="none" stroke-linecap="round" '
-                        f'stroke-linejoin="round"/>'
+                        f'stroke-linejoin="round"{opacity}/>'
                     )
 
         w, h = REMARKABLE_WIDTH, REMARKABLE_HEIGHT
@@ -746,6 +767,9 @@ def get_document_page_count(zip_path: Path) -> int:
     """
     Get the number of pages in a reMarkable document zip.
 
+    Uses the .content metadata file for accurate page count (includes
+    user-added pages in PDFs). Falls back to counting .rm files.
+
     Args:
         zip_path: Path to the document zip file
 
@@ -758,6 +782,19 @@ def get_document_page_count(zip_path: Path) -> int:
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(tmpdir_path)
 
+        # Try .content metadata first — it's the authoritative page list
+        for content_file in tmpdir_path.glob("*.content"):
+            try:
+                data = json.loads(content_file.read_text())
+                if "cPages" in data and "pages" in data["cPages"]:
+                    return len(data["cPages"]["pages"])
+                if "pages" in data and isinstance(data["pages"], list):
+                    return len(data["pages"])
+            except Exception:
+                pass
+            break
+
+        # Fallback to counting .rm files
         return len(list(tmpdir_path.glob("**/*.rm")))
 
 
@@ -797,6 +834,7 @@ def extract_text_from_document_zip(
         "pages": 0,
         "page_ids": [],
         "ocr_backend": None,
+        "tags": [],
     }
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -869,12 +907,14 @@ def extract_text_from_document_zip(
                 # File read failed - skip this file and continue
                 pass
 
-        # Extract from .content files (metadata with text)
+        # Extract from .content files (metadata with text and tags)
         for content_file in tmpdir_path.glob("**/*.content"):
             try:
                 data = json.loads(content_file.read_text())
                 if "text" in data:
                     result["typed_text"].append(data["text"])
+                if "tags" in data and data["tags"]:
+                    result["tags"] = data["tags"]
             except Exception:
                 # Malformed JSON or read error - skip this file
                 pass

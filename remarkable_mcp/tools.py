@@ -702,9 +702,10 @@ async def remarkable_read(
             ),
         }
 
-        # Add tags if present
-        if hasattr(target_doc, "tags") and target_doc.tags:
-            result["tags"] = target_doc.tags
+        # Add tags if present (from listing metadata, or from extraction in USB mode)
+        tags = getattr(target_doc, "tags", None) or (content.get("tags") if content else None)
+        if tags:
+            result["tags"] = tags
 
         if has_more:
             result["next_page"] = page + 1
