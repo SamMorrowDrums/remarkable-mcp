@@ -192,6 +192,25 @@ Choose the connection method that works best for you:
 
 ---
 
+## OpenClaw Integration
+
+remarkable-mcp works as an [OpenClaw](https://github.com/openclaw/openclaw) skill. Add to your `openclaw.json`:
+
+```json
+{
+  "mcpServers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--usb"]
+    }
+  }
+}
+```
+
+A `SKILL.md` is included in the repository for use with OpenClaw's skill system. Copy the repo to your `~/.openclaw/skills/` directory or install via ClawHub.
+
+---
+
 ## Tools
 
 | Tool | Description |
