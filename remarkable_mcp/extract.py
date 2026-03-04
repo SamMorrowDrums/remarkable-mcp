@@ -337,6 +337,30 @@ def _get_svg_content_bounds(svg_path: Path) -> Optional[tuple]:
         return None
 
 
+CONTENT_PADDING = 20  # Padding around content bounds for SVG viewBox
+
+
+def _svg_from_paths(paths: list, all_coords: list) -> Optional[str]:
+    """Build SVG string with viewBox computed from actual content bounds."""
+    if not paths or not all_coords:
+        return None
+
+    xs = [c[0] for c in all_coords]
+    ys = [c[1] for c in all_coords]
+    min_x = min(xs) - CONTENT_PADDING
+    min_y = min(ys) - CONTENT_PADDING
+    w = max(xs) - min_x + CONTENT_PADDING
+    h = max(ys) - min_y + CONTENT_PADDING
+
+    return (
+        f'<?xml version="1.0" encoding="UTF-8"?>'
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'viewBox="{min_x:.0f} {min_y:.0f} {w:.0f} {h:.0f}" '
+        f'width="{w:.0f}" height="{h:.0f}">'
+        f"{''.join(paths)}</svg>"
+    )
+
+
 def _render_rm_v5_to_svg(rm_file_path: Path) -> Optional[str]:
     """
     Render a v5 .rm file (reMarkable .lines format) to SVG.
@@ -364,6 +388,7 @@ def _render_rm_v5_to_svg(rm_file_path: Path) -> Optional[str]:
 
             nlayers = struct.unpack("<I", f.read(4))[0]
             paths = []
+            all_coords = []
 
             for _ in range(nlayers):
                 nstrokes = struct.unpack("<I", f.read(4))[0]
@@ -397,6 +422,7 @@ def _render_rm_v5_to_svg(rm_file_path: Path) -> Optional[str]:
 
                     d = f"M {segments[0][0]:.1f} {segments[0][1]:.1f}"
                     d += "".join(f" L {s[0]:.1f} {s[1]:.1f}" for s in segments[1:])
+                    all_coords.extend((s[0], s[1]) for s in segments)
 
                     paths.append(
                         f'<path d="{d}" stroke="{stroke_color}" '
@@ -405,13 +431,7 @@ def _render_rm_v5_to_svg(rm_file_path: Path) -> Optional[str]:
                         f'stroke-linejoin="round"{opacity}/>'
                     )
 
-        w, h = REMARKABLE_WIDTH, REMARKABLE_HEIGHT
-        return (
-            f'<?xml version="1.0" encoding="UTF-8"?>'
-            f'<svg xmlns="http://www.w3.org/2000/svg" '
-            f'viewBox="0 0 {w} {h}" width="{w}" height="{h}">'
-            f"{''.join(paths)}</svg>"
-        )
+        return _svg_from_paths(paths, all_coords)
     except Exception:
         return None
 
@@ -458,6 +478,7 @@ def _render_rm_v6_to_svg(rm_file_path: Path) -> Optional[str]:
             blocks = list(read_blocks(f))
 
         paths = []
+        all_coords = []
         for block in blocks:
             if not hasattr(block, "item") or not hasattr(block.item, "value"):
                 continue
@@ -496,6 +517,7 @@ def _render_rm_v6_to_svg(rm_file_path: Path) -> Optional[str]:
 
             d = f"M {line.points[0].x:.1f} {line.points[0].y:.1f}"
             d += "".join(f" L {p.x:.1f} {p.y:.1f}" for p in line.points[1:])
+            all_coords.extend((p.x, p.y) for p in line.points)
 
             paths.append(
                 f'<path d="{d}" stroke="{stroke_color}" '
@@ -504,16 +526,7 @@ def _render_rm_v6_to_svg(rm_file_path: Path) -> Optional[str]:
                 f'stroke-linejoin="round"{opacity}/>'
             )
 
-        if not paths:
-            return None
-
-        w, h = REMARKABLE_WIDTH, REMARKABLE_HEIGHT
-        return (
-            f'<?xml version="1.0" encoding="UTF-8"?>'
-            f'<svg xmlns="http://www.w3.org/2000/svg" '
-            f'viewBox="0 0 {w} {h}" width="{w}" height="{h}">'
-            f"{''.join(paths)}</svg>"
-        )
+        return _svg_from_paths(paths, all_coords)
     except Exception:
         return None
 
