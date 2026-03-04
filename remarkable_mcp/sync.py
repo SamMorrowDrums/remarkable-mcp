@@ -41,6 +41,7 @@ class Document:
     last_modified: Optional[datetime] = None
     size: int = 0
     files: List[Dict[str, Any]] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
 
     @property
     def is_folder(self) -> bool:
@@ -239,6 +240,7 @@ class RemarkableClient:
                 last_modified=last_modified,
                 size=entry["size"],
                 files=files,
+                tags=metadata.get("tags", []),
             )
 
             documents.append(doc)

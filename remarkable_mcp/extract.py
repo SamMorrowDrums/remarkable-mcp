@@ -936,6 +936,7 @@ def extract_text_from_document_zip(
         "pages": 0,
         "page_ids": [],
         "ocr_backend": None,
+        "tags": [],
     }
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1008,12 +1009,14 @@ def extract_text_from_document_zip(
                 # File read failed - skip this file and continue
                 pass
 
-        # Extract from .content files (metadata with text)
+        # Extract from .content files (metadata with text and tags)
         for content_file in tmpdir_path.glob("**/*.content"):
             try:
                 data = json.loads(content_file.read_text())
                 if "text" in data:
                     result["typed_text"].append(data["text"])
+                if "tags" in data and data["tags"]:
+                    result["tags"] = data["tags"]
             except Exception:
                 # Malformed JSON or read error - skip this file
                 pass

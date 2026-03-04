@@ -57,6 +57,7 @@ class Document:
     file_type: Optional[str] = None  # "pdf", "epub", "notebook" — from API response
     bookmarked: bool = False
     current_page: int = 0
+    tags: List[str] = field(default_factory=list)
     files: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
