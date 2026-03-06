@@ -631,12 +631,13 @@ async def remarkable_read(
             # Auto-retry with OCR for notebooks
             import json
 
-            ocr_result = remarkable_read(
+            ocr_result = await remarkable_read(
                 document=document,
                 content_type=content_type,
                 page=page,
                 grep=grep,
                 include_ocr=True,  # Enable OCR automatically
+                ctx=ctx,  # Pass context for sampling OCR
             )
             result_data = json.loads(ocr_result)
             if "_error" not in result_data:
@@ -1059,7 +1060,7 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
                     try:
                         raw_doc = client.download(doc)
                         with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                            tmp.write(raw_doc.content)
+                            tmp.write(raw_doc)
                             tmp_path = Path(tmp.name)
 
                         try:

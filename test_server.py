@@ -415,6 +415,45 @@ class TestRemarkableRecent:
         assert "_error" in data
         assert data["_error"]["type"] == "recent_failed"
 
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_recent_include_preview_does_not_crash(self, mock_get_rmapi):
+        """Test that include_preview=True works without AttributeError on download result.
+
+        This is a regression test for the bug where client.download() returns bytes
+        but the code called raw_doc.content (treating it like a requests.Response).
+        """
+        import io
+
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+
+        # Create a PDF document mock
+        doc = Mock()
+        doc.VissibleName = "My PDF"
+        doc.ID = "pdf-123"
+        doc.Parent = ""
+        doc.ModifiedClient = "2024-01-15T10:30:00Z"
+        doc.is_folder = False
+        doc.tags = []
+
+        mock_client.get_meta_items.return_value = [doc]
+
+        # download() returns bytes (not a requests.Response)
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr("pdf-123.content", '{"fileType": "pdf"}')
+        mock_client.download.return_value = zip_buffer.getvalue()
+
+        # Simulate get_file_type returning "pdf"
+        with patch("remarkable_mcp.tools.get_file_type", return_value="pdf"):
+            result = await mcp.call_tool("remarkable_recent", {"include_preview": True})
+        data = json.loads(result[0][0].text)
+
+        # Should not crash with AttributeError; may return empty preview but no error
+        assert "_error" not in data
+        assert "documents" in data
+
 
 # =============================================================================
 # Test remarkable_read Tool
@@ -466,6 +505,53 @@ class TestRemarkableRead:
         # Should get a not found error with suggestions
         assert "_error" in data
         assert data["_error"]["type"] == "document_not_found"
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_read_notebook_empty_content_ocr_retry(self, mock_get_rmapi):
+        """Test that remarkable_read correctly awaits the OCR auto-retry for empty notebooks.
+
+        This is a regression test for the bug where the recursive call to
+        remarkable_read() was missing 'await', causing a coroutine object to be
+        passed to json.loads() with the error:
+        'the JSON object must be str, bytes or bytearray, not coroutine'
+        """
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+
+        # Create a notebook document mock
+        doc = Mock()
+        doc.VissibleName = "Quick sheets"
+        doc.ID = "notebook-123"
+        doc.Parent = ""
+        doc.ModifiedClient = "2024-01-15T10:30:00Z"
+        doc.is_folder = False
+        doc.tags = []
+
+        mock_client.get_meta_items.return_value = [doc]
+
+        # Create a minimal zip with no typed text (simulates a handwritten notebook)
+        import io
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            # Add empty content file (no text field) to simulate notebook
+            zf.writestr("notebook-123.content", '{"fileType": "notebook"}')
+        zip_bytes = zip_buffer.getvalue()
+
+        mock_client.download.return_value = zip_bytes
+
+        # This should NOT raise "the JSON object must be str, bytes or bytearray, not coroutine"
+        # Previously failed because remarkable_read() was called without 'await'
+        result = await mcp.call_tool("remarkable_read", {"document": "Quick sheets"})
+        data = json.loads(result[0][0].text)
+
+        # Should return a valid response (not a coroutine error)
+        assert (
+            "_error" not in data
+            or data["_error"]["type"] != "read_failed"
+            or ("coroutine" not in data["_error"].get("message", ""))
+        ), f"Got coroutine error: {data}"
 
 
 # =============================================================================
