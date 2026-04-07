@@ -74,8 +74,21 @@ Security Note:
         action="store_true",
         help="Use USB web interface (connect via USB cable, enable in Storage Settings)",
     )
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help=(
+            "Enable write tools (upload, mkdir, move, rename, delete). "
+            "Requires the ddvk/rmapi binary on PATH (or RMAPI_BIN set)."
+        ),
+    )
 
     args = parser.parse_args()
+
+    # --write must take effect before importing the server module so that
+    # write_tools.register_write_tools() runs at import time.
+    if args.write:
+        os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
 
     if args.register:
         # Registration mode - convert one-time code to token
