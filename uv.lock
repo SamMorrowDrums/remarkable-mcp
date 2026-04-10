@@ -1355,7 +1355,7 @@ wheels = [
 
 [[package]]
 name = "remarkable-mcp"
-version = "0.1.0"
+version = "0.8.1+write2"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
