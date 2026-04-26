@@ -65,7 +65,9 @@ def _build_instructions() -> str:
 
     instructions = """# reMarkable MCP Server
 
-Access documents from your reMarkable tablet. All operations are read-only.
+Access documents from your reMarkable tablet. Read operations are always
+available; write operations (upload, mkdir, move, rename, delete) are
+opt-in via REMARKABLE_ENABLE_WRITE=1 or the `--write` CLI flag.
 
 ## Available Tools
 
@@ -74,6 +76,18 @@ Access documents from your reMarkable tablet. All operations are read-only.
 - `remarkable_recent(limit)` - Get recently modified documents
 - `remarkable_status()` - Check connection and diagnose issues
 - `remarkable_image(document, page, include_ocr)` - Get a PNG image with optional OCR
+
+## Write Tools (opt-in)
+
+When the server is started with `REMARKABLE_ENABLE_WRITE=1` (or `--write`),
+these additional tools become available. They shell out to the `ddvk/rmapi`
+Go CLI under the hood and use the same `~/.rmapi` token as the read path.
+
+- `remarkable_upload(file_path, parent_folder, document_name)` - Upload a local PDF or EPUB
+- `remarkable_mkdir(folder_name, parent)` - Create a folder
+- `remarkable_move(document, dest_folder)` - Move a document or folder
+- `remarkable_rename(document, new_name)` - Rename a document or folder
+- `remarkable_delete(document, confirm)` - Delete (DESTRUCTIVE; requires confirm=True)
 
 ## Recommended Workflows
 
@@ -218,6 +232,14 @@ from remarkable_mcp import (  # noqa: E402
     resources,  # noqa: F401
     tools,  # noqa: F401
 )
+
+# Optionally register write tools (upload, mkdir, mv, rename, delete).
+# Disabled by default; opt in with REMARKABLE_ENABLE_WRITE=1 or `--write`.
+from remarkable_mcp import write_tools as _write_tools  # noqa: E402
+
+if _write_tools.write_enabled():
+    _write_tools.register_write_tools()
+    logger.info("Write tools enabled (upload, mkdir, mv, rename, delete).")
 
 
 def run():
