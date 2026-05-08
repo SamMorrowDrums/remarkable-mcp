@@ -4,12 +4,32 @@ Text extraction helpers for reMarkable documents.
 
 import json
 import os
+import shutil
+import sys
 import tempfile
 import time
 import zipfile
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+def _rmc_executable() -> str:
+    """Return a usable path to the ``rmc`` CLI.
+
+    ``rmc`` is shipped as a console-script in the ``rmc`` Python package, so
+    when the server is installed into an unactivated venv the binary lives at
+    ``<sys.executable>/../rmc`` and isn't on ``PATH``. We fall back to that
+    sibling path, then to bare ``"rmc"`` (which will let subprocess raise a
+    clear ``FileNotFoundError`` if nothing is found).
+    """
+    found = shutil.which("rmc")
+    if found:
+        return found
+    candidate = Path(sys.executable).parent / "rmc"
+    if candidate.exists():
+        return str(candidate)
+    return "rmc"
 
 # reMarkable tablet screen dimensions (in pixels) - used as fallback
 REMARKABLE_WIDTH = 1404
@@ -565,7 +585,7 @@ def render_rm_file_to_png(
 
         # Convert .rm to SVG using rmc
         result = subprocess.run(
-            ["rmc", "-t", "svg", "-o", str(tmp_svg_path), str(rm_file_path)],
+            [_rmc_executable(), "-t", "svg", "-o", str(tmp_svg_path), str(rm_file_path)],
             capture_output=True,
             timeout=30,
         )
@@ -688,7 +708,7 @@ def render_rm_file_to_svg(
 
         # Convert .rm to SVG using rmc
         result = subprocess.run(
-            ["rmc", "-t", "svg", "-o", str(tmp_svg_path), str(rm_file_path)],
+            [_rmc_executable(), "-t", "svg", "-o", str(tmp_svg_path), str(rm_file_path)],
             capture_output=True,
             timeout=30,
         )
