@@ -898,6 +898,377 @@ def render_page_from_document_zip(
         return render_rm_file_to_png(target_rm_file, background_color=background_color)
 
 
+def _read_cpages_entries(tmpdir_path: Path) -> List[Dict[str, Any]]:
+    """Return the ``cPages.pages`` array from ``.content``, in order.
+
+    Falls back to the legacy ``pages`` array (a flat list of page IDs)
+    when ``cPages`` is absent. Empty list if metadata is unreadable.
+    """
+    for content_file in tmpdir_path.glob("*.content"):
+        try:
+            data = json.loads(content_file.read_text())
+            if "cPages" in data and "pages" in data["cPages"]:
+                return data["cPages"]["pages"]
+            if "pages" in data and isinstance(data["pages"], list):
+                return [{"id": pid} for pid in data["pages"]]
+        except Exception:
+            pass
+        break
+    return []
+
+
+def _pdf_page_index_for_cpages_entry(entry: Dict[str, Any]) -> Optional[int]:
+    """Return the 0-based PDF page index a cPages entry refers to, if any.
+
+    For PDF-backed pages, ``redir.value`` is the PDF page index. For
+    user-added (notebook-style) pages on top of a PDF document, ``redir``
+    is missing or empty — we return ``None`` so the caller can render
+    annotations on a plain paper background instead.
+    """
+    redir = entry.get("redir") or {}
+    val = redir.get("value")
+    return val if isinstance(val, int) else None
+
+
+def _get_pdf_page_size_pt(pdf_bytes: bytes, page: int) -> Optional[tuple]:
+    """Return ``(width_pt, height_pt)`` for the given 1-indexed PDF page."""
+    try:
+        import fitz
+    except ImportError:
+        return None
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if page < 1 or page > doc.page_count:
+            return None
+        rect = doc[page - 1].rect
+        return (float(rect.width), float(rect.height))
+    except Exception:
+        return None
+
+
+def _render_pdf_page_to_size(
+    pdf_bytes: bytes, page: int, output_width: int, output_height: int
+) -> Optional[bytes]:
+    """Rasterize one PDF page to a PNG of the given exact dimensions.
+
+    Aspect ratio is preserved by scaling to fit, with the rendered page placed
+    at the top-left of the output (any leftover pixels are filled with the
+    paper background). Most callers should pass an output size that already
+    matches the PDF's aspect ratio so no padding is needed.
+    """
+    try:
+        import io as _io
+
+        import fitz
+        from PIL import Image as PILImage
+    except ImportError:
+        return None
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if page < 1 or page > doc.page_count:
+            return None
+        pdf_page = doc[page - 1]
+        pdf_w, pdf_h = pdf_page.rect.width, pdf_page.rect.height
+        if pdf_w <= 0 or pdf_h <= 0:
+            return None
+
+        scale = min(output_width / pdf_w, output_height / pdf_h)
+        pix = pdf_page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        rendered = PILImage.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+        if pix.width == output_width and pix.height == output_height:
+            out = _io.BytesIO()
+            rendered.save(out, format="PNG")
+            return out.getvalue()
+
+        r, g, b, _ = _parse_hex_color(get_background_color())
+        canvas = PILImage.new("RGB", (output_width, output_height), (r, g, b))
+        canvas.paste(rendered, (0, 0))
+        out = _io.BytesIO()
+        canvas.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return None
+
+
+# rmc emits stroke coordinates that, after its internal SCALE = 72/226, end up
+# in PDF points (the .rm file stores them in pixels at the reMarkable's native
+# 226 DPI, which is exactly the PDF point grid scaled by 226/72). x is centered:
+# strokes for a W_pt-wide page span roughly [-W_pt/2, +W_pt/2].
+def _rewrite_svg_viewbox(svg_content: str, x_min: float, y_min: float,
+                         width: float, height: float) -> str:
+    """Replace the root <svg> tag's viewBox/width/height with the given values."""
+    import re
+
+    new_viewbox = f"{x_min} {y_min} {width} {height}"
+
+    def _swap_attrs(match: "re.Match[str]") -> str:
+        tag = match.group(0)
+        tag = re.sub(r'\s+viewBox="[^"]*"', "", tag)
+        tag = re.sub(r'\s+width="[^"]*"', "", tag)
+        tag = re.sub(r'\s+height="[^"]*"', "", tag)
+        end = -2 if tag.endswith("/>") else -1
+        return (
+            tag[:end]
+            + f' width="{width}" height="{height}" viewBox="{new_viewbox}"'
+            + tag[end:]
+        )
+
+    return re.sub(r"<svg\b[^>]*>", _swap_attrs, svg_content, count=1)
+
+
+def _render_annotation_with_viewbox(
+    rm_file_path: Path,
+    viewbox: tuple,
+    output_width: int,
+    output_height: int,
+) -> Optional[bytes]:
+    """Render an .rm annotation layer to a transparent PNG with the given viewBox.
+
+    rmc's default viewBox shrinks to stroke content; for merged rendering we
+    override it with the page bounds (in rmc's points) so strokes align with
+    an underlay rasterized to the same output dimensions.
+    """
+    svg_content = render_rm_file_to_svg(rm_file_path, background_color=None)
+    if svg_content is None:
+        return None
+    svg_content = _rewrite_svg_viewbox(svg_content, *viewbox)
+    try:
+        import io as _io
+
+        import cairosvg
+    except ImportError:
+        return None
+    try:
+        out = _io.BytesIO()
+        cairosvg.svg2png(
+            bytestring=svg_content.encode("utf-8"),
+            write_to=out,
+            output_width=output_width,
+            output_height=output_height,
+        )
+        return out.getvalue()
+    except Exception:
+        return None
+
+
+def _alpha_composite_png_bytes(under_png: bytes, over_png: bytes) -> Optional[bytes]:
+    """Alpha-composite ``over_png`` on top of ``under_png`` and return PNG bytes."""
+    try:
+        import io as _io
+
+        from PIL import Image as PILImage
+    except ImportError:
+        return None
+    try:
+        under = PILImage.open(_io.BytesIO(under_png)).convert("RGBA")
+        over = PILImage.open(_io.BytesIO(over_png)).convert("RGBA")
+        if under.size != over.size:
+            over = over.resize(under.size, PILImage.LANCZOS)
+        merged = PILImage.alpha_composite(under, over)
+        out = _io.BytesIO()
+        merged.convert("RGB").save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return None
+
+
+def render_merged_pdf_page_from_document_zip(
+    zip_path: Path,
+    page: int = 1,
+    background_color: Optional[str] = None,
+    canvas_width: int = REMARKABLE_WIDTH,
+    canvas_height: int = REMARKABLE_HEIGHT,
+) -> Optional[bytes]:
+    """Render a PDF page with its reMarkable annotations baked into one PNG.
+
+    The PDF page is rasterized onto a ``canvas_width``×``canvas_height``
+    canvas (preserving aspect ratio, letterboxing if needed) and the
+    annotation layer is drawn at the same dimensions, then alpha-composited
+    on top. If the page has no annotations, the underlay is returned alone.
+
+    Args:
+        zip_path: Path to the .rmdoc archive
+        page: PDF page number (1-indexed)
+        background_color: Letterbox fill color (default: paper color)
+        canvas_width: Output width in pixels (default: reMarkable native)
+        canvas_height: Output height in pixels (default: reMarkable native)
+
+    Returns:
+        PNG bytes, or None if the document has no PDF underlay or rendering fails.
+    """
+    bg = background_color or get_background_color()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(tmpdir_path)
+
+        entries = _read_cpages_entries(tmpdir_path)
+        if not entries or page < 1 or page > len(entries):
+            return None
+
+        entry = entries[page - 1]
+        page_id = entry.get("id")
+        rm_for_page = next(
+            (p for p in tmpdir_path.glob("**/*.rm") if p.stem == page_id), None
+        )
+
+        # ``redir.value`` maps a reMarkable page to a 0-based source-PDF page
+        # index. User-added pages have no redir; their strokes still use the
+        # same coordinate system, so we use the first PDF page's dimensions
+        # as the reference for the underlay region.
+        pdf_idx = _pdf_page_index_for_cpages_entry(entry)
+        pdf_files = list(tmpdir_path.glob("*.pdf"))
+        pdf_bytes: Optional[bytes] = pdf_files[0].read_bytes() if pdf_files else None
+
+        page_w_pt: float = float(REMARKABLE_WIDTH)
+        page_h_pt: float = float(REMARKABLE_HEIGHT)
+        if pdf_bytes is not None:
+            ref_idx = pdf_idx + 1 if pdf_idx is not None else 1
+            size = _get_pdf_page_size_pt(pdf_bytes, ref_idx)
+            if size:
+                page_w_pt, page_h_pt = size
+
+        # Default page bounds in rmc points (x centered, y starting at top).
+        page_bounds = (-page_w_pt / 2.0, 0.0, page_w_pt, page_h_pt)
+
+        # Union with the .rm content bounds so off-page strokes (common on
+        # long user-added pages) are never cropped.
+        final_bounds = page_bounds
+        if rm_for_page is not None:
+            svg_content = render_rm_file_to_svg(rm_for_page, background_color=None)
+            if svg_content:
+                content_bounds = _parse_svg_viewbox(svg_content)
+                if content_bounds is not None:
+                    final_bounds = _union_bounds(page_bounds, content_bounds)
+
+        out_w = canvas_width
+        out_h = max(1, int(round(canvas_width * final_bounds[3] / final_bounds[2])))
+
+        # Build the underlay: paper background everywhere, with the PDF page
+        # rasterized into its original region inside ``final_bounds``.
+        underlay = _render_blank_canvas_png(out_w, out_h, bg)
+        if underlay is None:
+            return None
+        if pdf_bytes is not None and pdf_idx is not None:
+            underlay = _composite_pdf_into_canvas(
+                underlay, pdf_bytes, pdf_idx + 1, page_bounds, final_bounds, out_w, out_h
+            )
+            if underlay is None:
+                return None
+
+        if rm_for_page is None:
+            return underlay  # blank page or unannotated PDF page
+
+        annotation = _render_annotation_with_viewbox(
+            rm_for_page, final_bounds, out_w, out_h
+        )
+        if annotation is None:
+            return underlay
+
+        merged = _alpha_composite_png_bytes(underlay, annotation)
+        return merged if merged is not None else underlay
+
+
+def _parse_svg_viewbox(svg_content: str) -> Optional[tuple]:
+    """Return ``(x_min, y_min, width, height)`` from the root ``<svg>`` viewBox."""
+    import re
+
+    m = re.search(r'<svg\b[^>]*viewBox="([^"]+)"', svg_content)
+    if not m:
+        return None
+    try:
+        parts = [float(p) for p in m.group(1).split()]
+    except ValueError:
+        return None
+    if len(parts) != 4:
+        return None
+    return tuple(parts)
+
+
+def _union_bounds(a: tuple, b: tuple) -> tuple:
+    """Union two ``(x_min, y_min, width, height)`` rectangles."""
+    x = min(a[0], b[0])
+    y = min(a[1], b[1])
+    w = max(a[0] + a[2], b[0] + b[2]) - x
+    h = max(a[1] + a[3], b[1] + b[3]) - y
+    return (x, y, w, h)
+
+
+def _composite_pdf_into_canvas(
+    canvas_png: bytes,
+    pdf_bytes: bytes,
+    pdf_page: int,
+    page_bounds: tuple,
+    final_bounds: tuple,
+    canvas_width: int,
+    canvas_height: int,
+) -> Optional[bytes]:
+    """Render a PDF page into the sub-region of ``canvas`` defined by ``page_bounds``.
+
+    ``page_bounds`` is the rectangle (in the same coordinate system as
+    ``final_bounds``) that the PDF page occupies. We compute the pixel
+    rectangle that corresponds to that region inside the canvas, rasterize
+    the PDF at exactly those dimensions, and paste it onto the existing
+    canvas (which already has the paper background).
+    """
+    try:
+        import io as _io
+
+        from PIL import Image as PILImage
+    except ImportError:
+        return None
+    try:
+        fb_x, fb_y, fb_w, fb_h = final_bounds
+        pb_x, pb_y, pb_w, pb_h = page_bounds
+        pdf_px_x = int(round((pb_x - fb_x) / fb_w * canvas_width))
+        pdf_px_y = int(round((pb_y - fb_y) / fb_h * canvas_height))
+        pdf_px_w = max(1, int(round(pb_w / fb_w * canvas_width)))
+        pdf_px_h = max(1, int(round(pb_h / fb_h * canvas_height)))
+
+        pdf_png = _render_pdf_page_to_size(pdf_bytes, pdf_page, pdf_px_w, pdf_px_h)
+        if pdf_png is None:
+            return canvas_png
+
+        canvas = PILImage.open(_io.BytesIO(canvas_png)).convert("RGB")
+        rendered = PILImage.open(_io.BytesIO(pdf_png)).convert("RGB")
+        canvas.paste(rendered, (pdf_px_x, pdf_px_y))
+        out = _io.BytesIO()
+        canvas.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return None
+
+
+def _render_blank_canvas_png(
+    canvas_width: int, canvas_height: int, background_color: str
+) -> Optional[bytes]:
+    """Return a solid-color PNG of the given size, used when no PDF underlay exists."""
+    try:
+        import io as _io
+
+        from PIL import Image as PILImage
+    except ImportError:
+        return None
+    try:
+        r, g, b, _ = _parse_hex_color(background_color)
+        canvas = PILImage.new("RGB", (canvas_width, canvas_height), (r, g, b))
+        out = _io.BytesIO()
+        canvas.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return None
+
+
+def document_zip_has_pdf_underlay(zip_path: Path) -> bool:
+    """Return True if the document archive contains a source .pdf file."""
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            return any(n.lower().endswith(".pdf") for n in zf.namelist())
+    except Exception:
+        return False
+
+
 def get_document_page_count(zip_path: Path) -> int:
     """
     Get the number of pages in a reMarkable document zip.

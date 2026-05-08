@@ -39,7 +39,9 @@ from remarkable_mcp.extract import (
     get_background_color,
     get_cached_ocr_result,
     get_cached_page_ocr,
+    document_zip_has_pdf_underlay,
     get_document_page_count,
+    render_merged_pdf_page_from_document_zip,
     render_page_from_document_zip,
     render_page_from_document_zip_svg,
 )
@@ -1350,6 +1352,7 @@ async def remarkable_image(
     output_format: str = "png",
     compatibility: bool = False,
     include_ocr: bool = False,
+    render_merged: bool = False,
     ctx: Optional[Context] = None,
 ):
     """
@@ -1390,6 +1393,11 @@ async def remarkable_image(
       Use this if your client doesn't support embedded resources in tool responses.
     - include_ocr: Enable OCR text extraction from the image (default: False).
       When REMARKABLE_OCR_BACKEND=sampling, uses the client's LLM via MCP sampling.
+    - render_merged: For PDF documents only. When True, the underlying PDF page is
+      rasterized and the reMarkable annotations are alpha-composited on top, producing
+      a single image that shows printed text and handwriting together. Defaults to
+      False (current behavior: annotations only). Has no effect for output_format="svg"
+      and is ignored for notebooks/EPUBs (a note is included in the response).
     </parameters>
     <examples>
     - remarkable_image("UI Mockup")  # Get first page as embedded PNG resource
@@ -1399,6 +1407,7 @@ async def remarkable_image(
     - remarkable_image("Diagram", output_format="svg")  # Get as embedded SVG resource
     - remarkable_image("Notes", compatibility=True)  # Return resource URI for retry
     - remarkable_image("Notes", include_ocr=True)  # Get image with OCR text extraction
+    - remarkable_image("Annotated Doc.pdf", render_merged=True)  # PDF + annotations merged
     </examples>
     """
     try:
@@ -1540,9 +1549,26 @@ async def remarkable_image(
                     return [info, embedded]
             else:
                 # PNG format
-                png_data = render_page_from_document_zip(
-                    tmp_path, page, background_color=background
-                )
+                merged_note: Optional[str] = None
+                merged_active = False
+                if render_merged:
+                    if document_zip_has_pdf_underlay(tmp_path):
+                        png_data = render_merged_pdf_page_from_document_zip(
+                            tmp_path, page, background_color=background
+                        )
+                        merged_active = png_data is not None
+                    else:
+                        merged_note = (
+                            "render_merged=True was requested but this document has no PDF "
+                            "underlay (notebook or EPUB); returning annotation-only render."
+                        )
+                        png_data = render_page_from_document_zip(
+                            tmp_path, page, background_color=background
+                        )
+                else:
+                    png_data = render_page_from_document_zip(
+                        tmp_path, page, background_color=background
+                    )
 
                 if png_data is None:
                     return make_error(
@@ -1589,7 +1615,8 @@ async def remarkable_image(
                         finally:
                             ocr_tmp_path.unlink(missing_ok=True)
 
-                resource_uri = f"remarkableimg:///{uri_path}.page-{page}.png"
+                uri_suffix = "merged.png" if merged_active else "png"
+                resource_uri = f"remarkableimg:///{uri_path}.page-{page}.{uri_suffix}"
                 png_base64 = base64.b64encode(png_data).decode("utf-8")
 
                 # Build OCR info for response if OCR was requested
@@ -1600,12 +1627,14 @@ async def remarkable_image(
                     if ocr_text is None:
                         ocr_info["ocr_message"] = "No text detected in image"
 
+                render_label = "merged PNG (PDF + annotations)" if merged_active else "PNG"
+
                 if compatibility:
                     # Return base64 PNG in JSON for clients without embedded resource support
                     # Include data URI format for direct use in HTML <img> tags
                     data_uri = f"data:image/png;base64,{png_base64}"
                     hint = (
-                        f"Page {page}/{total_pages} as base64-encoded PNG. "
+                        f"Page {page}/{total_pages} as base64-encoded {render_label}. "
                         f"Use 'data_uri' directly in HTML img src. "
                         f"Use compatibility=False for embedded resource format."
                     )
@@ -1616,6 +1645,8 @@ async def remarkable_image(
                         )
                     elif include_ocr:
                         hint = f"Page {page}/{total_pages}. No text detected via OCR."
+                    if merged_note:
+                        hint += f" Note: {merged_note}"
 
                     response_data = {
                         "data_uri": data_uri,
@@ -1624,8 +1655,11 @@ async def remarkable_image(
                         "page": page,
                         "total_pages": total_pages,
                         "resource_uri": resource_uri,
+                        "merged": merged_active,
                         **ocr_info,
                     }
+                    if merged_note:
+                        response_data["merged_note"] = merged_note
                     return make_response(response_data, hint)
                 else:
                     # Return PNG as embedded BlobResourceContents with info hint
@@ -1636,8 +1670,12 @@ async def remarkable_image(
                     )
                     embedded = EmbeddedResource(type="resource", resource=blob_resource)
 
-                    info_text = f"Page {page}/{total_pages} of '{target_doc.VissibleName}' as PNG. "
-                    info_text += f"Resource URI: {resource_uri}"
+                    info_text = (
+                        f"Page {page}/{total_pages} of '{target_doc.VissibleName}' "
+                        f"as {render_label}. Resource URI: {resource_uri}"
+                    )
+                    if merged_note:
+                        info_text += f"\n\nNote: {merged_note}"
                     if include_ocr and ocr_text:
                         info_text += f"\n\nOCR Text (via {ocr_backend_used}):\n{ocr_text}"
                     elif include_ocr:
