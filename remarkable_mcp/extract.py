@@ -4,12 +4,62 @@ Text extraction helpers for reMarkable documents.
 
 import json
 import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import time
 import zipfile
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+def _rmc_executable() -> str:
+    """Return a usable path to the ``rmc`` CLI.
+
+    When installed via ``uvx``, ``rmc`` lives in the venv's ``bin/`` directory
+    and is not on the system PATH. We check PATH first, then the venv's bin
+    directory, then fall back to bare ``"rmc"`` (which lets subprocess raise
+    a clear ``FileNotFoundError`` if nothing is found).
+
+    Credit: ColinSha (PR #79)
+    """
+    found = shutil.which("rmc")
+    if found:
+        return found
+    candidate = Path(sys.executable).parent / "rmc"
+    if candidate.exists():
+        return str(candidate)
+    return "rmc"
+
+
+def _rm_to_svg(rm_file_path: Path, output_svg_path: Path) -> bool:
+    """Convert a .rm file to SVG, trying rmc then v5/v6 fallback renderers.
+
+    Writes the SVG content to output_svg_path and returns True on success.
+    Returns False if no renderer could handle the file.
+    """
+    # Try rmc first
+    try:
+        result = subprocess.run(
+            [_rmc_executable(), "-t", "svg", "-o", str(output_svg_path), str(rm_file_path)],
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return True
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # rmc failed or not found — try built-in v5/v6 renderers
+    svg_content = _render_rm_v5_to_svg(rm_file_path) or _render_rm_v6_to_svg(rm_file_path)
+    if svg_content is not None:
+        output_svg_path.write_text(svg_content)
+        return True
+
+    return False
+
 
 # reMarkable tablet screen dimensions (in pixels) - used as fallback
 REMARKABLE_WIDTH = 1404
@@ -563,18 +613,9 @@ def render_rm_file_to_png(
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
             tmp_png_path = Path(tmp_png.name)
 
-        # Convert .rm to SVG using rmc
-        result = subprocess.run(
-            ["rmc", "-t", "svg", "-o", str(tmp_svg_path), str(rm_file_path)],
-            capture_output=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            # Try v5 fallback renderer, then v6
-            svg_content = _render_rm_v5_to_svg(rm_file_path) or _render_rm_v6_to_svg(rm_file_path)
-            if svg_content is None:
-                return None
-            tmp_svg_path.write_text(svg_content)
+        # Convert .rm to SVG (rmc with v5/v6 fallback)
+        if not _rm_to_svg(rm_file_path, tmp_svg_path):
+            return None
 
         # Get content bounds from SVG
         bounds = _get_svg_content_bounds(tmp_svg_path)
@@ -646,9 +687,6 @@ def render_rm_file_to_png(
 
     except subprocess.TimeoutExpired:
         return None
-    except FileNotFoundError:
-        # rmc not installed
-        return None
     except Exception:
         return None
     finally:
@@ -686,18 +724,9 @@ def render_rm_file_to_svg(
         with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
             tmp_svg_path = Path(tmp_svg.name)
 
-        # Convert .rm to SVG using rmc
-        result = subprocess.run(
-            ["rmc", "-t", "svg", "-o", str(tmp_svg_path), str(rm_file_path)],
-            capture_output=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            # Try v5 fallback renderer, then v6
-            v5_svg = _render_rm_v5_to_svg(rm_file_path) or _render_rm_v6_to_svg(rm_file_path)
-            if v5_svg is None:
-                return None
-            tmp_svg_path.write_text(v5_svg)
+        # Convert .rm to SVG (rmc with v5/v6 fallback)
+        if not _rm_to_svg(rm_file_path, tmp_svg_path):
+            return None
 
         # Read SVG content
         svg_content = tmp_svg_path.read_text()
@@ -709,9 +738,6 @@ def render_rm_file_to_svg(
         return svg_content
 
     except subprocess.TimeoutExpired:
-        return None
-    except FileNotFoundError:
-        # rmc not installed
         return None
     except Exception:
         return None
@@ -1149,17 +1175,9 @@ def _ocr_google_vision_rest(rm_files: List[Path], api_key: str) -> Optional[List
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
                 tmp_png_path = Path(tmp_png.name)
 
-            # Convert .rm to SVG using rmc
-            result = subprocess.run(
-                ["rmc", "-t", "svg", "-o", str(tmp_svg_path), str(rm_file)],
-                capture_output=True,
-                timeout=30,
-            )
-            if result.returncode != 0:
-                v5_svg = _render_rm_v5_to_svg(rm_file) or _render_rm_v6_to_svg(rm_file)
-                if v5_svg is None:
-                    continue
-                tmp_svg_path.write_text(v5_svg)
+            # Convert .rm to SVG (rmc with v5/v6 fallback)
+            if not _rm_to_svg(rm_file, tmp_svg_path):
+                continue
             # Convert SVG to PNG
             try:
                 import cairosvg
@@ -1224,8 +1242,6 @@ def _ocr_google_vision_rest(rm_files: List[Path], api_key: str) -> Optional[List
         except subprocess.TimeoutExpired:
             # Page rendering timed out - skip this page and continue
             pass
-        except FileNotFoundError:
-            return None
         except Exception:
             # API call or rendering failed - skip this page and continue
             pass
@@ -1264,17 +1280,9 @@ def _ocr_google_vision_sdk(rm_files: List[Path]) -> Optional[List[str]]:
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
                     tmp_png_path = Path(tmp_png.name)
 
-                # Convert .rm to SVG using rmc
-                result = subprocess.run(
-                    ["rmc", "-t", "svg", "-o", str(tmp_svg_path), str(rm_file)],
-                    capture_output=True,
-                    timeout=30,
-                )
-                if result.returncode != 0:
-                    v5_svg = _render_rm_v5_to_svg(rm_file) or _render_rm_v6_to_svg(rm_file)
-                    if v5_svg is None:
-                        continue
-                    tmp_svg_path.write_text(v5_svg)
+                # Convert .rm to SVG (rmc with v5/v6 fallback)
+                if not _rm_to_svg(rm_file, tmp_svg_path):
+                    continue
                 try:
                     import cairosvg
                     from PIL import Image as PILImage
@@ -1327,9 +1335,9 @@ def _ocr_google_vision_sdk(rm_files: List[Path]) -> Optional[List[str]]:
             except subprocess.TimeoutExpired:
                 # Page rendering timed out - skip this page and continue
                 pass
-            except FileNotFoundError:
-                # rmc not installed
-                return None
+            except Exception:
+                # Rendering or API error - skip this page and continue
+                pass
             finally:
                 if tmp_svg_path:
                     tmp_svg_path.unlink(missing_ok=True)
@@ -1375,17 +1383,9 @@ def _ocr_tesseract(rm_files: List[Path]) -> Optional[List[str]]:
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
                     tmp_png_path = Path(tmp_png.name)
 
-                # Convert .rm to SVG using rmc
-                result = subprocess.run(
-                    ["rmc", "-t", "svg", "-o", str(tmp_svg_path), str(rm_file)],
-                    capture_output=True,
-                    timeout=30,
-                )
-                if result.returncode != 0:
-                    v5_svg = _render_rm_v5_to_svg(rm_file) or _render_rm_v6_to_svg(rm_file)
-                    if v5_svg is None:
-                        continue
-                    tmp_svg_path.write_text(v5_svg)
+                # Convert .rm to SVG (rmc with v5/v6 fallback)
+                if not _rm_to_svg(rm_file, tmp_svg_path):
+                    continue
 
                 # Convert SVG to PNG with higher resolution for better OCR
                 try:
@@ -1445,9 +1445,9 @@ def _ocr_tesseract(rm_files: List[Path]) -> Optional[List[str]]:
             except subprocess.TimeoutExpired:
                 # Page rendering timed out - skip this page and continue
                 pass
-            except FileNotFoundError:
-                # rmc not installed
-                return None
+            except Exception:
+                # Rendering or OCR error - skip this page and continue
+                pass
             finally:
                 if tmp_svg_path:
                     tmp_svg_path.unlink(missing_ok=True)
