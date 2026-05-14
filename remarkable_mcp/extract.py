@@ -18,19 +18,23 @@ from typing import Any, Dict, List, Optional
 def _rmc_executable() -> str:
     """Return a usable path to the ``rmc`` CLI.
 
-    When installed via ``uvx``, ``rmc`` lives in the venv's ``bin/`` directory
-    and is not on the system PATH. We check PATH first, then the venv's bin
-    directory, then fall back to bare ``"rmc"`` (which lets subprocess raise
-    a clear ``FileNotFoundError`` if nothing is found).
+    When installed via ``uvx``, ``rmc`` lives in the venv's ``bin/`` (or
+    ``Scripts/`` on Windows) directory and is not on the system PATH. We
+    check PATH first, then the venv's bin directory (using ``shutil.which``
+    to handle platform-specific extensions like ``.exe``), then fall back
+    to bare ``"rmc"`` (which lets subprocess raise a clear
+    ``FileNotFoundError`` if nothing is found).
 
     Credit: ColinSha (PR #79)
     """
     found = shutil.which("rmc")
     if found:
         return found
-    candidate = Path(sys.executable).parent / "rmc"
-    if candidate.exists():
-        return str(candidate)
+    # Check the venv's bin/Scripts directory — shutil.which handles .exe/.cmd
+    venv_bin = str(Path(sys.executable).parent)
+    found = shutil.which("rmc", path=venv_bin)
+    if found:
+        return found
     return "rmc"
 
 

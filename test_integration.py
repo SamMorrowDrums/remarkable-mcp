@@ -32,6 +32,12 @@ def documents(ssh_client):
     return ssh_client.get_meta_items()
 
 
+@pytest.fixture(scope="module")
+def file_types(ssh_client):
+    """Pre-fetch all file types in one SSH call."""
+    return ssh_client.get_all_file_types()
+
+
 class TestSSHConnection:
     """Verify basic SSH connectivity and metadata loading."""
 
@@ -82,14 +88,12 @@ class TestDocumentRendering:
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    def test_render_notebook(self, ssh_client, documents):
+    def test_render_notebook(self, ssh_client, documents, file_types):
         """Rendering a notebook page should produce PNG bytes."""
         notebooks = [
             d
             for d in documents
-            if not d.is_folder
-            and not d.is_cloud_archived
-            and ssh_client.get_file_type(d) == "notebook"
+            if not d.is_folder and not d.is_cloud_archived and file_types.get(d.id) == "notebook"
         ]
         if not notebooks:
             pytest.skip("No notebooks on tablet")
@@ -98,12 +102,12 @@ class TestDocumentRendering:
         assert png is not None, f"Failed to render '{notebooks[0].name}'"
         assert png[:4] == b"\x89PNG", "Output is not valid PNG"
 
-    def test_render_epub_annotations(self, ssh_client, documents):
+    def test_render_epub_annotations(self, ssh_client, documents, file_types):
         """Rendering an epub's annotation layer should work."""
         epubs = [
             d
             for d in documents
-            if not d.is_folder and not d.is_cloud_archived and ssh_client.get_file_type(d) == "epub"
+            if not d.is_folder and not d.is_cloud_archived and file_types.get(d.id) == "epub"
         ]
         if not epubs:
             pytest.skip("No EPUBs on tablet")
@@ -115,16 +119,14 @@ class TestDocumentRendering:
 class TestTextExtraction:
     """Verify text extraction works end-to-end."""
 
-    def test_extract_from_notebook(self, ssh_client, documents):
+    def test_extract_from_notebook(self, ssh_client, documents, file_types):
         """Extract text from a notebook — should not raise."""
         from remarkable_mcp.extract import extract_text_from_document_zip
 
         notebooks = [
             d
             for d in documents
-            if not d.is_folder
-            and not d.is_cloud_archived
-            and ssh_client.get_file_type(d) == "notebook"
+            if not d.is_folder and not d.is_cloud_archived and file_types.get(d.id) == "notebook"
         ]
         if not notebooks:
             pytest.skip("No notebooks on tablet")
@@ -141,13 +143,13 @@ class TestTextExtraction:
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    def test_extract_from_epub(self, ssh_client, documents):
+    def test_extract_from_epub(self, ssh_client, documents, file_types):
         """Extract text from an EPUB — should return content."""
 
         epubs = [
             d
             for d in documents
-            if not d.is_folder and not d.is_cloud_archived and ssh_client.get_file_type(d) == "epub"
+            if not d.is_folder and not d.is_cloud_archived and file_types.get(d.id) == "epub"
         ]
         if not epubs:
             pytest.skip("No EPUBs on tablet")

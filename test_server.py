@@ -6,6 +6,7 @@ Tests the 4 intent-based tools using FastMCP's testing capabilities.
 """
 
 import json
+import shutil
 import tempfile
 import zipfile
 from pathlib import Path
@@ -1421,42 +1422,50 @@ class TestRmcResolution:
 
     def test_rmc_executable_finds_venv_binary(self):
         """_rmc_executable should find rmc in the venv's bin directory."""
-        import sys
-
         from remarkable_mcp.extract import _rmc_executable
 
         result = _rmc_executable()
-        # In this test environment, rmc is in the venv
-        venv_rmc = str(Path(sys.executable).parent / "rmc")
         # Should find it either on PATH or in venv
-        assert result == venv_rmc or Path(result).name == "rmc"
+        assert Path(result).stem == "rmc"
 
-    @patch("shutil.which", return_value=None)
-    def test_rmc_executable_falls_back_to_venv(self, mock_which):
+    def test_rmc_executable_falls_back_to_venv(self):
         """When rmc is not on PATH, should find it in the venv bin."""
         import sys
 
         from remarkable_mcp.extract import _rmc_executable
 
         venv_rmc = Path(sys.executable).parent / "rmc"
-        if venv_rmc.exists():
-            result = _rmc_executable()
-            assert result == str(venv_rmc)
+        if not venv_rmc.exists():
+            pytest.skip("rmc not in venv bin")
 
-    @patch("shutil.which", return_value=None)
+        # Capture real which() before patching
+        real_which = shutil.which
+
+        # Patch so PATH lookup returns None, but venv-bin lookup works
+        with patch("remarkable_mcp.extract.shutil.which") as mock_which:
+            mock_which.side_effect = lambda name, path=None: (
+                real_which(name, path=path) if path else None
+            )
+            result = _rmc_executable()
+        assert Path(result).stem == "rmc"
+
+    @patch("remarkable_mcp.extract.shutil.which", return_value=None)
     def test_rmc_executable_falls_back_to_bare(self, mock_which):
         """When rmc is nowhere, should return bare 'rmc' for clear error."""
         from remarkable_mcp.extract import _rmc_executable
 
-        with patch("pathlib.Path.exists", return_value=False):
-            result = _rmc_executable()
-            assert result == "rmc"
+        result = _rmc_executable()
+        assert result == "rmc"
 
-    def test_rm_to_svg_v5_fallback(self):
-        """_rm_to_svg should use v5 fallback when rmc fails."""
+    @patch("remarkable_mcp.extract.subprocess.run")
+    def test_rm_to_svg_v5_fallback(self, mock_run):
+        """_rm_to_svg should use v5 fallback when rmc is not available."""
         import struct
 
         from remarkable_mcp.extract import _rm_to_svg
+
+        # Simulate rmc not found
+        mock_run.side_effect = FileNotFoundError("rmc not found")
 
         # Build minimal v5 .rm file with one stroke
         buf = bytearray()
