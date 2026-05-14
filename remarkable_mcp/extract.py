@@ -908,6 +908,257 @@ def render_page_from_document_zip(
         return render_rm_file_to_png(target_rm_file, background_color=background_color)
 
 
+def document_zip_has_pdf_underlay(zip_path: Path) -> bool:
+    """Check if a reMarkable document zip contains a PDF underlay.
+
+    Args:
+        zip_path: Path to the document zip file
+
+    Returns:
+        True if the zip contains a .pdf file
+    """
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            return any(name.endswith(".pdf") for name in zf.namelist())
+    except Exception:
+        return False
+
+
+def _read_cpages_entries(tmpdir_path: Path) -> List[Dict[str, Any]]:
+    """Read cPages.pages entries from the .content metadata file.
+
+    Args:
+        tmpdir_path: Path to the extracted document directory
+
+    Returns:
+        List of cPages page entries, or empty list if not found
+    """
+    for content_file in tmpdir_path.glob("*.content"):
+        try:
+            data = json.loads(content_file.read_text())
+            if "cPages" in data and "pages" in data["cPages"]:
+                return data["cPages"]["pages"]
+        except Exception:
+            pass
+        break
+    return []
+
+
+def _pdf_page_index_for_cpages_entry(entry: Dict[str, Any]) -> Optional[int]:
+    """Get the 0-based PDF page index from a cPages entry's redir field.
+
+    The redir.value field in a cPages entry maps the reMarkable page to
+    the original PDF page number (0-based).
+
+    Args:
+        entry: A single cPages page entry dict
+
+    Returns:
+        0-based PDF page index, or None if no redirect exists
+    """
+    redir = entry.get("redir", {})
+    if isinstance(redir, dict) and "value" in redir:
+        try:
+            return int(redir["value"])
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _render_pdf_page_to_png(
+    pdf_bytes: bytes, page_index: int, width: int, height: int
+) -> Optional[bytes]:
+    """Rasterize a single PDF page to PNG bytes using PyMuPDF (fitz).
+
+    Args:
+        pdf_bytes: Raw PDF file bytes
+        page_index: 0-based page index
+        width: Target output width in pixels
+        height: Target output height in pixels
+
+    Returns:
+        PNG image bytes, or None on failure
+    """
+    try:
+        import fitz
+
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if page_index < 0 or page_index >= len(doc):
+            doc.close()
+            return None
+
+        pdf_page = doc[page_index]
+        # Scale to fill the target dimensions
+        mat = fitz.Matrix(width / pdf_page.rect.width, height / pdf_page.rect.height)
+        pix = pdf_page.get_pixmap(matrix=mat, alpha=False)
+        png_data = pix.tobytes("png")
+        doc.close()
+        return png_data
+    except Exception:
+        return None
+
+
+def render_merged_page_from_document_zip(
+    zip_path: Path,
+    page: int = 1,
+    background_color: Optional[str] = None,
+    canvas_width: Optional[int] = None,
+    canvas_height: Optional[int] = None,
+) -> tuple[Optional[bytes], Optional[str]]:
+    """Render a page with the PDF underlay composited with the annotation layer.
+
+    Extracts the zip, determines which PDF page corresponds to the requested
+    reMarkable page, rasterizes the PDF page, renders the annotation layer,
+    and alpha-composites them into a single image.
+
+    Credit: Re-implementation inspired by PR #79 from @ColinSha.
+
+    Args:
+        zip_path: Path to the document zip file
+        page: Page number (1-indexed)
+        background_color: Background color for annotation layer
+        canvas_width: Output canvas width (default: derived from PDF page)
+        canvas_height: Output canvas height (default: derived from PDF page)
+
+    Returns:
+        Tuple of (png_bytes, note) where note is an informational message
+        or None. Returns (None, error_note) on failure.
+    """
+    from PIL import Image as PILImage
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(tmpdir_path)
+        except Exception:
+            # Fall back to annotation-only
+            png = render_page_from_document_zip(zip_path, page, background_color)
+            return png, "Could not extract zip; returned annotation-only render."
+
+        # Find the PDF file in the extracted directory
+        pdf_files = list(tmpdir_path.glob("**/*.pdf"))
+        if not pdf_files:
+            png = render_page_from_document_zip(zip_path, page, background_color)
+            return png, "No PDF underlay found; returned annotation-only render."
+
+        pdf_bytes = pdf_files[0].read_bytes()
+
+        # Read cPages to find PDF page mapping
+        cpages = _read_cpages_entries(tmpdir_path)
+        rm_files = _get_ordered_rm_files(tmpdir_path)
+
+        if page < 1 or page > len(rm_files):
+            return None, f"Page {page} out of range (document has {len(rm_files)} pages)."
+
+        # Determine which PDF page this reMarkable page maps to
+        pdf_page_index: Optional[int] = None
+        if cpages and page <= len(cpages):
+            pdf_page_index = _pdf_page_index_for_cpages_entry(cpages[page - 1])
+
+        if pdf_page_index is None:
+            # No redirect — this page may be a user-added blank page
+            png = render_page_from_document_zip(zip_path, page, background_color)
+            return png, "Page has no PDF underlay (user-added page); annotation-only render."
+
+        # Get PDF page dimensions to set annotation viewBox correctly
+        try:
+            import fitz
+
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            if pdf_page_index >= len(doc):
+                doc.close()
+                png = render_page_from_document_zip(zip_path, page, background_color)
+                return png, "PDF page index out of range; annotation-only render."
+
+            pdf_page = doc[pdf_page_index]
+            pdf_w_pt = pdf_page.rect.width  # PDF width in points
+            pdf_h_pt = pdf_page.rect.height  # PDF height in points
+            doc.close()
+        except Exception:
+            png = render_page_from_document_zip(zip_path, page, background_color)
+            return png, "Could not read PDF dimensions; annotation-only render."
+
+        # Determine output canvas size
+        out_w = canvas_width or int(pdf_w_pt * 2)  # 2x for decent resolution
+        out_h = canvas_height or int(pdf_h_pt * 2)
+
+        # 1. Rasterize the PDF page
+        pdf_png = _render_pdf_page_to_png(pdf_bytes, pdf_page_index, out_w, out_h)
+        if pdf_png is None:
+            png = render_page_from_document_zip(zip_path, page, background_color)
+            return png, "PDF rasterization failed; annotation-only render."
+
+        # 2. Render annotation layer to SVG, then to PNG with transparent background
+        target_rm_file = rm_files[page - 1]
+        ann_svg_path = None
+        ann_png_bytes = None
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
+                ann_svg_path = Path(tmp_svg.name)
+
+            if _rm_to_svg(target_rm_file, ann_svg_path):
+                # Read the SVG and adjust viewBox to match PDF page bounds
+                svg_content = ann_svg_path.read_text()
+
+                # rmc outputs strokes in PDF points (after its SCALE = 72/226).
+                # Set viewBox to match PDF page bounds so annotations align.
+                import re
+
+                svg_content = re.sub(
+                    r'viewBox="[^"]*"',
+                    f'viewBox="{-pdf_w_pt / 2:.1f} 0 {pdf_w_pt:.1f} {pdf_h_pt:.1f}"',
+                    svg_content,
+                )
+                # Also set explicit width/height to match output canvas
+                svg_content = re.sub(r'width="[^"]*"', f'width="{out_w}"', svg_content)
+                svg_content = re.sub(r'height="[^"]*"', f'height="{out_h}"', svg_content)
+
+                # Render SVG to PNG with transparent background
+                import io
+
+                import cairosvg
+
+                ann_png_data = cairosvg.svg2png(
+                    bytestring=svg_content.encode("utf-8"),
+                    output_width=out_w,
+                    output_height=out_h,
+                )
+                ann_png_bytes = ann_png_data
+        except Exception:
+            pass  # Annotation rendering failed; we'll just return the PDF
+        finally:
+            if ann_svg_path:
+                ann_svg_path.unlink(missing_ok=True)
+
+        # 3. Composite: PDF base + annotation overlay
+        try:
+            import io
+
+            pdf_img = PILImage.open(io.BytesIO(pdf_png)).convert("RGBA")
+
+            if ann_png_bytes:
+                ann_img = PILImage.open(io.BytesIO(ann_png_bytes)).convert("RGBA")
+                # Resize annotation to match PDF if needed
+                if ann_img.size != pdf_img.size:
+                    ann_img = ann_img.resize(pdf_img.size, PILImage.LANCZOS)
+                composite = PILImage.alpha_composite(pdf_img, ann_img)
+            else:
+                composite = pdf_img
+
+            # Convert to RGB for PNG output (no alpha needed in final)
+            composite = composite.convert("RGB")
+            buf = io.BytesIO()
+            composite.save(buf, format="PNG")
+            return buf.getvalue(), None
+        except Exception:
+            # Last resort: return annotation-only
+            png = render_page_from_document_zip(zip_path, page, background_color)
+            return png, "Compositing failed; annotation-only render."
+
+
 def get_document_page_count(zip_path: Path) -> int:
     """
     Get the number of pages in a reMarkable document zip.
