@@ -394,9 +394,76 @@ When `REMARKABLE_OCR_BACKEND=auto` (default):
 | Offline | ✅ Yes | ❌ No |
 | Subscription | ✅ Not required | ❌ Connect required |
 | Raw files | ✅ PDFs, EPUBs | ❌ Not available |
+| Write tools | ✅ With `--write` flag | ❌ Not available |
 | Setup | Developer mode | One-time code |
 
 📖 **[SSH Setup Guide](docs/ssh-setup.md)**
+
+---
+
+## Write Tools (SSH Only)
+
+Opt-in write tools let you upload, organize, and manage documents directly on your reMarkable tablet via SSH. **Disabled by default** for safety.
+
+### Enabling Write Tools
+
+Add the `--write` flag when running in SSH mode:
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--ssh", "--write"]
+    }
+  }
+}
+```
+
+Or set the environment variable:
+```json
+{
+  "env": {
+    "REMARKABLE_ENABLE_WRITE": "1"
+  }
+}
+```
+
+### Available Write Tools
+
+| Tool | Description | Destructive? |
+|------|-------------|:------------:|
+| `remarkable_upload(file_path, parent_folder, document_name)` | Upload a PDF or EPUB file | No |
+| `remarkable_mkdir(folder_name, parent)` | Create a new folder | No |
+| `remarkable_move(document, dest_folder)` | Move a document or folder | No |
+| `remarkable_rename(document, new_name)` | Rename a document or folder | No |
+| `remarkable_delete(document, confirm)` | Delete a document or folder | ⚠️ Yes |
+
+### Safety
+
+- **Write tools require SSH mode** — cloud and USB-web modes return a clear error
+- **Delete requires confirmation** — calling without `confirm=True` returns a dry-run preview
+- After each write operation, the tablet UI restarts automatically to reflect changes
+
+### Examples
+
+```python
+# Upload a PDF
+remarkable_upload("/tmp/paper.pdf", parent_folder="/Research")
+
+# Create a folder
+remarkable_mkdir("2024 Archive", parent="/Archive")
+
+# Move a document
+remarkable_move("Meeting Notes", "/Archive/2024 Archive")
+
+# Rename a document
+remarkable_rename("Untitled", "Q4 Planning Notes")
+
+# Delete (dry-run first, then confirm)
+remarkable_delete("Old Draft")           # Preview what would be deleted
+remarkable_delete("Old Draft", confirm=True)  # Actually delete
+```
 
 ---
 

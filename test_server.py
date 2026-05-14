@@ -6,6 +6,7 @@ Tests the 4 intent-based tools using FastMCP's testing capabilities.
 """
 
 import json
+import os
 import shutil
 import tempfile
 import zipfile
@@ -1837,7 +1838,6 @@ class TestUSBWebInterface:
 # Test Retry Backoff
 # =============================================================================
 
-
 class TestRetryBackoff:
     """Test retry with exponential backoff for cloud API requests."""
 
@@ -1974,3 +1974,244 @@ class TestRetryBackoff:
         result = _http_request_with_retry("GET", "https://example.com/api")
         assert result.status_code == 503
         assert mock_request.call_count == 3
+
+
+# =============================================================================
+# Test Write Tools
+# =============================================================================
+
+
+class TestWriteTools:
+    """Test write tools opt-in behavior and safety checks."""
+
+    def test_write_enabled_default_off(self):
+        """Test that write_enabled() returns False by default."""
+        from remarkable_mcp.write_tools import write_enabled
+
+        # Ensure env var is not set
+        old = os.environ.pop("REMARKABLE_ENABLE_WRITE", None)
+        try:
+            assert write_enabled() is False
+        finally:
+            if old is not None:
+                os.environ["REMARKABLE_ENABLE_WRITE"] = old
+
+    def test_write_enabled_with_env_var(self):
+        """Test that write_enabled() returns True with env var."""
+        from remarkable_mcp.write_tools import write_enabled
+
+        old = os.environ.get("REMARKABLE_ENABLE_WRITE")
+        try:
+            os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
+            assert write_enabled() is True
+
+            os.environ["REMARKABLE_ENABLE_WRITE"] = "true"
+            assert write_enabled() is True
+
+            os.environ["REMARKABLE_ENABLE_WRITE"] = "yes"
+            assert write_enabled() is True
+
+            os.environ["REMARKABLE_ENABLE_WRITE"] = "0"
+            assert write_enabled() is False
+
+            os.environ["REMARKABLE_ENABLE_WRITE"] = ""
+            assert write_enabled() is False
+        finally:
+            if old is not None:
+                os.environ["REMARKABLE_ENABLE_WRITE"] = old
+            else:
+                os.environ.pop("REMARKABLE_ENABLE_WRITE", None)
+
+    @pytest.mark.asyncio
+    async def test_write_tools_not_registered_by_default(self):
+        """Test that write tools are NOT registered without --write flag."""
+        tools = await mcp.list_tools()
+        tool_names = [tool.name for tool in tools]
+
+        write_tool_names = [
+            "remarkable_upload",
+            "remarkable_mkdir",
+            "remarkable_move",
+            "remarkable_rename",
+            "remarkable_delete",
+        ]
+
+        for tool_name in write_tool_names:
+            assert tool_name not in tool_names, (
+                f"Write tool {tool_name} should not be registered without --write flag"
+            )
+
+    @pytest.mark.asyncio
+    async def test_write_tools_registered_when_enabled(self):
+        """Test that write tools ARE registered with REMARKABLE_ENABLE_WRITE=1."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        # Register the tools
+        register_write_tools()
+
+        try:
+            tools = await mcp.list_tools()
+            tool_names = [tool.name for tool in tools]
+
+            write_tool_names = [
+                "remarkable_upload",
+                "remarkable_mkdir",
+                "remarkable_move",
+                "remarkable_rename",
+                "remarkable_delete",
+            ]
+
+            for tool_name in write_tool_names:
+                assert tool_name in tool_names, f"Write tool {tool_name} should be registered"
+        finally:
+            # Clean up: remove registered tools to not affect other tests
+            for name in [
+                "remarkable_upload",
+                "remarkable_mkdir",
+                "remarkable_move",
+                "remarkable_rename",
+                "remarkable_delete",
+            ]:
+                mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
+    async def test_delete_dry_run(self):
+        """Test that delete without confirm returns preview."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        register_write_tools()
+
+        try:
+            mock_doc = Mock()
+            mock_doc.VissibleName = "Test Doc"
+            mock_doc.ID = "doc-123"
+            mock_doc.Parent = ""
+            mock_doc.is_folder = False
+            mock_doc.is_cloud_archived = False
+
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi") as mock_get_rmapi,
+                patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            ):
+                import importlib
+
+                import remarkable_mcp.api
+
+                importlib.reload(remarkable_mcp.api)
+
+                try:
+                    mock_client = Mock(
+                        spec=[
+                            "get_meta_items",
+                            "_scp_download",
+                            "_ssh_command",
+                            "_documents",
+                            "_documents_by_id",
+                            "host",
+                            "user",
+                            "port",
+                            "password",
+                        ]
+                    )
+                    mock_client.get_meta_items.return_value = [mock_doc]
+                    mock_get_rmapi.return_value = mock_client
+
+                    result = await mcp.call_tool(
+                        "remarkable_delete",
+                        {
+                            "document": "Test Doc",
+                        },
+                    )
+                    data = json.loads(result[0][0].text)
+                    assert data["dry_run"] is True
+                    assert data["confirm_required"] is True
+                    assert data["would_delete"]["name"] == "Test Doc"
+                finally:
+                    if "REMARKABLE_USE_SSH" in os.environ:
+                        del os.environ["REMARKABLE_USE_SSH"]
+                    importlib.reload(remarkable_mcp.api)
+        finally:
+            for name in [
+                "remarkable_upload",
+                "remarkable_mkdir",
+                "remarkable_move",
+                "remarkable_rename",
+                "remarkable_delete",
+            ]:
+                mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
+    async def test_write_tools_error_in_cloud_mode(self):
+        """Test that write tools return error in cloud mode."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        register_write_tools()
+
+        try:
+            # Ensure NOT in SSH mode
+            old_ssh = os.environ.pop("REMARKABLE_USE_SSH", None)
+            try:
+                import importlib
+
+                import remarkable_mcp.api
+
+                importlib.reload(remarkable_mcp.api)
+
+                result = await mcp.call_tool(
+                    "remarkable_mkdir",
+                    {
+                        "folder_name": "Test",
+                    },
+                )
+                data = json.loads(result[0][0].text)
+                assert "_error" in data
+                assert data["_error"]["type"] == "ssh_required"
+                assert "SSH mode" in data["_error"]["message"]
+            finally:
+                if old_ssh is not None:
+                    os.environ["REMARKABLE_USE_SSH"] = old_ssh
+                importlib.reload(remarkable_mcp.api)
+        finally:
+            for name in [
+                "remarkable_upload",
+                "remarkable_mkdir",
+                "remarkable_move",
+                "remarkable_rename",
+                "remarkable_delete",
+            ]:
+                mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
+    async def test_all_write_tools_have_xml_docstrings(self):
+        """Test that all write tools have XML-structured documentation."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        register_write_tools()
+
+        try:
+            tools = await mcp.list_tools()
+            write_tools = [
+                t
+                for t in tools
+                if t.name
+                in (
+                    "remarkable_upload",
+                    "remarkable_mkdir",
+                    "remarkable_move",
+                    "remarkable_rename",
+                    "remarkable_delete",
+                )
+            ]
+
+            for tool in write_tools:
+                desc = tool.description
+                assert "<usecase>" in desc, f"Write tool {tool.name} missing <usecase> tag"
+        finally:
+            for name in [
+                "remarkable_upload",
+                "remarkable_mkdir",
+                "remarkable_move",
+                "remarkable_rename",
+                "remarkable_delete",
+            ]:
+                mcp._tool_manager._tools.pop(name, None)
