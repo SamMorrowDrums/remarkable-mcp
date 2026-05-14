@@ -6,6 +6,7 @@ Tests the 4 intent-based tools using FastMCP's testing capabilities.
 """
 
 import json
+import shutil
 import tempfile
 import zipfile
 from pathlib import Path
@@ -1337,6 +1338,179 @@ class TestTagSupport:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# =============================================================================
+# Regression tests for fixed bugs
+# =============================================================================
+
+
+class TestIsCloudArchivedFix:
+    """Regression tests for issue #65 — synced=false docs must not be hidden."""
+
+    def test_synced_false_is_not_cloud_archived(self):
+        """Documents with synced=false should be visible (not archived).
+
+        The synced field means 'local changes pushed to cloud', NOT 'document
+        is present on the device'. Chrome extension docs arrive with synced=false.
+        """
+        from remarkable_mcp.ssh import Document
+
+        doc = Document(
+            id="d1",
+            hash="d1",
+            name="Chrome Article",
+            doc_type="DocumentType",
+            parent="",
+            synced=False,
+        )
+        assert doc.is_cloud_archived is False
+
+    def test_trashed_doc_is_cloud_archived(self):
+        """Documents in trash should still be hidden."""
+        from remarkable_mcp.ssh import Document
+
+        doc = Document(
+            id="d2",
+            hash="d2",
+            name="Trashed",
+            doc_type="DocumentType",
+            parent="trash",
+            synced=True,
+        )
+        assert doc.is_cloud_archived is True
+
+    def test_normal_doc_is_not_cloud_archived(self):
+        """Normal documents should be visible."""
+        from remarkable_mcp.ssh import Document
+
+        doc = Document(
+            id="d3",
+            hash="d3",
+            name="Normal",
+            doc_type="DocumentType",
+            parent="",
+            synced=True,
+        )
+        assert doc.is_cloud_archived is False
+
+    def test_synced_false_in_trash_is_cloud_archived(self):
+        """Documents that are both synced=false AND in trash should be hidden."""
+        from remarkable_mcp.ssh import Document
+
+        doc = Document(
+            id="d4",
+            hash="d4",
+            name="Trashed Unsynced",
+            doc_type="DocumentType",
+            parent="trash",
+            synced=False,
+        )
+        assert doc.is_cloud_archived is True
+
+
+class TestRmcResolution:
+    """Regression tests for rmc binary resolution (issues #52, #78, #80)."""
+
+    def test_rmc_executable_returns_string(self):
+        """_rmc_executable should always return a string path."""
+        from remarkable_mcp.extract import _rmc_executable
+
+        result = _rmc_executable()
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_rmc_executable_finds_venv_binary(self):
+        """_rmc_executable should find rmc in the venv's bin directory."""
+        from remarkable_mcp.extract import _rmc_executable
+
+        result = _rmc_executable()
+        # Should find it either on PATH or in venv
+        assert Path(result).stem == "rmc"
+
+    def test_rmc_executable_falls_back_to_venv(self):
+        """When rmc is not on PATH, should find it in the venv bin."""
+        import sys
+
+        from remarkable_mcp.extract import _rmc_executable
+
+        venv_rmc = Path(sys.executable).parent / "rmc"
+        if not venv_rmc.exists():
+            pytest.skip("rmc not in venv bin")
+
+        # Capture real which() before patching
+        real_which = shutil.which
+
+        # Patch so PATH lookup returns None, but venv-bin lookup works
+        with patch("remarkable_mcp.extract.shutil.which") as mock_which:
+            mock_which.side_effect = lambda name, path=None: (
+                real_which(name, path=path) if path else None
+            )
+            result = _rmc_executable()
+        assert Path(result).stem == "rmc"
+
+    @patch("remarkable_mcp.extract.shutil.which", return_value=None)
+    def test_rmc_executable_falls_back_to_bare(self, mock_which):
+        """When rmc is nowhere, should return bare 'rmc' for clear error."""
+        from remarkable_mcp.extract import _rmc_executable
+
+        result = _rmc_executable()
+        assert result == "rmc"
+
+    @patch("remarkable_mcp.extract.subprocess.run")
+    def test_rm_to_svg_v5_fallback(self, mock_run):
+        """_rm_to_svg should use v5 fallback when rmc is not available."""
+        import struct
+
+        from remarkable_mcp.extract import _rm_to_svg
+
+        # Simulate rmc not found
+        mock_run.side_effect = FileNotFoundError("rmc not found")
+
+        # Build minimal v5 .rm file with one stroke
+        buf = bytearray()
+        header = b"reMarkable .lines file, version=5          "
+        buf.extend(header[:43])
+        buf.extend(struct.pack("<I", 1))  # 1 layer
+        buf.extend(struct.pack("<I", 1))  # 1 stroke
+        pen, color, pad, base_width = 0, 0, 0, 2.0
+        segments = [(100, 100, 0, 0, 2.0, 0.5), (200, 200, 0, 0, 2.0, 0.5)]
+        buf.extend(struct.pack("<IIIIfI", pen, color, pad, 0, base_width, len(segments)))
+        for x, y, speed, tilt, width, pressure in segments:
+            buf.extend(struct.pack("<ffffff", x, y, speed, tilt, width, pressure))
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(bytes(buf))
+            rm_path = Path(rm_tmp.name)
+        with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as svg_tmp:
+            svg_path = Path(svg_tmp.name)
+
+        try:
+            result = _rm_to_svg(rm_path, svg_path)
+            assert result is True
+            svg_content = svg_path.read_text()
+            assert "<svg" in svg_content
+            assert "M 100.0 100.0" in svg_content
+        finally:
+            rm_path.unlink(missing_ok=True)
+            svg_path.unlink(missing_ok=True)
+
+    def test_rm_to_svg_returns_false_for_garbage(self):
+        """_rm_to_svg should return False for unrecognized file formats."""
+        from remarkable_mcp.extract import _rm_to_svg
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(b"this is not a valid rm file at all")
+            rm_path = Path(rm_tmp.name)
+        with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as svg_tmp:
+            svg_path = Path(svg_tmp.name)
+
+        try:
+            result = _rm_to_svg(rm_path, svg_path)
+            assert result is False
+        finally:
+            rm_path.unlink(missing_ok=True)
+            svg_path.unlink(missing_ok=True)
 
 
 # =============================================================================

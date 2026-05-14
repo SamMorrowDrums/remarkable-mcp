@@ -59,8 +59,17 @@ class Document:
 
     @property
     def is_cloud_archived(self) -> bool:
-        """True if document is archived to cloud (not on device)."""
-        return not self.synced or self.parent == "trash"
+        """True if document is in the trash.
+
+        Previously this also checked ``not self.synced``, but the metadata
+        ``synced`` field means "local changes have been pushed to the cloud"
+        — not "the document is physically present on this device".  Documents
+        added via the Chrome extension or cloud sync arrive with
+        ``synced: false`` even though their content is on the device.
+
+        See: https://github.com/SamMorrowDrums/remarkable-mcp/issues/65
+        """
+        return self.parent == "trash"
 
     @property
     def VissibleName(self) -> str:
