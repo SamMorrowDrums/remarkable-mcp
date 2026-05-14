@@ -77,7 +77,7 @@ Security Note:
     parser.add_argument(
         "--write",
         action="store_true",
-        help="Enable write tools (upload, mkdir, move, rename, delete). SSH mode only.",
+        help="Enable write tools (upload, mkdir, move, rename, delete). SSH and USB web mode.",
     )
 
     args = parser.parse_args()
@@ -117,10 +117,7 @@ Security Note:
         # USB web mode - set environment variable and run server
         os.environ["REMARKABLE_USE_USB_WEB"] = "1"
         if args.write:
-            print(
-                "⚠️  --write flag ignored: write tools are only available in SSH mode.",
-                file=sys.stderr,
-            )
+            os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
         from remarkable_mcp.server import run
 
         run()
@@ -136,7 +133,7 @@ Security Note:
         # MCP server mode - only now import the full server
         if args.write:
             print(
-                "⚠️  --write flag ignored: write tools are only available in SSH mode.",
+                "⚠️  --write flag ignored: write tools require SSH or USB web mode.",
                 file=sys.stderr,
             )
         from remarkable_mcp.server import run

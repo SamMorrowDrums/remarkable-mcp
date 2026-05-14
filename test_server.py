@@ -2215,3 +2215,84 @@ class TestWriteTools:
                 "remarkable_delete",
             ]:
                 mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
+    async def test_upload_error_in_cloud_mode(self):
+        """Test that upload returns error in cloud mode (no SSH or USB web)."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        register_write_tools()
+
+        try:
+            # Ensure neither SSH nor USB web mode is set
+            old_ssh = os.environ.pop("REMARKABLE_USE_SSH", None)
+            old_usb = os.environ.pop("REMARKABLE_USE_USB_WEB", None)
+            try:
+                import importlib
+
+                import remarkable_mcp.api
+
+                importlib.reload(remarkable_mcp.api)
+
+                result = await mcp.call_tool(
+                    "remarkable_upload",
+                    {"file_path": "/tmp/test.pdf"},
+                )
+                data = json.loads(result[0][0].text)
+                assert "_error" in data
+                assert data["_error"]["type"] == "write_transport_required"
+                assert "SSH or USB web" in data["_error"]["message"]
+            finally:
+                if old_ssh is not None:
+                    os.environ["REMARKABLE_USE_SSH"] = old_ssh
+                if old_usb is not None:
+                    os.environ["REMARKABLE_USE_USB_WEB"] = old_usb
+                importlib.reload(remarkable_mcp.api)
+        finally:
+            for name in [
+                "remarkable_upload",
+                "remarkable_mkdir",
+                "remarkable_move",
+                "remarkable_rename",
+                "remarkable_delete",
+            ]:
+                mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
+    async def test_mkdir_error_in_usb_web_mode(self):
+        """Test that mkdir returns SSH-required error in USB web mode."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        register_write_tools()
+
+        try:
+            old_ssh = os.environ.pop("REMARKABLE_USE_SSH", None)
+            os.environ["REMARKABLE_USE_USB_WEB"] = "1"
+            try:
+                import importlib
+
+                import remarkable_mcp.api
+
+                importlib.reload(remarkable_mcp.api)
+
+                result = await mcp.call_tool(
+                    "remarkable_mkdir",
+                    {"folder_name": "Test"},
+                )
+                data = json.loads(result[0][0].text)
+                assert "_error" in data
+                assert data["_error"]["type"] == "ssh_required"
+            finally:
+                if old_ssh is not None:
+                    os.environ["REMARKABLE_USE_SSH"] = old_ssh
+                os.environ.pop("REMARKABLE_USE_USB_WEB", None)
+                importlib.reload(remarkable_mcp.api)
+        finally:
+            for name in [
+                "remarkable_upload",
+                "remarkable_mkdir",
+                "remarkable_move",
+                "remarkable_rename",
+                "remarkable_delete",
+            ]:
+                mcp._tool_manager._tools.pop(name, None)

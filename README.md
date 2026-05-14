@@ -386,28 +386,37 @@ When `REMARKABLE_OCR_BACKEND=auto` (default):
 
 ---
 
-## SSH vs Cloud Comparison
+## SSH vs USB Web vs Cloud Comparison
 
-| Feature | SSH Mode | Cloud API |
-|---------|----------|-----------|
-| Speed | ⚡ 10-100x faster | Slower |
-| Offline | ✅ Yes | ❌ No |
-| Subscription | ✅ Not required | ❌ Connect required |
-| Raw files | ✅ PDFs, EPUBs | ❌ Not available |
-| Write tools | ✅ With `--write` flag | ❌ Not available |
-| Setup | Developer mode | One-time code |
+| Feature | SSH Mode | USB Web | Cloud API |
+|---------|----------|---------|-----------|
+| Speed | ⚡ 10-100x faster | ⚡ Fast | Slower |
+| Offline | ✅ Yes | ✅ Yes | ❌ No |
+| Subscription | ✅ Not required | ✅ Not required | ❌ Connect required |
+| Raw files | ✅ PDFs, EPUBs | ✅ PDFs | ❌ Not available |
+| Upload | ✅ With `--write` | ✅ With `--write` | ❌ Not available |
+| mkdir/move/rename/delete | ✅ With `--write` | ❌ | ❌ |
+| Setup | Developer mode | Enable in Settings | One-time code |
 
 📖 **[SSH Setup Guide](docs/ssh-setup.md)**
 
 ---
 
-## Write Tools (SSH Only)
+## Write Tools (SSH & USB Web)
 
-Opt-in write tools let you upload, organize, and manage documents directly on your reMarkable tablet via SSH. **Disabled by default** for safety.
+Opt-in write tools let you upload, organize, and manage documents directly on your reMarkable tablet. **Disabled by default** for safety.
+
+| Feature | SSH Mode | USB Web Mode | Cloud Mode |
+|---------|:--------:|:------------:|:----------:|
+| Upload | ✅ | ✅ | ❌ |
+| Mkdir | ✅ | ❌ | ❌ |
+| Move | ✅ | ❌ | ❌ |
+| Rename | ✅ | ❌ | ❌ |
+| Delete | ✅ | ❌ | ❌ |
 
 ### Enabling Write Tools
 
-Add the `--write` flag when running in SSH mode:
+Add the `--write` flag when running in SSH or USB web mode:
 
 ```json
 {
@@ -415,6 +424,18 @@ Add the `--write` flag when running in SSH mode:
     "remarkable": {
       "command": "uvx",
       "args": ["remarkable-mcp", "--ssh", "--write"]
+    }
+  }
+}
+```
+
+Or with USB web mode (upload only):
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--usb", "--write"]
     }
   }
 }
@@ -434,16 +455,17 @@ Or set the environment variable:
 | Tool | Description | Destructive? |
 |------|-------------|:------------:|
 | `remarkable_upload(file_path, parent_folder, document_name)` | Upload a PDF or EPUB file | No |
-| `remarkable_mkdir(folder_name, parent)` | Create a new folder | No |
-| `remarkable_move(document, dest_folder)` | Move a document or folder | No |
-| `remarkable_rename(document, new_name)` | Rename a document or folder | No |
-| `remarkable_delete(document, confirm)` | Delete a document or folder | ⚠️ Yes |
+| `remarkable_mkdir(folder_name, parent)` | Create a new folder (SSH only) | No |
+| `remarkable_move(document, dest_folder)` | Move a document or folder (SSH only) | No |
+| `remarkable_rename(document, new_name)` | Rename a document or folder (SSH only) | No |
+| `remarkable_delete(document, confirm)` | Delete a document or folder (SSH only) | ⚠️ Yes |
 
 ### Safety
 
-- **Write tools require SSH mode** — cloud and USB-web modes return a clear error
+- **Upload works in SSH and USB web mode** — cloud mode returns a clear error
+- **mkdir, move, rename, delete require SSH mode** — USB web and cloud return a clear error
 - **Delete requires confirmation** — calling without `confirm=True` returns a dry-run preview
-- After each write operation, the tablet UI restarts automatically to reflect changes
+- After each write operation (SSH), the tablet UI restarts automatically to reflect changes
 
 ### Examples
 
@@ -451,16 +473,16 @@ Or set the environment variable:
 # Upload a PDF
 remarkable_upload("/tmp/paper.pdf", parent_folder="/Research")
 
-# Create a folder
+# Create a folder (SSH only)
 remarkable_mkdir("2024 Archive", parent="/Archive")
 
-# Move a document
+# Move a document (SSH only)
 remarkable_move("Meeting Notes", "/Archive/2024 Archive")
 
-# Rename a document
+# Rename a document (SSH only)
 remarkable_rename("Untitled", "Q4 Planning Notes")
 
-# Delete (dry-run first, then confirm)
+# Delete (dry-run first, then confirm) (SSH only)
 remarkable_delete("Old Draft")           # Preview what would be deleted
 remarkable_delete("Old Draft", confirm=True)  # Actually delete
 ```

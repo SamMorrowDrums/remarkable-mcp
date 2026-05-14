@@ -122,6 +122,12 @@ Documents are registered as resources for direct access:
     )
 
     # Add SSH-specific instructions
+    usb_web_mode = os.environ.get("REMARKABLE_USE_USB_WEB", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
     if ssh_mode:
         instructions += """
 ## SSH Mode (Active)
@@ -136,13 +142,7 @@ You're connected directly to the tablet via SSH. This enables:
 - `"raw"` - Only original PDF/EPUB text (no annotations)
 - `"annotations"` - Only typed text, highlights, and OCR content
 """
-        # Add write tools instructions if enabled
-        write_enabled = os.environ.get("REMARKABLE_ENABLE_WRITE", "").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        if write_enabled:
+        if write_mode:
             instructions += """
 ## Write Tools (Active)
 
@@ -158,6 +158,17 @@ Write operations are enabled. These tools modify your tablet's filesystem:
 - **Delete is destructive**: always call without `confirm` first to preview
 - After each write operation, the tablet UI restarts automatically
 - Use `remarkable_browse()` to verify changes after write operations
+"""
+    elif usb_web_mode:
+        if write_mode:
+            instructions += """
+## Write Tools (Active — USB Web)
+
+Upload is available via the USB web interface:
+
+- `remarkable_upload(file_path)` - Upload a PDF/EPUB file
+
+Note: mkdir, move, rename, and delete require SSH mode.
 """
     else:
         instructions += """

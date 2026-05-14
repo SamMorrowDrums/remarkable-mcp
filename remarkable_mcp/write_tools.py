@@ -1,14 +1,16 @@
 """
-Write tools for reMarkable tablet via SSH.
+Write tools for reMarkable tablet via SSH or USB web interface.
 
 These tools are opt-in — disabled by default. Enable via:
-- CLI flag: remarkable-mcp --ssh --write
+- CLI flag: remarkable-mcp --ssh --write  (or --usb --write)
 - Environment variable: REMARKABLE_ENABLE_WRITE=1
 
-Only available in SSH mode. Cloud/USB-web modes return a clear error.
+Available in SSH mode and USB web mode. Cloud mode returns a clear error.
+- SSH mode: full write support (upload, mkdir, move, rename, delete)
+- USB web mode: upload only (via POST /upload endpoint)
 
 Inspired by PR #70 from @McSchnizzle. Implemented purely via SSH filesystem
-operations — no external Go binary required.
+operations and USB web HTTP endpoints — no external Go binary required.
 """
 
 import json
@@ -82,8 +84,36 @@ def write_enabled() -> bool:
     )
 
 
+def _require_write_transport() -> Optional[str]:
+    """Return an error string if not in a write-capable mode, or None if OK."""
+    ssh_enabled = os.environ.get("REMARKABLE_USE_SSH", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    usb_web_enabled = os.environ.get("REMARKABLE_USE_USB_WEB", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if not ssh_enabled and not usb_web_enabled:
+        return make_error(
+            error_type="write_transport_required",
+            message="Write operations require SSH or USB web mode",
+            suggestion=(
+                "Write tools work with SSH or USB web access to your tablet. "
+                "Run with: remarkable-mcp --ssh --write  (or --usb --write)\n"
+                "See: https://github.com/SamMorrowDrums/remarkable-mcp/blob/main/docs/ssh-setup.md"
+            ),
+        )
+    return None
+
+
 def _require_ssh_mode() -> Optional[str]:
-    """Return an error string if not in SSH mode, or None if OK."""
+    """Return an error string if not in SSH mode, or None if OK.
+
+    Used for operations that only work via SSH (mkdir, move, rename, delete).
+    """
     ssh_enabled = os.environ.get("REMARKABLE_USE_SSH", "").lower() in (
         "1",
         "true",
@@ -92,14 +122,33 @@ def _require_ssh_mode() -> Optional[str]:
     if not ssh_enabled:
         return make_error(
             error_type="ssh_required",
-            message="Write operations require SSH mode",
+            message="This operation requires SSH mode",
             suggestion=(
-                "Write tools only work with direct SSH access to your tablet. "
+                "mkdir, move, rename, and delete only work with SSH access. "
+                "Upload works with both SSH and USB web mode.\n"
                 "Run with: remarkable-mcp --ssh --write\n"
                 "See: https://github.com/SamMorrowDrums/remarkable-mcp/blob/main/docs/ssh-setup.md"
             ),
         )
     return None
+
+
+def _is_ssh_mode() -> bool:
+    """Check if SSH transport is active."""
+    return os.environ.get("REMARKABLE_USE_SSH", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _is_usb_web_mode() -> bool:
+    """Check if USB web transport is active."""
+    return os.environ.get("REMARKABLE_USE_USB_WEB", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 def _get_ssh_client():
@@ -157,6 +206,36 @@ def _upload_file_bytes(ssh_client: SSHClient, local_path: str, remote_path: str)
 def _restart_xochitl(ssh_client: SSHClient) -> None:
     """Restart the xochitl UI service on the tablet."""
     ssh_client._ssh_command("systemctl restart xochitl", timeout=15)
+
+
+def _upload_via_usb_web(local_path: str) -> dict:
+    """Upload a file to the tablet via USB web interface POST /upload.
+
+    Returns dict with upload result info.
+    """
+    import requests
+
+    from remarkable_mcp.usb_web import DEFAULT_USB_HOST
+
+    host = os.environ.get("REMARKABLE_USB_HOST", DEFAULT_USB_HOST).rstrip("/")
+    url = f"{host}/upload"
+
+    with open(local_path, "rb") as f:
+        filename = os.path.basename(local_path)
+        files = {"file": (filename, f)}
+        try:
+            response = requests.post(url, files=files, timeout=120)
+            response.raise_for_status()
+            return {"status": response.status_code, "ok": True}
+        except requests.Timeout:
+            raise RuntimeError("USB web upload timed out. Check USB connection.")
+        except requests.ConnectionError:
+            raise RuntimeError(
+                f"Cannot connect to USB web interface at {host}. "
+                "Make sure USB cable is connected and web interface is enabled."
+            )
+        except requests.HTTPError as e:
+            raise RuntimeError(f"USB web upload failed: {e}")
 
 
 def _resolve_parent_id(parent_path: str, items_by_id: dict, collection: list) -> Optional[str]:
@@ -228,16 +307,21 @@ def register_write_tools():
         """
         <usecase>Upload a PDF or EPUB file to the reMarkable tablet.</usecase>
         <instructions>
-        Uploads a local file to the tablet via SSH. Only PDF and EPUB formats
-        are supported. The file is transferred directly to the tablet's filesystem
-        and the UI is restarted to pick up the change.
+        Uploads a local file to the tablet. Only PDF and EPUB formats
+        are supported.
 
-        Requires SSH mode and --write flag.
+        Works in both SSH and USB web mode:
+        - SSH: file is transferred via SSH, metadata is created, xochitl restarts
+        - USB web: file is uploaded via POST /upload HTTP endpoint
+
+        Requires --write flag.
         </instructions>
         <parameters>
         - file_path: Absolute path to the local PDF or EPUB file
-        - parent_folder: Destination folder path on tablet (default: root "/")
-        - document_name: Display name on tablet (default: filename without extension)
+        - parent_folder: Destination folder path on tablet (default: root "/").
+          Note: parent_folder is only supported in SSH mode.
+        - document_name: Display name on tablet (default: filename without
+          extension). Note: document_name is only supported in SSH mode.
         </parameters>
         <examples>
         - remarkable_upload("/tmp/paper.pdf")
@@ -245,7 +329,7 @@ def register_write_tools():
         - remarkable_upload("/tmp/report.pdf", document_name="Q4 Report")
         </examples>
         """
-        error = _require_ssh_mode()
+        error = _require_write_transport()
         if error:
             return error
 
@@ -266,6 +350,33 @@ def register_write_tools():
                     suggestion="Only PDF and EPUB files can be uploaded to reMarkable.",
                 )
 
+            # USB web mode: simple HTTP upload
+            if _is_usb_web_mode():
+                _upload_via_usb_web(file_path)
+
+                name = document_name or os.path.splitext(os.path.basename(file_path))[0]
+
+                # Clear cached documents
+                client = get_rmapi()
+                client._documents = []
+                client._documents_by_id = {}
+
+                result = {
+                    "uploaded": True,
+                    "name": name,
+                    "format": ext,
+                    "transport": "usb-web",
+                }
+                if parent_folder != "/":
+                    result["note"] = (
+                        "USB web upload places files at root. Use SSH mode for folder placement."
+                    )
+                return make_response(
+                    result,
+                    "Document uploaded via USB web interface. Use remarkable_browse() to verify.",
+                )
+
+            # SSH mode: full upload with metadata
             ssh_client = _get_ssh_client()
             collection = ssh_client.get_meta_items()
             items_by_id = get_items_by_id(collection)
@@ -329,15 +440,17 @@ def register_write_tools():
                     "format": ext,
                     "parent_folder": parent_folder,
                     "remote_path": remote_file,
+                    "transport": "ssh",
                 },
                 "Document uploaded successfully. Use remarkable_browse() to verify it appears.",
             )
 
         except Exception as e:
+            transport = "USB web" if _is_usb_web_mode() else "SSH"
             return make_error(
                 error_type="upload_failed",
                 message=f"Upload failed: {e}",
-                suggestion="Check SSH connection and try again.",
+                suggestion=f"Check {transport} connection and try again.",
             )
 
     @mcp.tool(annotations=MKDIR_ANNOTATIONS)
@@ -351,7 +464,7 @@ def register_write_tools():
         Creates a folder in the tablet's document hierarchy. The folder appears
         in the tablet UI after xochitl restarts.
 
-        Requires SSH mode and --write flag.
+        Requires SSH mode and --write flag. Not available in USB web mode.
         </instructions>
         <parameters>
         - folder_name: Name of the new folder
@@ -434,7 +547,7 @@ def register_write_tools():
         Moves a document or folder by updating its parent reference in the metadata.
         Find the document name with remarkable_browse() first.
 
-        Requires SSH mode and --write flag.
+        Requires SSH mode and --write flag. Not available in USB web mode.
         </instructions>
         <parameters>
         - document: Name or path of the document/folder to move
@@ -523,7 +636,7 @@ def register_write_tools():
         Changes the display name of a document or folder by updating its metadata.
         Find the document name with remarkable_browse() first.
 
-        Requires SSH mode and --write flag.
+        Requires SSH mode and --write flag. Not available in USB web mode.
         </instructions>
         <parameters>
         - document: Current name or path of the document/folder
@@ -605,7 +718,7 @@ def register_write_tools():
         Safety: requires confirm=True to actually delete. Without it, returns
         a dry-run preview showing what would be deleted.
 
-        Requires SSH mode and --write flag.
+        Requires SSH mode and --write flag. Not available in USB web mode.
         </instructions>
         <parameters>
         - document: Name or path of the document/folder to delete
