@@ -193,14 +193,26 @@ def _upload_file_bytes(ssh_client: SSHClient, local_path: str, remote_path: str)
         ssh_args = ["sshpass", "-p", ssh_client.password] + ssh_args
 
     with open(local_path, "rb") as f:
-        result = subprocess.run(
-            ssh_args,
-            stdin=f,
-            capture_output=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Upload failed: {result.stderr.decode()}")
+        try:
+            result = subprocess.run(
+                ssh_args,
+                stdin=f,
+                capture_output=True,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Upload failed: {result.stderr.decode()}")
+        except FileNotFoundError as e:
+            if ssh_client.password and "sshpass" in str(e):
+                raise RuntimeError(
+                    "sshpass not found. Install it with: "
+                    "apt install sshpass (Debian/Ubuntu), "
+                    "brew install hudochenkov/sshpass/sshpass (macOS), "
+                    "or set up SSH key authentication instead."
+                )
+            raise RuntimeError("SSH client not found. Install openssh-client.")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("SSH upload timed out after 120s")
 
 
 def _restart_xochitl(ssh_client: SSHClient) -> None:
@@ -588,6 +600,28 @@ def register_write_tools():
                     message=f"Destination folder not found: '{dest_folder}'",
                     suggestion="Use remarkable_browse('/') to see available folders.",
                 )
+
+            # Prevent moving a folder into itself or a descendant
+            if target.is_folder:
+                if dest_id == target.ID:
+                    return make_error(
+                        error_type="invalid_move",
+                        message="Cannot move a folder into itself",
+                        suggestion="Choose a different destination folder.",
+                    )
+                # Walk up from dest to check for cycles
+                check_id = dest_id
+                while check_id and check_id in items_by_id:
+                    if check_id == target.ID:
+                        return make_error(
+                            error_type="invalid_move",
+                            message="Cannot move a folder into one of its subfolders",
+                            suggestion=(
+                                "Choose a destination that is not inside the folder being moved."
+                            ),
+                        )
+                    parent_item = items_by_id[check_id]
+                    check_id = parent_item.Parent if hasattr(parent_item, "Parent") else ""
 
             # Read existing metadata
             meta_content = ssh_client._scp_download(f"{XOCHITL_PATH}/{target.ID}.metadata")

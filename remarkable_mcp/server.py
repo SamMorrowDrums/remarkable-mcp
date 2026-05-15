@@ -60,6 +60,11 @@ def _build_instructions() -> str:
     """Build server instructions based on current configuration."""
     # Check environment
     ssh_mode = os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
+    usb_web_mode = os.environ.get("REMARKABLE_USE_USB_WEB", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     has_google_vision = bool(os.environ.get("GOOGLE_VISION_API_KEY"))
     ocr_backend = os.environ.get("REMARKABLE_OCR_BACKEND", "auto").lower()
 
@@ -67,7 +72,7 @@ def _build_instructions() -> str:
         "1",
         "true",
         "yes",
-    )
+    ) and (ssh_mode or usb_web_mode)
 
     read_only_note = "" if write_mode else " All operations are read-only."
 
@@ -121,13 +126,7 @@ Documents are registered as resources for direct access:
 """
     )
 
-    # Add SSH-specific instructions
-    usb_web_mode = os.environ.get("REMARKABLE_USE_USB_WEB", "").lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-
+    # Add transport-specific instructions
     if ssh_mode:
         instructions += """
 ## SSH Mode (Active)
