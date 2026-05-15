@@ -32,7 +32,6 @@ from remarkable_mcp.api import (
 )
 from remarkable_mcp.extract import (
     cache_page_ocr,
-    document_zip_has_pdf_underlay,
     extract_text_from_document_zip,
     extract_text_from_epub,
     extract_text_from_pdf,
@@ -1566,16 +1565,11 @@ async def remarkable_image(
                     return [info, embedded]
             else:
                 # PNG format
-                if render_merged and document_zip_has_pdf_underlay(tmp_path):
+                if render_merged:
                     png_data, merged_note = render_merged_page_from_document_zip(
                         tmp_path, page, background_color=background
                     )
                     is_merged = png_data is not None and merged_note is None
-                elif render_merged:
-                    merged_note = "No PDF underlay; returned annotation-only render."
-                    png_data = render_page_from_document_zip(
-                        tmp_path, page, background_color=background
-                    )
                 else:
                     png_data = render_page_from_document_zip(
                         tmp_path, page, background_color=background

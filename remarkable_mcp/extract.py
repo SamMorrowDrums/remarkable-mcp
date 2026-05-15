@@ -933,14 +933,15 @@ def _read_cpages_entries(tmpdir_path: Path) -> List[Dict[str, Any]]:
     Returns:
         List of cPages page entries, or empty list if not found
     """
-    for content_file in tmpdir_path.glob("*.content"):
-        try:
-            data = json.loads(content_file.read_text())
-            if "cPages" in data and "pages" in data["cPages"]:
-                return data["cPages"]["pages"]
-        except Exception:
-            pass
-        break
+    content_file = next(tmpdir_path.glob("*.content"), None)
+    if content_file is None:
+        return []
+    try:
+        data = json.loads(content_file.read_text())
+        if "cPages" in data and "pages" in data["cPages"]:
+            return data["cPages"]["pages"]
+    except Exception:
+        pass
     return []
 
 
@@ -983,17 +984,17 @@ def _render_pdf_page_to_png(
         import fitz
 
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        if page_index < 0 or page_index >= len(doc):
-            doc.close()
-            return None
+        try:
+            if page_index < 0 or page_index >= len(doc):
+                return None
 
-        pdf_page = doc[page_index]
-        # Scale to fill the target dimensions
-        mat = fitz.Matrix(width / pdf_page.rect.width, height / pdf_page.rect.height)
-        pix = pdf_page.get_pixmap(matrix=mat, alpha=False)
-        png_data = pix.tobytes("png")
-        doc.close()
-        return png_data
+            pdf_page = doc[page_index]
+            # Scale to fill the target dimensions
+            mat = fitz.Matrix(width / pdf_page.rect.width, height / pdf_page.rect.height)
+            pix = pdf_page.get_pixmap(matrix=mat, alpha=False)
+            return pix.tobytes("png")
+        finally:
+            doc.close()
     except Exception:
         return None
 
@@ -1040,7 +1041,10 @@ def render_merged_page_from_document_zip(
         # Find the PDF file in the extracted directory
         pdf_files = list(tmpdir_path.glob("**/*.pdf"))
         if not pdf_files:
-            png = render_page_from_document_zip(zip_path, page, background_color)
+            rm_files = _get_ordered_rm_files(tmpdir_path)
+            if page < 1 or page > len(rm_files):
+                return None, f"Page {page} out of range (document has {len(rm_files)} pages)."
+            png = render_rm_file_to_png(rm_files[page - 1], background_color=background_color)
             return png, "No PDF underlay found; returned annotation-only render."
 
         pdf_bytes = pdf_files[0].read_bytes()
@@ -1052,6 +1056,8 @@ def render_merged_page_from_document_zip(
         if page < 1 or page > len(rm_files):
             return None, f"Page {page} out of range (document has {len(rm_files)} pages)."
 
+        target_rm_file = rm_files[page - 1]
+
         # Determine which PDF page this reMarkable page maps to
         pdf_page_index: Optional[int] = None
         if cpages and page <= len(cpages):
@@ -1059,7 +1065,7 @@ def render_merged_page_from_document_zip(
 
         if pdf_page_index is None:
             # No redirect — this page may be a user-added blank page
-            png = render_page_from_document_zip(zip_path, page, background_color)
+            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
             return png, "Page has no PDF underlay (user-added page); annotation-only render."
 
         # Get PDF page dimensions to set annotation viewBox correctly
@@ -1067,17 +1073,18 @@ def render_merged_page_from_document_zip(
             import fitz
 
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            if pdf_page_index >= len(doc):
-                doc.close()
-                png = render_page_from_document_zip(zip_path, page, background_color)
-                return png, "PDF page index out of range; annotation-only render."
+            try:
+                if pdf_page_index >= len(doc):
+                    png = render_rm_file_to_png(target_rm_file, background_color=background_color)
+                    return png, "PDF page index out of range; annotation-only render."
 
-            pdf_page = doc[pdf_page_index]
-            pdf_w_pt = pdf_page.rect.width  # PDF width in points
-            pdf_h_pt = pdf_page.rect.height  # PDF height in points
-            doc.close()
+                pdf_page = doc[pdf_page_index]
+                pdf_w_pt = pdf_page.rect.width  # PDF width in points
+                pdf_h_pt = pdf_page.rect.height  # PDF height in points
+            finally:
+                doc.close()
         except Exception:
-            png = render_page_from_document_zip(zip_path, page, background_color)
+            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
             return png, "Could not read PDF dimensions; annotation-only render."
 
         # Determine output canvas size
@@ -1087,11 +1094,10 @@ def render_merged_page_from_document_zip(
         # 1. Rasterize the PDF page
         pdf_png = _render_pdf_page_to_png(pdf_bytes, pdf_page_index, out_w, out_h)
         if pdf_png is None:
-            png = render_page_from_document_zip(zip_path, page, background_color)
+            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
             return png, "PDF rasterization failed; annotation-only render."
 
         # 2. Render annotation layer to SVG, then to PNG with transparent background
-        target_rm_file = rm_files[page - 1]
         ann_svg_path = None
         ann_png_bytes = None
 
@@ -1154,8 +1160,8 @@ def render_merged_page_from_document_zip(
             composite.save(buf, format="PNG")
             return buf.getvalue(), None
         except Exception:
-            # Last resort: return annotation-only
-            png = render_page_from_document_zip(zip_path, page, background_color)
+            # Last resort: return annotation-only from already-extracted .rm file
+            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
             return png, "Compositing failed; annotation-only render."
 
 

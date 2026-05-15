@@ -641,14 +641,12 @@ class TestMergedRendering:
 
     @pytest.mark.asyncio
     @patch("remarkable_mcp.tools.get_rmapi")
-    @patch("remarkable_mcp.tools.document_zip_has_pdf_underlay")
-    @patch("remarkable_mcp.tools.render_page_from_document_zip")
+    @patch("remarkable_mcp.tools.render_merged_page_from_document_zip")
     @patch("remarkable_mcp.tools.get_document_page_count")
     async def test_render_merged_fallback_no_pdf(
         self,
         mock_page_count,
-        mock_render,
-        mock_has_pdf,
+        mock_render_merged,
         mock_get_rmapi,
         mock_document,
     ):
@@ -658,10 +656,13 @@ class TestMergedRendering:
         mock_document.is_folder = False
         mock_client.get_meta_items.return_value = [mock_document]
         mock_client.download.return_value = b"fake zip"
-        mock_has_pdf.return_value = False
         mock_page_count.return_value = 3
-        # Return fake PNG data
-        mock_render.return_value = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+        # Simulate merged function returning annotation-only with a note (no PDF)
+        fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+        mock_render_merged.return_value = (
+            fake_png,
+            "No PDF underlay found; returned annotation-only render.",
+        )
 
         with patch("tempfile.NamedTemporaryFile") as mock_tmpfile:
             mock_tmp = Mock()
