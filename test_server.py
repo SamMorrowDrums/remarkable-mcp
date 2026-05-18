@@ -2355,3 +2355,44 @@ class TestWriteTools:
                     "remarkable_delete",
                 ]:
                     mcp._tool_manager._tools.pop(name, None)
+
+
+class TestConcurrentToolDispatch:
+    """Regression: tool calls must not serialize on the event loop.
+
+    Before the asyncio.to_thread fix, async tool handlers ran their blocking
+    work (subprocess/SSH/requests/etc.) directly on the asyncio loop, so a
+    second concurrent call_tool request was forced to wait for the first one
+    to finish. This test simulates blocking I/O with time.sleep inside the
+    mocked client and asserts that two concurrent calls overlap.
+    """
+
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_concurrent_browse_calls_overlap(self, mock_get_rmapi):
+        import asyncio
+        import time
+
+        call_delay = 0.4
+
+        def slow_get_meta_items():
+            time.sleep(call_delay)
+            return []
+
+        mock_client = Mock()
+        mock_client.get_meta_items.side_effect = slow_get_meta_items
+        mock_get_rmapi.return_value = mock_client
+
+        start = time.monotonic()
+        results = await asyncio.gather(
+            mcp.call_tool("remarkable_browse", {}),
+            mcp.call_tool("remarkable_browse", {}),
+        )
+        elapsed = time.monotonic() - start
+
+        assert len(results) == 2
+        # Two concurrent calls should complete in well under 2x the per-call
+        # delay; if they serialized we'd see ~2 * call_delay.
+        assert elapsed < call_delay * 1.7, (
+            f"Concurrent tool calls appear serialized: elapsed={elapsed:.2f}s "
+            f"vs single-call delay={call_delay}s"
+        )
