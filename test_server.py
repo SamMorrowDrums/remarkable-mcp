@@ -2044,11 +2044,11 @@ class TestWriteTools:
 
     @pytest.mark.asyncio
     async def test_write_tools_registered_when_enabled(self):
-        """Test that write tools ARE registered with REMARKABLE_ENABLE_WRITE=1."""
+        """Test that write tools ARE registered with REMARKABLE_ENABLE_WRITE=1 in SSH mode."""
         from remarkable_mcp.write_tools import register_write_tools
 
-        # Register the tools
-        register_write_tools()
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
 
         try:
             tools = await mcp.list_tools()
@@ -2080,7 +2080,8 @@ class TestWriteTools:
         """Test that delete marks the document's metadata as deleted."""
         from remarkable_mcp.write_tools import register_write_tools
 
-        register_write_tools()
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
 
         try:
             mock_doc = Mock()
@@ -2150,52 +2151,40 @@ class TestWriteTools:
                 mcp._tool_manager._tools.pop(name, None)
 
     @pytest.mark.asyncio
-    async def test_write_tools_error_in_cloud_mode(self):
-        """Test that write tools return error in cloud mode."""
+    async def test_mkdir_not_registered_in_cloud_mode(self):
+        """SSH-only write tools must not be exposed when there's no SSH transport."""
         from remarkable_mcp.write_tools import register_write_tools
 
-        register_write_tools()
-
-        try:
-            # Ensure NOT in SSH mode
-            old_ssh = os.environ.pop("REMARKABLE_USE_SSH", None)
+        # Cloud mode: neither SSH nor USB web
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env.pop("REMARKABLE_USE_USB_WEB", None)
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
             try:
-                import importlib
-
-                import remarkable_mcp.api
-
-                importlib.reload(remarkable_mcp.api)
-
-                result = await mcp.call_tool(
-                    "remarkable_mkdir",
-                    {
-                        "folder_name": "Test",
-                    },
-                )
-                data = json.loads(result[0][0].text)
-                assert "_error" in data
-                assert data["_error"]["type"] == "ssh_required"
-                assert "SSH mode" in data["_error"]["message"]
+                tools = await mcp.list_tools()
+                names = {t.name for t in tools}
+                # Upload is transport-checked at call time and may still register
+                assert "remarkable_mkdir" not in names
+                assert "remarkable_move" not in names
+                assert "remarkable_rename" not in names
+                assert "remarkable_delete" not in names
             finally:
-                if old_ssh is not None:
-                    os.environ["REMARKABLE_USE_SSH"] = old_ssh
-                importlib.reload(remarkable_mcp.api)
-        finally:
-            for name in [
-                "remarkable_upload",
-                "remarkable_mkdir",
-                "remarkable_move",
-                "remarkable_rename",
-                "remarkable_delete",
-            ]:
-                mcp._tool_manager._tools.pop(name, None)
+                for name in [
+                    "remarkable_upload",
+                    "remarkable_mkdir",
+                    "remarkable_move",
+                    "remarkable_rename",
+                    "remarkable_delete",
+                ]:
+                    mcp._tool_manager._tools.pop(name, None)
 
     @pytest.mark.asyncio
     async def test_all_write_tools_have_xml_docstrings(self):
         """Test that all write tools have XML-structured documentation."""
         from remarkable_mcp.write_tools import register_write_tools
 
-        register_write_tools()
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
 
         try:
             tools = await mcp.list_tools()
@@ -2268,40 +2257,28 @@ class TestWriteTools:
                 mcp._tool_manager._tools.pop(name, None)
 
     @pytest.mark.asyncio
-    async def test_mkdir_error_in_usb_web_mode(self):
-        """Test that mkdir returns SSH-required error in USB web mode."""
+    async def test_mkdir_not_registered_in_usb_web_mode(self):
+        """SSH-only write tools must not be exposed in USB web mode (upload-only)."""
         from remarkable_mcp.write_tools import register_write_tools
 
-        register_write_tools()
-
-        try:
-            old_ssh = os.environ.pop("REMARKABLE_USE_SSH", None)
-            os.environ["REMARKABLE_USE_USB_WEB"] = "1"
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env["REMARKABLE_USE_USB_WEB"] = "1"
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
             try:
-                import importlib
-
-                import remarkable_mcp.api
-
-                importlib.reload(remarkable_mcp.api)
-
-                result = await mcp.call_tool(
-                    "remarkable_mkdir",
-                    {"folder_name": "Test"},
-                )
-                data = json.loads(result[0][0].text)
-                assert "_error" in data
-                assert data["_error"]["type"] == "ssh_required"
+                tools = await mcp.list_tools()
+                names = {t.name for t in tools}
+                assert "remarkable_upload" in names  # upload works on USB web
+                assert "remarkable_mkdir" not in names
+                assert "remarkable_move" not in names
+                assert "remarkable_rename" not in names
+                assert "remarkable_delete" not in names
             finally:
-                if old_ssh is not None:
-                    os.environ["REMARKABLE_USE_SSH"] = old_ssh
-                os.environ.pop("REMARKABLE_USE_USB_WEB", None)
-                importlib.reload(remarkable_mcp.api)
-        finally:
-            for name in [
-                "remarkable_upload",
-                "remarkable_mkdir",
-                "remarkable_move",
-                "remarkable_rename",
-                "remarkable_delete",
-            ]:
-                mcp._tool_manager._tools.pop(name, None)
+                for name in [
+                    "remarkable_upload",
+                    "remarkable_mkdir",
+                    "remarkable_move",
+                    "remarkable_rename",
+                    "remarkable_delete",
+                ]:
+                    mcp._tool_manager._tools.pop(name, None)

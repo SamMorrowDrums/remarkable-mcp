@@ -462,9 +462,9 @@ Or set the environment variable:
 
 ### Safety
 
-- **Upload works in SSH and USB web mode** — cloud mode returns a clear error
-- **mkdir, move, rename, delete require SSH mode** — USB web and cloud return a clear error
-- **Delete is destructive and immediate** — the MCP client is responsible for confirming with the user before invoking
+- **Upload registers in SSH and USB web mode** — cloud mode returns a clear error
+- **mkdir, move, rename, delete are only registered in SSH mode** — they are not exposed at all on USB web or cloud, keeping the tool list scoped to what the active transport actually supports
+- **Delete is destructive and immediate** — the MCP client is responsible for confirming with the user before invoking. All write tools carry `ToolAnnotations(readOnlyHint=False)` (and `destructiveHint=True` for delete) so an agent harness can gate writes at the MCP layer.
 - After each write operation (SSH), the tablet UI restarts automatically to reflect changes
 
 ### Examples

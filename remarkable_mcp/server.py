@@ -264,7 +264,10 @@ from remarkable_mcp import (  # noqa: E402
 # Conditionally register write tools when enabled
 from remarkable_mcp import write_tools as _write_tools  # noqa: E402
 
-if _write_tools.write_enabled():
+if _write_tools.write_enabled() and (
+    os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
+    or os.environ.get("REMARKABLE_USE_USB_WEB", "").lower() in ("1", "true", "yes")
+):
     _write_tools.register_write_tools()
 
 
