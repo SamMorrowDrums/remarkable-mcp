@@ -13,6 +13,7 @@ Inspired by PR #70 from @McSchnizzle. Implemented purely via SSH filesystem
 operations and USB web HTTP endpoints — no external Go binary required.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -308,129 +309,135 @@ def register_write_tools():
         - remarkable_upload("/tmp/report.pdf", document_name="Q4 Report")
         </examples>
         """
-        error = _require_write_transport()
-        if error:
-            return error
 
-        try:
-            # Validate file
-            if not os.path.isfile(file_path):
-                return make_error(
-                    error_type="file_not_found",
-                    message=f"File not found: '{file_path}'",
-                    suggestion="Provide an absolute path to an existing PDF or EPUB file.",
-                )
+        def _impl() -> str:
+            error = _require_write_transport()
+            if error:
+                return error
 
-            ext = os.path.splitext(file_path)[1].lower().lstrip(".")
-            if ext not in ("pdf", "epub"):
-                return make_error(
-                    error_type="unsupported_format",
-                    message=f"Unsupported file format: '.{ext}'",
-                    suggestion="Only PDF and EPUB files can be uploaded to reMarkable.",
-                )
-
-            # USB web mode: simple HTTP upload
-            if _is_usb_web_mode():
-                _upload_via_usb_web(file_path)
-
-                name = document_name or os.path.splitext(os.path.basename(file_path))[0]
-
-                # Clear cached documents
-                client = get_rmapi()
-                client._documents = []
-                client._documents_by_id = {}
-
-                result = {
-                    "uploaded": True,
-                    "name": name,
-                    "format": ext,
-                    "transport": "usb-web",
-                }
-                if parent_folder != "/":
-                    result["note"] = (
-                        "USB web upload places files at root. Use SSH mode for folder placement."
+            try:
+                # Validate file
+                if not os.path.isfile(file_path):
+                    return make_error(
+                        error_type="file_not_found",
+                        message=f"File not found: '{file_path}'",
+                        suggestion="Provide an absolute path to an existing PDF or EPUB file.",
                     )
+
+                ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+                if ext not in ("pdf", "epub"):
+                    return make_error(
+                        error_type="unsupported_format",
+                        message=f"Unsupported file format: '.{ext}'",
+                        suggestion="Only PDF and EPUB files can be uploaded to reMarkable.",
+                    )
+
+                # USB web mode: simple HTTP upload
+                if _is_usb_web_mode():
+                    _upload_via_usb_web(file_path)
+
+                    name = document_name or os.path.splitext(os.path.basename(file_path))[0]
+
+                    # Clear cached documents
+                    client = get_rmapi()
+                    client._documents = []
+                    client._documents_by_id = {}
+
+                    result = {
+                        "uploaded": True,
+                        "name": name,
+                        "format": ext,
+                        "transport": "usb-web",
+                    }
+                    if parent_folder != "/":
+                        result["note"] = (
+                            "USB web upload places files at root. "
+                            "Use SSH mode for folder placement."
+                        )
+                    return make_response(
+                        result,
+                        "Document uploaded via USB web interface. "
+                        "Use remarkable_browse() to verify.",
+                    )
+
+                # SSH mode: full upload with metadata
+                ssh_client = _get_ssh_client()
+                collection = ssh_client.get_meta_items()
+                items_by_id = get_items_by_id(collection)
+
+                # Resolve parent folder
+                parent_id = _resolve_parent_id(parent_folder, items_by_id, collection)
+                if parent_id is None:
+                    folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
+                    return make_error(
+                        error_type="folder_not_found",
+                        message=f"Folder not found: '{parent_folder}'",
+                        suggestion="Use remarkable_browse('/') to see available folders.",
+                        did_you_mean=folders[:5] if folders else None,
+                    )
+
+                # Generate UUID and set name
+                doc_uuid = str(uuid.uuid4())
+                name = document_name or os.path.splitext(os.path.basename(file_path))[0]
+                timestamp_ms = str(int(time.time() * 1000))
+
+                # Upload the file
+                remote_file = f"{XOCHITL_PATH}/{doc_uuid}.{ext}"
+                _upload_file_bytes(ssh_client, file_path, remote_file)
+
+                # Create metadata
+                metadata = {
+                    "visibleName": name,
+                    "type": "DocumentType",
+                    "parent": parent_id,
+                    "deleted": False,
+                    "pinned": False,
+                    "lastModified": timestamp_ms,
+                    "metadatamodified": True,
+                    "modified": True,
+                    "synced": False,
+                    "version": 0,
+                }
+                _write_metadata(ssh_client, doc_uuid, metadata)
+
+                # Create content file
+                content_data = {
+                    "fileType": ext,
+                }
+                _write_content_file(ssh_client, doc_uuid, content_data)
+
+                # Create the document directory (required by xochitl)
+                ssh_client._ssh_command(f"mkdir -p '{XOCHITL_PATH}/{doc_uuid}'")
+
+                # Restart xochitl to pick up changes
+                _restart_xochitl(ssh_client)
+
+                # Clear cached documents so next read picks up the new doc
+                ssh_client._documents = []
+                ssh_client._documents_by_id = {}
+
                 return make_response(
-                    result,
-                    "Document uploaded via USB web interface. Use remarkable_browse() to verify.",
+                    {
+                        "uploaded": True,
+                        "name": name,
+                        "uuid": doc_uuid,
+                        "format": ext,
+                        "parent_folder": parent_folder,
+                        "remote_path": remote_file,
+                        "transport": "ssh",
+                    },
+                    "Document uploaded successfully. Use remarkable_browse() to verify it appears.",
                 )
 
-            # SSH mode: full upload with metadata
-            ssh_client = _get_ssh_client()
-            collection = ssh_client.get_meta_items()
-            items_by_id = get_items_by_id(collection)
-
-            # Resolve parent folder
-            parent_id = _resolve_parent_id(parent_folder, items_by_id, collection)
-            if parent_id is None:
-                folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
+            except Exception as e:
+                transport = "USB web" if _is_usb_web_mode() else "SSH"
                 return make_error(
-                    error_type="folder_not_found",
-                    message=f"Folder not found: '{parent_folder}'",
-                    suggestion="Use remarkable_browse('/') to see available folders.",
-                    did_you_mean=folders[:5] if folders else None,
+                    error_type="upload_failed",
+                    message=f"Upload failed: {e}",
+                    suggestion=f"Check {transport} connection and try again.",
                 )
 
-            # Generate UUID and set name
-            doc_uuid = str(uuid.uuid4())
-            name = document_name or os.path.splitext(os.path.basename(file_path))[0]
-            timestamp_ms = str(int(time.time() * 1000))
-
-            # Upload the file
-            remote_file = f"{XOCHITL_PATH}/{doc_uuid}.{ext}"
-            _upload_file_bytes(ssh_client, file_path, remote_file)
-
-            # Create metadata
-            metadata = {
-                "visibleName": name,
-                "type": "DocumentType",
-                "parent": parent_id,
-                "deleted": False,
-                "pinned": False,
-                "lastModified": timestamp_ms,
-                "metadatamodified": True,
-                "modified": True,
-                "synced": False,
-                "version": 0,
-            }
-            _write_metadata(ssh_client, doc_uuid, metadata)
-
-            # Create content file
-            content_data = {
-                "fileType": ext,
-            }
-            _write_content_file(ssh_client, doc_uuid, content_data)
-
-            # Create the document directory (required by xochitl)
-            ssh_client._ssh_command(f"mkdir -p '{XOCHITL_PATH}/{doc_uuid}'")
-
-            # Restart xochitl to pick up changes
-            _restart_xochitl(ssh_client)
-
-            # Clear cached documents so next read picks up the new doc
-            ssh_client._documents = []
-            ssh_client._documents_by_id = {}
-
-            return make_response(
-                {
-                    "uploaded": True,
-                    "name": name,
-                    "uuid": doc_uuid,
-                    "format": ext,
-                    "parent_folder": parent_folder,
-                    "remote_path": remote_file,
-                    "transport": "ssh",
-                },
-                "Document uploaded successfully. Use remarkable_browse() to verify it appears.",
-            )
-
-        except Exception as e:
-            transport = "USB web" if _is_usb_web_mode() else "SSH"
-            return make_error(
-                error_type="upload_failed",
-                message=f"Upload failed: {e}",
-                suggestion=f"Check {transport} connection and try again.",
-            )
+        return await asyncio.to_thread(_impl)
 
     if _is_ssh_mode():
 
@@ -456,66 +463,70 @@ def register_write_tools():
             - remarkable_mkdir("2024", parent="/Archive")
             </examples>
             """
-            error = _require_ssh_mode()
-            if error:
-                return error
 
-            try:
-                ssh_client = _get_ssh_client()
-                collection = ssh_client.get_meta_items()
-                items_by_id = get_items_by_id(collection)
+            def _impl() -> str:
+                error = _require_ssh_mode()
+                if error:
+                    return error
 
-                # Resolve parent
-                parent_id = _resolve_parent_id(parent, items_by_id, collection)
-                if parent_id is None:
-                    return make_error(
-                        error_type="folder_not_found",
-                        message=f"Parent folder not found: '{parent}'",
-                        suggestion="Use remarkable_browse('/') to see available folders.",
+                try:
+                    ssh_client = _get_ssh_client()
+                    collection = ssh_client.get_meta_items()
+                    items_by_id = get_items_by_id(collection)
+
+                    # Resolve parent
+                    parent_id = _resolve_parent_id(parent, items_by_id, collection)
+                    if parent_id is None:
+                        return make_error(
+                            error_type="folder_not_found",
+                            message=f"Parent folder not found: '{parent}'",
+                            suggestion="Use remarkable_browse('/') to see available folders.",
+                        )
+
+                    # Generate UUID
+                    doc_uuid = str(uuid.uuid4())
+                    timestamp_ms = str(int(time.time() * 1000))
+
+                    # Create metadata for folder
+                    metadata = {
+                        "visibleName": folder_name,
+                        "type": "CollectionType",
+                        "parent": parent_id,
+                        "deleted": False,
+                        "pinned": False,
+                        "lastModified": timestamp_ms,
+                        "metadatamodified": True,
+                        "modified": True,
+                        "synced": False,
+                        "version": 0,
+                    }
+                    _write_metadata(ssh_client, doc_uuid, metadata)
+
+                    # Restart xochitl
+                    _restart_xochitl(ssh_client)
+
+                    # Clear cache
+                    ssh_client._documents = []
+                    ssh_client._documents_by_id = {}
+
+                    return make_response(
+                        {
+                            "created": True,
+                            "folder_name": folder_name,
+                            "uuid": doc_uuid,
+                            "parent": parent,
+                        },
+                        "Folder created. Use remarkable_browse() to verify.",
                     )
 
-                # Generate UUID
-                doc_uuid = str(uuid.uuid4())
-                timestamp_ms = str(int(time.time() * 1000))
+                except Exception as e:
+                    return make_error(
+                        error_type="mkdir_failed",
+                        message=f"Failed to create folder: {e}",
+                        suggestion="Check SSH connection and try again.",
+                    )
 
-                # Create metadata for folder
-                metadata = {
-                    "visibleName": folder_name,
-                    "type": "CollectionType",
-                    "parent": parent_id,
-                    "deleted": False,
-                    "pinned": False,
-                    "lastModified": timestamp_ms,
-                    "metadatamodified": True,
-                    "modified": True,
-                    "synced": False,
-                    "version": 0,
-                }
-                _write_metadata(ssh_client, doc_uuid, metadata)
-
-                # Restart xochitl
-                _restart_xochitl(ssh_client)
-
-                # Clear cache
-                ssh_client._documents = []
-                ssh_client._documents_by_id = {}
-
-                return make_response(
-                    {
-                        "created": True,
-                        "folder_name": folder_name,
-                        "uuid": doc_uuid,
-                        "parent": parent,
-                    },
-                    "Folder created. Use remarkable_browse() to verify.",
-                )
-
-            except Exception as e:
-                return make_error(
-                    error_type="mkdir_failed",
-                    message=f"Failed to create folder: {e}",
-                    suggestion="Check SSH connection and try again.",
-                )
+            return await asyncio.to_thread(_impl)
 
         @mcp.tool(annotations=MOVE_ANNOTATIONS)
         async def remarkable_move(
@@ -539,95 +550,99 @@ def register_write_tools():
             - remarkable_move("Old Project", "/Archive/2023")
             </examples>
             """
-            error = _require_ssh_mode()
-            if error:
-                return error
 
-            try:
-                ssh_client = _get_ssh_client()
-                collection = ssh_client.get_meta_items()
-                items_by_id = get_items_by_id(collection)
+            def _impl() -> str:
+                error = _require_ssh_mode()
+                if error:
+                    return error
 
-                # Find the document
-                target = _resolve_document(document, collection, items_by_id)
-                if not target:
-                    from remarkable_mcp.extract import find_similar_documents
+                try:
+                    ssh_client = _get_ssh_client()
+                    collection = ssh_client.get_meta_items()
+                    items_by_id = get_items_by_id(collection)
 
-                    similar = find_similar_documents(document, collection)
-                    return make_error(
-                        error_type="document_not_found",
-                        message=f"Document not found: '{document}'",
-                        suggestion="Use remarkable_browse() to find the correct name.",
-                        did_you_mean=similar if similar else None,
-                    )
+                    # Find the document
+                    target = _resolve_document(document, collection, items_by_id)
+                    if not target:
+                        from remarkable_mcp.extract import find_similar_documents
 
-                # Find the destination folder
-                dest_id = _resolve_parent_id(dest_folder, items_by_id, collection)
-                if dest_id is None:
-                    return make_error(
-                        error_type="folder_not_found",
-                        message=f"Destination folder not found: '{dest_folder}'",
-                        suggestion="Use remarkable_browse('/') to see available folders.",
-                    )
-
-                # Prevent moving a folder into itself or a descendant
-                if target.is_folder:
-                    if dest_id == target.ID:
+                        similar = find_similar_documents(document, collection)
                         return make_error(
-                            error_type="invalid_move",
-                            message="Cannot move a folder into itself",
-                            suggestion="Choose a different destination folder.",
+                            error_type="document_not_found",
+                            message=f"Document not found: '{document}'",
+                            suggestion="Use remarkable_browse() to find the correct name.",
+                            did_you_mean=similar if similar else None,
                         )
-                    # Walk up from dest to check for cycles
-                    check_id = dest_id
-                    while check_id and check_id in items_by_id:
-                        if check_id == target.ID:
+
+                    # Find the destination folder
+                    dest_id = _resolve_parent_id(dest_folder, items_by_id, collection)
+                    if dest_id is None:
+                        return make_error(
+                            error_type="folder_not_found",
+                            message=f"Destination folder not found: '{dest_folder}'",
+                            suggestion="Use remarkable_browse('/') to see available folders.",
+                        )
+
+                    # Prevent moving a folder into itself or a descendant
+                    if target.is_folder:
+                        if dest_id == target.ID:
                             return make_error(
                                 error_type="invalid_move",
-                                message="Cannot move a folder into one of its subfolders",
-                                suggestion=(
-                                    "Choose a destination that is not inside the folder "
-                                    "being moved."
-                                ),
+                                message="Cannot move a folder into itself",
+                                suggestion="Choose a different destination folder.",
                             )
-                        parent_item = items_by_id[check_id]
-                        check_id = parent_item.Parent if hasattr(parent_item, "Parent") else ""
+                        # Walk up from dest to check for cycles
+                        check_id = dest_id
+                        while check_id and check_id in items_by_id:
+                            if check_id == target.ID:
+                                return make_error(
+                                    error_type="invalid_move",
+                                    message="Cannot move a folder into one of its subfolders",
+                                    suggestion=(
+                                        "Choose a destination that is not inside the folder "
+                                        "being moved."
+                                    ),
+                                )
+                            parent_item = items_by_id[check_id]
+                            check_id = parent_item.Parent if hasattr(parent_item, "Parent") else ""
 
-                # Read existing metadata
-                meta_content = ssh_client._scp_download(f"{XOCHITL_PATH}/{target.ID}.metadata")
-                metadata = json.loads(meta_content.decode("utf-8"))
+                    # Read existing metadata
+                    meta_content = ssh_client._scp_download(f"{XOCHITL_PATH}/{target.ID}.metadata")
+                    metadata = json.loads(meta_content.decode("utf-8"))
 
-                old_path = get_item_path(target, items_by_id)
+                    old_path = get_item_path(target, items_by_id)
 
-                # Update parent
-                metadata["parent"] = dest_id
-                metadata["lastModified"] = str(int(time.time() * 1000))
-                metadata["metadatamodified"] = True
-                _write_metadata(ssh_client, target.ID, metadata)
+                    # Update parent
+                    metadata["parent"] = dest_id
+                    metadata["lastModified"] = str(int(time.time() * 1000))
+                    metadata["metadatamodified"] = True
+                    _write_metadata(ssh_client, target.ID, metadata)
 
-                # Restart xochitl
-                _restart_xochitl(ssh_client)
+                    # Restart xochitl
+                    _restart_xochitl(ssh_client)
 
-                # Clear cache
-                ssh_client._documents = []
-                ssh_client._documents_by_id = {}
+                    # Clear cache
+                    ssh_client._documents = []
+                    ssh_client._documents_by_id = {}
 
-                return make_response(
-                    {
-                        "moved": True,
-                        "name": target.VissibleName,
-                        "from": old_path,
-                        "to": dest_folder,
-                    },
-                    "Document moved. Use remarkable_browse() to verify.",
-                )
+                    return make_response(
+                        {
+                            "moved": True,
+                            "name": target.VissibleName,
+                            "from": old_path,
+                            "to": dest_folder,
+                        },
+                        "Document moved. Use remarkable_browse() to verify.",
+                    )
 
-            except Exception as e:
-                return make_error(
-                    error_type="move_failed",
-                    message=f"Failed to move document: {e}",
-                    suggestion="Check SSH connection and try again.",
-                )
+                except Exception as e:
+                    return make_error(
+                        error_type="move_failed",
+                        message=f"Failed to move document: {e}",
+                        suggestion="Check SSH connection and try again.",
+                    )
+
+            return await asyncio.to_thread(_impl)
 
         @mcp.tool(annotations=RENAME_ANNOTATIONS)
         async def remarkable_rename(
@@ -651,62 +666,66 @@ def register_write_tools():
             - remarkable_rename("/Work/Draft", "Final Report")
             </examples>
             """
-            error = _require_ssh_mode()
-            if error:
-                return error
 
-            try:
-                ssh_client = _get_ssh_client()
-                collection = ssh_client.get_meta_items()
-                items_by_id = get_items_by_id(collection)
+            def _impl() -> str:
+                error = _require_ssh_mode()
+                if error:
+                    return error
 
-                # Find the document
-                target = _resolve_document(document, collection, items_by_id)
-                if not target:
-                    from remarkable_mcp.extract import find_similar_documents
+                try:
+                    ssh_client = _get_ssh_client()
+                    collection = ssh_client.get_meta_items()
+                    items_by_id = get_items_by_id(collection)
 
-                    similar = find_similar_documents(document, collection)
-                    return make_error(
-                        error_type="document_not_found",
-                        message=f"Document not found: '{document}'",
-                        suggestion="Use remarkable_browse() to find the correct name.",
-                        did_you_mean=similar if similar else None,
+                    # Find the document
+                    target = _resolve_document(document, collection, items_by_id)
+                    if not target:
+                        from remarkable_mcp.extract import find_similar_documents
+
+                        similar = find_similar_documents(document, collection)
+                        return make_error(
+                            error_type="document_not_found",
+                            message=f"Document not found: '{document}'",
+                            suggestion="Use remarkable_browse() to find the correct name.",
+                            did_you_mean=similar if similar else None,
+                        )
+
+                    # Read existing metadata
+                    meta_content = ssh_client._scp_download(f"{XOCHITL_PATH}/{target.ID}.metadata")
+                    metadata = json.loads(meta_content.decode("utf-8"))
+
+                    old_name = metadata.get("visibleName", target.VissibleName)
+
+                    # Update name
+                    metadata["visibleName"] = new_name
+                    metadata["lastModified"] = str(int(time.time() * 1000))
+                    metadata["metadatamodified"] = True
+                    _write_metadata(ssh_client, target.ID, metadata)
+
+                    # Restart xochitl
+                    _restart_xochitl(ssh_client)
+
+                    # Clear cache
+                    ssh_client._documents = []
+                    ssh_client._documents_by_id = {}
+
+                    return make_response(
+                        {
+                            "renamed": True,
+                            "old_name": old_name,
+                            "new_name": new_name,
+                        },
+                        "Document renamed. Use remarkable_browse() to verify.",
                     )
 
-                # Read existing metadata
-                meta_content = ssh_client._scp_download(f"{XOCHITL_PATH}/{target.ID}.metadata")
-                metadata = json.loads(meta_content.decode("utf-8"))
+                except Exception as e:
+                    return make_error(
+                        error_type="rename_failed",
+                        message=f"Failed to rename document: {e}",
+                        suggestion="Check SSH connection and try again.",
+                    )
 
-                old_name = metadata.get("visibleName", target.VissibleName)
-
-                # Update name
-                metadata["visibleName"] = new_name
-                metadata["lastModified"] = str(int(time.time() * 1000))
-                metadata["metadatamodified"] = True
-                _write_metadata(ssh_client, target.ID, metadata)
-
-                # Restart xochitl
-                _restart_xochitl(ssh_client)
-
-                # Clear cache
-                ssh_client._documents = []
-                ssh_client._documents_by_id = {}
-
-                return make_response(
-                    {
-                        "renamed": True,
-                        "old_name": old_name,
-                        "new_name": new_name,
-                    },
-                    "Document renamed. Use remarkable_browse() to verify.",
-                )
-
-            except Exception as e:
-                return make_error(
-                    error_type="rename_failed",
-                    message=f"Failed to rename document: {e}",
-                    suggestion="Check SSH connection and try again.",
-                )
+            return await asyncio.to_thread(_impl)
 
         @mcp.tool(annotations=DELETE_ANNOTATIONS)
         async def remarkable_delete(document: str) -> str:
@@ -728,60 +747,64 @@ def register_write_tools():
             - remarkable_delete("/Books/Archive/Old Draft")
             </examples>
             """
-            error = _require_ssh_mode()
-            if error:
-                return error
 
-            try:
-                ssh_client = _get_ssh_client()
-                collection = ssh_client.get_meta_items()
-                items_by_id = get_items_by_id(collection)
+            def _impl() -> str:
+                error = _require_ssh_mode()
+                if error:
+                    return error
 
-                # Find the document
-                target = _resolve_document(document, collection, items_by_id)
-                if not target:
-                    from remarkable_mcp.extract import find_similar_documents
+                try:
+                    ssh_client = _get_ssh_client()
+                    collection = ssh_client.get_meta_items()
+                    items_by_id = get_items_by_id(collection)
 
-                    similar = find_similar_documents(document, collection)
-                    return make_error(
-                        error_type="document_not_found",
-                        message=f"Document not found: '{document}'",
-                        suggestion="Use remarkable_browse() to find the correct name.",
-                        did_you_mean=similar if similar else None,
+                    # Find the document
+                    target = _resolve_document(document, collection, items_by_id)
+                    if not target:
+                        from remarkable_mcp.extract import find_similar_documents
+
+                        similar = find_similar_documents(document, collection)
+                        return make_error(
+                            error_type="document_not_found",
+                            message=f"Document not found: '{document}'",
+                            suggestion="Use remarkable_browse() to find the correct name.",
+                            did_you_mean=similar if similar else None,
+                        )
+
+                    doc_path = get_item_path(target, items_by_id)
+
+                    # Read existing metadata
+                    meta_content = ssh_client._scp_download(f"{XOCHITL_PATH}/{target.ID}.metadata")
+                    metadata = json.loads(meta_content.decode("utf-8"))
+
+                    # Mark as deleted
+                    metadata["deleted"] = True
+                    metadata["lastModified"] = str(int(time.time() * 1000))
+                    metadata["metadatamodified"] = True
+                    _write_metadata(ssh_client, target.ID, metadata)
+
+                    # Restart xochitl
+                    _restart_xochitl(ssh_client)
+
+                    # Clear cache
+                    ssh_client._documents = []
+                    ssh_client._documents_by_id = {}
+
+                    return make_response(
+                        {
+                            "deleted": True,
+                            "name": target.VissibleName,
+                            "path": doc_path,
+                            "type": "folder" if target.is_folder else "document",
+                        },
+                        "Document deleted. It will no longer appear on the tablet.",
                     )
 
-                doc_path = get_item_path(target, items_by_id)
+                except Exception as e:
+                    return make_error(
+                        error_type="delete_failed",
+                        message=f"Failed to delete document: {e}",
+                        suggestion="Check SSH connection and try again.",
+                    )
 
-                # Read existing metadata
-                meta_content = ssh_client._scp_download(f"{XOCHITL_PATH}/{target.ID}.metadata")
-                metadata = json.loads(meta_content.decode("utf-8"))
-
-                # Mark as deleted
-                metadata["deleted"] = True
-                metadata["lastModified"] = str(int(time.time() * 1000))
-                metadata["metadatamodified"] = True
-                _write_metadata(ssh_client, target.ID, metadata)
-
-                # Restart xochitl
-                _restart_xochitl(ssh_client)
-
-                # Clear cache
-                ssh_client._documents = []
-                ssh_client._documents_by_id = {}
-
-                return make_response(
-                    {
-                        "deleted": True,
-                        "name": target.VissibleName,
-                        "path": doc_path,
-                        "type": "folder" if target.is_folder else "document",
-                    },
-                    "Document deleted. It will no longer appear on the tablet.",
-                )
-
-            except Exception as e:
-                return make_error(
-                    error_type="delete_failed",
-                    message=f"Failed to delete document: {e}",
-                    suggestion="Check SSH connection and try again.",
-                )
+            return await asyncio.to_thread(_impl)

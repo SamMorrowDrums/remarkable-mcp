@@ -30,6 +30,7 @@ from remarkable_mcp.api import (
     get_items_by_parent,
     get_rmapi,
 )
+from remarkable_mcp.concurrency import run_blocking
 from remarkable_mcp.extract import (
     cache_page_ocr,
     extract_text_from_document_zip,
@@ -297,7 +298,7 @@ async def remarkable_read(
     """
     try:
         client = get_rmapi()
-        collection = client.get_meta_items()
+        collection = await run_blocking(client.get_meta_items)
         items_by_id = get_items_by_id(collection)
 
         # Validate parameters
@@ -346,7 +347,7 @@ async def remarkable_read(
             )
 
         doc_path = get_item_path(target_doc, items_by_id)
-        file_type = get_file_type(client, target_doc)
+        file_type = await run_blocking(get_file_type, client, target_doc)
 
         # Collect content based on content_type
         text_parts = []
@@ -354,7 +355,7 @@ async def remarkable_read(
 
         # Get raw PDF/EPUB content if requested or for "text" mode
         if content_type in ("text", "raw") and file_type in ("pdf", "epub"):
-            raw_data = download_raw_file(client, target_doc, file_type)
+            raw_data = await run_blocking(download_raw_file, client, target_doc, file_type)
             if raw_data:
                 raw_available = True
                 with tempfile.NamedTemporaryFile(suffix=f".{file_type}", delete=False) as tmp:
@@ -362,9 +363,9 @@ async def remarkable_read(
                     tmp_path = Path(tmp.name)
                 try:
                     if file_type == "pdf":
-                        raw_text = extract_text_from_pdf(tmp_path)
+                        raw_text = await run_blocking(extract_text_from_pdf, tmp_path)
                     else:
-                        raw_text = extract_text_from_epub(tmp_path)
+                        raw_text = await run_blocking(extract_text_from_epub, tmp_path)
                     if raw_text:
                         text_parts.append(raw_text)
                 finally:
@@ -397,16 +398,18 @@ async def remarkable_read(
             # For sampling OCR: use per-page caching and only OCR requested page
             if use_sampling:
                 # Check per-page cache first
-                cached_text = get_cached_page_ocr(target_doc.ID, page, "sampling")
+                cached_text = await run_blocking(
+                    get_cached_page_ocr, target_doc.ID, page, "sampling"
+                )
                 if cached_text is not None:
                     # We have cached OCR for this page
                     # Still need to get total page count
-                    raw_doc = client.download(target_doc)
+                    raw_doc = await run_blocking(client.download, target_doc)
                     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                         tmp.write(raw_doc)
                         tmp_path = Path(tmp.name)
                     try:
-                        total_notebook_pages = get_document_page_count(tmp_path)
+                        total_notebook_pages = await run_blocking(get_document_page_count, tmp_path)
                     finally:
                         tmp_path.unlink(missing_ok=True)
 
@@ -416,13 +419,13 @@ async def remarkable_read(
                     ocr_backend_used = "sampling"
                 else:
                     # No cache - render and OCR just the requested page
-                    raw_doc = client.download(target_doc)
+                    raw_doc = await run_blocking(client.download, target_doc)
                     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                         tmp.write(raw_doc)
                         tmp_path = Path(tmp.name)
 
                     try:
-                        total_notebook_pages = get_document_page_count(tmp_path)
+                        total_notebook_pages = await run_blocking(get_document_page_count, tmp_path)
 
                         if page > total_notebook_pages:
                             return make_error(
@@ -434,13 +437,19 @@ async def remarkable_read(
                             )
 
                         # Render just the requested page
-                        png_data = render_page_from_document_zip(tmp_path, page)
+                        png_data = await run_blocking(render_page_from_document_zip, tmp_path, page)
                         if png_data:
                             # OCR the single page
                             ocr_text = await ocr_via_sampling(ctx, png_data)
                             if ocr_text:
                                 # Cache the result
-                                cache_page_ocr(target_doc.ID, page, "sampling", ocr_text)
+                                await run_blocking(
+                                    cache_page_ocr,
+                                    target_doc.ID,
+                                    page,
+                                    "sampling",
+                                    ocr_text,
+                                )
                                 # Build notebook_pages list
                                 notebook_pages = [""] * total_notebook_pages
                                 notebook_pages[page - 1] = ocr_text
@@ -450,7 +459,12 @@ async def remarkable_read(
 
             # For non-sampling: check full document cache or extract all
             if not use_sampling and is_notebook and include_ocr:
-                cached = get_cached_ocr_result(target_doc.ID, include_ocr=True, ocr_backend=None)
+                cached = await run_blocking(
+                    get_cached_ocr_result,
+                    target_doc.ID,
+                    include_ocr=True,
+                    ocr_backend=None,
+                )
                 if cached and cached.get("handwritten_text"):
                     notebook_pages = cached["handwritten_text"]
                     ocr_backend_used = cached.get("ocr_backend")
@@ -458,14 +472,17 @@ async def remarkable_read(
 
             # If not cached (non-sampling), perform extraction
             if not notebook_pages and is_notebook:
-                raw_doc = client.download(target_doc)
+                raw_doc = await run_blocking(client.download, target_doc)
                 with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                     tmp.write(raw_doc)
                     tmp_path = Path(tmp.name)
 
                 try:
-                    content = extract_text_from_document_zip(
-                        tmp_path, include_ocr=include_ocr, doc_id=target_doc.ID
+                    content = await run_blocking(
+                        extract_text_from_document_zip,
+                        tmp_path,
+                        include_ocr=include_ocr,
+                        doc_id=target_doc.ID,
                     )
                     if content.get("handwritten_text"):
                         notebook_pages = content["handwritten_text"]
@@ -477,13 +494,16 @@ async def remarkable_read(
             if not (is_notebook and notebook_pages):
                 if content is None:
                     # Need to extract if we haven't already
-                    raw_doc = client.download(target_doc)
+                    raw_doc = await run_blocking(client.download, target_doc)
                     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                         tmp.write(raw_doc)
                         tmp_path = Path(tmp.name)
                     try:
-                        content = extract_text_from_document_zip(
-                            tmp_path, include_ocr=include_ocr, doc_id=target_doc.ID
+                        content = await run_blocking(
+                            extract_text_from_document_zip,
+                            tmp_path,
+                            include_ocr=include_ocr,
+                            doc_id=target_doc.ID,
                         )
                     finally:
                         tmp_path.unlink(missing_ok=True)
@@ -748,7 +768,7 @@ async def remarkable_read(
 
 
 @mcp.tool(annotations=BROWSE_ANNOTATIONS)
-def remarkable_browse(
+async def remarkable_browse(
     path: str = "/", query: Optional[str] = None, tags: Optional[List[str]] = None
 ) -> str:
     """
@@ -784,7 +804,7 @@ def remarkable_browse(
     """
     try:
         client = get_rmapi()
-        collection = client.get_meta_items()
+        collection = await run_blocking(client.get_meta_items)
         items_by_id = get_items_by_id(collection)
         items_by_parent = get_items_by_parent(collection)
 
@@ -989,7 +1009,7 @@ def remarkable_browse(
 
 
 @mcp.tool(annotations=RECENT_ANNOTATIONS)
-def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
+async def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
     """
     <usecase>Get your most recently modified documents.</usecase>
     <instructions>
@@ -1012,7 +1032,7 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
     """
     try:
         client = get_rmapi()
-        collection = client.get_meta_items()
+        collection = await run_blocking(client.get_meta_items)
         items_by_id = get_items_by_id(collection)
 
         # Clamp limit - lower max when previews enabled (expensive operation)
@@ -1052,21 +1072,24 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
 
             if include_preview:
                 # Download and extract preview (skip notebooks - they need slow OCR)
-                file_type = get_file_type(client, doc)
+                file_type = await run_blocking(get_file_type, client, doc)
                 if file_type == "notebook":
                     # Notebooks need OCR for preview, skip for performance
                     doc_info["preview_skipped"] = "notebook (use remarkable_read with include_ocr)"
                 else:
                     # PDFs and EPUBs have extractable text - fast to preview
                     try:
-                        raw_doc = client.download(doc)
+                        raw_doc = await run_blocking(client.download, doc)
                         with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                             tmp.write(raw_doc)
                             tmp_path = Path(tmp.name)
 
                         try:
-                            content = extract_text_from_document_zip(
-                                tmp_path, include_ocr=False, doc_id=doc.ID
+                            content = await run_blocking(
+                                extract_text_from_document_zip,
+                                tmp_path,
+                                include_ocr=False,
+                                doc_id=doc.ID,
                             )
                             preview_text = "\n".join(content["typed_text"])[:200]
                             if preview_text:
@@ -1148,7 +1171,7 @@ async def remarkable_search(
         limit = min(max(1, limit), 5)
 
         # First, find matching documents
-        browse_result = remarkable_browse(query=query, tags=tags)
+        browse_result = await remarkable_browse(query=query, tags=tags)
         browse_data = json.loads(browse_result)
 
         if "_error" in browse_data:
@@ -1234,7 +1257,7 @@ async def remarkable_search(
 
 
 @mcp.tool(annotations=STATUS_ANNOTATIONS)
-def remarkable_status() -> str:
+async def remarkable_status() -> str:
     """
     <usecase>Check connection status and authentication with reMarkable Cloud.</usecase>
     <instructions>
@@ -1274,7 +1297,7 @@ def remarkable_status() -> str:
 
     try:
         client = get_rmapi()
-        collection = client.get_meta_items()
+        collection = await run_blocking(client.get_meta_items)
         items_by_id = get_items_by_id(collection)
 
         root = _get_root_path()
@@ -1417,10 +1440,10 @@ async def remarkable_image(
     try:
         # Resolve background color: use provided value or get from env/default
         if background is None:
-            background = get_background_color()
+            background = await run_blocking(get_background_color)
 
         client = get_rmapi()
-        collection = client.get_meta_items()
+        collection = await run_blocking(client.get_meta_items)
         items_by_id = get_items_by_id(collection)
 
         root = _get_root_path()
@@ -1464,7 +1487,7 @@ async def remarkable_image(
             )
 
         # Download the document
-        raw_doc = client.download(target_doc)
+        raw_doc = await run_blocking(client.download, target_doc)
         with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
             tmp.write(raw_doc)
             tmp_path = Path(tmp.name)
@@ -1480,7 +1503,7 @@ async def remarkable_image(
                 )
 
             # Get total page count
-            total_pages = get_document_page_count(tmp_path)
+            total_pages = await run_blocking(get_document_page_count, tmp_path)
 
             if total_pages == 0:
                 return make_error(
@@ -1514,8 +1537,11 @@ async def remarkable_image(
                         "returning annotation-only SVG."
                     )
 
-                svg_content = render_page_from_document_zip_svg(
-                    tmp_path, page, background_color=background
+                svg_content = await run_blocking(
+                    render_page_from_document_zip_svg,
+                    tmp_path,
+                    page,
+                    background_color=background,
                 )
 
                 if svg_content is None:
@@ -1566,13 +1592,19 @@ async def remarkable_image(
             else:
                 # PNG format
                 if render_merged:
-                    png_data, merged_note = render_merged_page_from_document_zip(
-                        tmp_path, page, background_color=background
+                    png_data, merged_note = await run_blocking(
+                        render_merged_page_from_document_zip,
+                        tmp_path,
+                        page,
+                        background_color=background,
                     )
                     is_merged = png_data is not None and merged_note is None
                 else:
-                    png_data = render_page_from_document_zip(
-                        tmp_path, page, background_color=background
+                    png_data = await run_blocking(
+                        render_page_from_document_zip,
+                        tmp_path,
+                        page,
+                        background_color=background,
                     )
 
                 if png_data is None:
@@ -1609,12 +1641,12 @@ async def remarkable_image(
                             if backend in ("sampling", "google") or (
                                 backend == "auto" and os.environ.get("GOOGLE_VISION_API_KEY")
                             ):
-                                ocr_text = _ocr_png_google_vision(ocr_tmp_path)
+                                ocr_text = await run_blocking(_ocr_png_google_vision, ocr_tmp_path)
                                 if ocr_text:
                                     ocr_backend_used = "google"
                             # Fall through to Tesseract if Google not available or returned None
                             if ocr_text is None:
-                                ocr_text = _ocr_png_tesseract(ocr_tmp_path)
+                                ocr_text = await run_blocking(_ocr_png_tesseract, ocr_tmp_path)
                                 if ocr_text:
                                     ocr_backend_used = "tesseract"
                         finally:
