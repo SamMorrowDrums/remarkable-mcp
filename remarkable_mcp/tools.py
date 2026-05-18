@@ -1105,7 +1105,7 @@ def remarkable_recent(limit: int = 10, include_preview: bool = False) -> str:
 
 
 @mcp.tool(annotations=SEARCH_ANNOTATIONS)
-def remarkable_search(
+async def remarkable_search(
     query: str,
     grep: Optional[str] = None,
     limit: int = 5,
@@ -1177,7 +1177,7 @@ def remarkable_search(
                 doc_result["tags"] = doc["tags"]
 
             try:
-                read_result = remarkable_read(
+                read_result = await remarkable_read(
                     document=doc["path"],
                     page=1,
                     grep=grep,
