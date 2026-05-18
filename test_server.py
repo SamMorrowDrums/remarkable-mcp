@@ -466,6 +466,11 @@ class TestRemarkableRecent:
 class TestRemarkableSearch:
     """Test remarkable_search tool."""
 
+    @pytest.fixture(autouse=True)
+    def _clear_root_path(self, monkeypatch):
+        # Ensure tests are independent of any ambient REMARKABLE_ROOT_PATH
+        monkeypatch.delenv("REMARKABLE_ROOT_PATH", raising=False)
+
     @pytest.mark.asyncio
     @patch("remarkable_mcp.tools.get_rmapi")
     async def test_search_awaits_remarkable_read(self, mock_get_rmapi):
