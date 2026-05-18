@@ -457,6 +457,19 @@ Default is `#FBFBFB` (reMarkable paper color). This affects both the `remarkable
 
 ---
 
+### Retry Configuration
+
+Cloud API requests automatically retry on transient failures (HTTP 429, 500, 502, 503, 504) and network errors with exponential backoff and jitter. You can tune this via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REMARKABLE_RETRY_ATTEMPTS` | `3` | Maximum number of request attempts (minimum 1) |
+| `REMARKABLE_RETRY_DELAY` | `2.0` | Base delay in seconds for exponential backoff |
+
+The retry logic honours the `Retry-After` header from rate-limited responses, capped at 20 seconds. Auth failures (401) are not retried — they trigger automatic token renewal instead.
+
+---
+
 ## Use Cases
 
 ### Research & Writing
