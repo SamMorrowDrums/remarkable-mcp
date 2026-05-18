@@ -8,12 +8,25 @@ Based on the protocol used by ddvk/rmapi.
 """
 
 import json
+import logging
+import math
+import os
+import random
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+
+logger = logging.getLogger(__name__)
+
+# Retry configuration
+DEFAULT_RETRY_ATTEMPTS = 3
+DEFAULT_RETRY_DELAY = 2.0
+MAX_RETRY_DELAY = 20.0
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 # API endpoints
 # Note: my.remarkable.com endpoints redirect to doesnotexist.remarkable.com
@@ -25,6 +38,104 @@ USER_TOKEN_URL = f"{AUTH_HOST}/token/json/2/user/new"
 SYNC_HOST = "https://internal.cloud.remarkable.com"
 ROOT_URL = f"{SYNC_HOST}/sync/v4/root"
 FILES_URL = f"{SYNC_HOST}/sync/v3/files"
+
+
+def _get_retry_attempts() -> int:
+    """Get the number of retry attempts from env or default."""
+    try:
+        val = int(os.environ.get("REMARKABLE_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS))
+        return max(val, 1)
+    except (ValueError, TypeError):
+        return DEFAULT_RETRY_ATTEMPTS
+
+
+def _get_retry_delay() -> float:
+    """Get the base retry delay from env or default."""
+    try:
+        val = float(os.environ.get("REMARKABLE_RETRY_DELAY", DEFAULT_RETRY_DELAY))
+        return max(val, 0.0)
+    except (ValueError, TypeError):
+        return DEFAULT_RETRY_DELAY
+
+
+def _parse_retry_after(response: requests.Response) -> Optional[float]:
+    """Parse the Retry-After header, returning seconds or None.
+
+    Only the numeric form (seconds) is supported; HTTP-date values
+    and invalid/negative/non-finite values fall back to jittered backoff.
+    """
+    header = response.headers.get("Retry-After")
+    if header is None:
+        return None
+    try:
+        val = float(header)
+    except (ValueError, TypeError):
+        return None
+    if not math.isfinite(val) or val < 0:
+        return None
+    return min(val, MAX_RETRY_DELAY)
+
+
+def _compute_sleep(base_delay: float, attempt: int) -> float:
+    """Compute sleep duration with exponential backoff and full jitter.
+
+    Uses AWS's "full jitter" strategy: sleep uniformly in [0, cap] where
+    cap = min(base * 2**attempt, MAX_RETRY_DELAY). This avoids
+    thundering-herd retries from concurrent clients.
+    """
+    return random.uniform(0, min(base_delay * 2**attempt, MAX_RETRY_DELAY))
+
+
+def _http_request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
+    """
+    Make an HTTP request with exponential backoff and jitter.
+
+    Retries on ConnectionError, Timeout, and retryable HTTP status codes
+    (429, 500, 502, 503, 504). Does NOT retry on 401 or other 4xx errors.
+    """
+    max_attempts = _get_retry_attempts()
+    base_delay = _get_retry_delay()
+    last_exception: Optional[Exception] = None
+
+    for attempt in range(max_attempts):
+        try:
+            response = requests.request(method, url, **kwargs)
+
+            if response.status_code not in RETRYABLE_STATUS_CODES:
+                return response
+
+            if attempt < max_attempts - 1:
+                retry_after = _parse_retry_after(response)
+                sleep_time = (
+                    retry_after if retry_after is not None else _compute_sleep(base_delay, attempt)
+                )
+                logger.warning(
+                    "Retryable HTTP %d from %s (attempt %d/%d), sleeping %.1fs",
+                    response.status_code,
+                    url,
+                    attempt + 1,
+                    max_attempts,
+                    sleep_time,
+                )
+                time.sleep(sleep_time)
+            else:
+                return response
+
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last_exception = exc
+            if attempt < max_attempts - 1:
+                sleep_time = _compute_sleep(base_delay, attempt)
+                logger.warning(
+                    "%s for %s (attempt %d/%d), sleeping %.1fs",
+                    type(exc).__name__,
+                    url,
+                    attempt + 1,
+                    max_attempts,
+                    sleep_time,
+                )
+                time.sleep(sleep_time)
+
+    raise last_exception  # noqa: TRY302  # exhausted retries, re-raise last connection error
 
 
 @dataclass
@@ -96,7 +207,7 @@ class RemarkableClient:
         headers = {"Authorization": f"Bearer {self.device_token}"}
 
         try:
-            response = requests.post(USER_TOKEN_URL, headers=headers, timeout=30)
+            response = _http_request_with_retry("POST", USER_TOKEN_URL, headers=headers, timeout=30)
             if response.status_code == 200 and response.text:
                 self.user_token = response.text.strip()
                 return self.user_token
@@ -115,13 +226,13 @@ class RemarkableClient:
             self.renew_token()
 
         headers = {"Authorization": f"Bearer {self.user_token}"}
-        response = requests.request(method, url, headers=headers, timeout=60)
+        response = _http_request_with_retry(method, url, headers=headers, timeout=60)
 
         if response.status_code == 401:
             # Token expired, try to renew
             self.renew_token()
             headers = {"Authorization": f"Bearer {self.user_token}"}
-            response = requests.request(method, url, headers=headers, timeout=60)
+            response = _http_request_with_retry(method, url, headers=headers, timeout=60)
 
         return response
 
@@ -306,7 +417,7 @@ def register_device(one_time_code: str) -> Dict[str, str]:
     }
 
     try:
-        response = requests.post(DEVICE_TOKEN_URL, json=body, timeout=30)
+        response = _http_request_with_retry("POST", DEVICE_TOKEN_URL, json=body, timeout=30)
         if response.status_code == 200 and response.text:
             device_token = response.text.strip()
             return {"devicetoken": device_token, "usertoken": ""}

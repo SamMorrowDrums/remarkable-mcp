@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 
 from remarkable_mcp.api import (
     get_item_path,
@@ -627,15 +628,16 @@ class TestRemarkableImage:
 class TestRegistration:
     """Test registration functionality."""
 
-    @patch("requests.post")
+    @patch("remarkable_mcp.sync.time.sleep")
+    @patch("remarkable_mcp.sync.requests.request")
     @patch("pathlib.Path.write_text")
-    def test_register_and_get_token(self, mock_write_text, mock_post):
+    def test_register_and_get_token(self, mock_write_text, mock_request, mock_sleep):
         """Test registration process."""
         # Mock successful API response
         mock_response = Mock()
         mock_response.status_code = 200
         mock_response.text = "test_device_token_12345"
-        mock_post.return_value = mock_response
+        mock_request.return_value = mock_response
 
         token = register_and_get_token("test_code")
 
@@ -647,18 +649,19 @@ class TestRegistration:
         assert "usertoken" in token_data
 
         # Verify API was called
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        assert "webapp-prod.cloud.remarkable.engineering" in call_args[0][0]
+        mock_request.assert_called_once()
+        call_args = mock_request.call_args
+        assert "webapp-prod.cloud.remarkable.engineering" in call_args[0][1]
 
-    @patch("requests.post")
-    def test_register_invalid_code(self, mock_post):
+    @patch("remarkable_mcp.sync.time.sleep")
+    @patch("remarkable_mcp.sync.requests.request")
+    def test_register_invalid_code(self, mock_request, mock_sleep):
         """Test registration with invalid/expired code."""
         # Mock 400 response (invalid code)
         mock_response = Mock()
         mock_response.status_code = 400
         mock_response.text = ""
-        mock_post.return_value = mock_response
+        mock_request.return_value = mock_response
 
         with pytest.raises(RuntimeError, match="Registration failed"):
             register_and_get_token("invalid_code")
@@ -1677,3 +1680,146 @@ class TestUSBWebInterface:
                 import remarkable_mcp.api
 
                 importlib.reload(remarkable_mcp.api)
+
+
+# =============================================================================
+# Test Retry Backoff
+# =============================================================================
+
+
+class TestRetryBackoff:
+    """Test retry with exponential backoff for cloud API requests."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_retry_env(self, monkeypatch):
+        """Ensure retry env vars are unset so tests use defaults."""
+        monkeypatch.delenv("REMARKABLE_RETRY_ATTEMPTS", raising=False)
+        monkeypatch.delenv("REMARKABLE_RETRY_DELAY", raising=False)
+
+    @patch("remarkable_mcp.sync.time.sleep")
+    @patch("remarkable_mcp.sync.requests.request")
+    def test_retry_succeeds_after_transient_503(self, mock_request, mock_sleep):
+        """Retry succeeds when a transient 503 clears on the second attempt."""
+        from remarkable_mcp.sync import _http_request_with_retry
+
+        fail_response = Mock()
+        fail_response.status_code = 503
+        fail_response.headers = {}
+
+        ok_response = Mock()
+        ok_response.status_code = 200
+
+        mock_request.side_effect = [fail_response, ok_response]
+
+        result = _http_request_with_retry("GET", "https://example.com/api")
+        assert result.status_code == 200
+        assert mock_request.call_count == 2
+        mock_sleep.assert_called_once()
+
+    @patch("remarkable_mcp.sync.time.sleep")
+    @patch("remarkable_mcp.sync.requests.request")
+    def test_retry_exhaustion_raises_last_exception(self, mock_request, mock_sleep):
+        """After exhausting retries on connection errors, the last exception is raised."""
+        from remarkable_mcp.sync import _http_request_with_retry
+
+        mock_request.side_effect = requests.ConnectionError("refused")
+
+        with pytest.raises(requests.ConnectionError, match="refused"):
+            _http_request_with_retry("GET", "https://example.com/api")
+
+        assert mock_request.call_count == 3  # DEFAULT_RETRY_ATTEMPTS
+
+    @patch("remarkable_mcp.sync.time.sleep")
+    @patch("remarkable_mcp.sync.requests.request")
+    def test_no_retry_on_401(self, mock_request, mock_sleep):
+        """401 is not retried - it is handled by the caller's token renewal."""
+        from remarkable_mcp.sync import _http_request_with_retry
+
+        response_401 = Mock()
+        response_401.status_code = 401
+
+        mock_request.return_value = response_401
+
+        result = _http_request_with_retry("GET", "https://example.com/api")
+        assert result.status_code == 401
+        assert mock_request.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("remarkable_mcp.sync.time.sleep")
+    @patch("remarkable_mcp.sync.requests.request")
+    def test_no_retry_on_400(self, mock_request, mock_sleep):
+        """400 is not retried - client errors are not transient."""
+        from remarkable_mcp.sync import _http_request_with_retry
+
+        response_400 = Mock()
+        response_400.status_code = 400
+
+        mock_request.return_value = response_400
+
+        result = _http_request_with_retry("GET", "https://example.com/api")
+        assert result.status_code == 400
+        assert mock_request.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("remarkable_mcp.sync.time.sleep")
+    @patch("remarkable_mcp.sync.requests.request")
+    def test_retry_after_header_honoured(self, mock_request, mock_sleep):
+        """Retry-After header value is used as the sleep duration."""
+        from remarkable_mcp.sync import _http_request_with_retry
+
+        rate_limited = Mock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": "5"}
+
+        ok_response = Mock()
+        ok_response.status_code = 200
+
+        mock_request.side_effect = [rate_limited, ok_response]
+
+        result = _http_request_with_retry("GET", "https://example.com/api")
+        assert result.status_code == 200
+        mock_sleep.assert_called_once_with(5.0)
+
+    @patch("remarkable_mcp.sync.time.sleep")
+    @patch("remarkable_mcp.sync.requests.request")
+    def test_retry_after_header_capped_at_max(self, mock_request, mock_sleep):
+        """Retry-After values above MAX_RETRY_DELAY are capped."""
+        from remarkable_mcp.sync import MAX_RETRY_DELAY, _http_request_with_retry
+
+        rate_limited = Mock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": "999"}
+
+        ok_response = Mock()
+        ok_response.status_code = 200
+
+        mock_request.side_effect = [rate_limited, ok_response]
+
+        result = _http_request_with_retry("GET", "https://example.com/api")
+        assert result.status_code == 200
+        mock_sleep.assert_called_once_with(MAX_RETRY_DELAY)
+
+    def test_compute_sleep_within_bounds(self):
+        """_compute_sleep always returns a value between 0 and MAX_RETRY_DELAY."""
+        from remarkable_mcp.sync import MAX_RETRY_DELAY, _compute_sleep
+
+        for attempt in range(10):
+            for _ in range(50):
+                val = _compute_sleep(2.0, attempt)
+                assert 0 <= val <= MAX_RETRY_DELAY
+
+    @patch("remarkable_mcp.sync.time.sleep")
+    @patch("remarkable_mcp.sync.requests.request")
+    def test_retry_exhaustion_returns_last_response(self, mock_request, mock_sleep):
+        """When all retries return retryable status, the last response is returned."""
+        from remarkable_mcp.sync import _http_request_with_retry
+
+        response_503 = Mock()
+        response_503.status_code = 503
+        response_503.headers = {}
+
+        mock_request.return_value = response_503
+
+        result = _http_request_with_retry("GET", "https://example.com/api")
+        assert result.status_code == 503
+        assert mock_request.call_count == 3
