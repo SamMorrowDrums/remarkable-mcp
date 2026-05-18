@@ -330,6 +330,8 @@ class SSHClient:
         Download a document's content as a zip file.
 
         Creates a zip archive with the same structure as the cloud API.
+        Includes the document folder contents, .content metadata, and
+        any associated PDF/EPUB file for merged rendering support.
         """
         doc_path = f"{XOCHITL_PATH}/{doc.id}"
 
@@ -348,6 +350,15 @@ class SSHClient:
             file_list.append(content_file)
         except Exception:
             pass
+
+        # Include the associated PDF or EPUB file for merged rendering
+        for ext in ("pdf", "epub"):
+            raw_file = f"{XOCHITL_PATH}/{doc.id}.{ext}"
+            try:
+                self._ssh_command(f"test -f '{raw_file}' && echo exists")
+                file_list.append(raw_file)
+            except Exception:
+                pass
 
         # Create zip archive
         zip_buffer = io.BytesIO()

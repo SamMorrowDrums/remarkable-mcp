@@ -621,6 +621,157 @@ class TestRemarkableImage:
 
 
 # =============================================================================
+# Test Merged Rendering
+# =============================================================================
+
+
+class TestMergedRendering:
+    """Test render_merged parameter for remarkable_image."""
+
+    @pytest.mark.asyncio
+    async def test_render_merged_parameter_in_schema(self):
+        """Test that remarkable_image tool has the render_merged parameter in its schema."""
+        tools = await mcp.list_tools()
+        image_tool = next(t for t in tools if t.name == "remarkable_image")
+
+        # Check that render_merged parameter exists in the input schema
+        assert "render_merged" in image_tool.inputSchema.get("properties", {})
+        merged_schema = image_tool.inputSchema["properties"]["render_merged"]
+        assert merged_schema.get("type") == "boolean"
+        assert merged_schema.get("default") is False
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    @patch("remarkable_mcp.tools.render_merged_page_from_document_zip")
+    @patch("remarkable_mcp.tools.get_document_page_count")
+    async def test_render_merged_fallback_no_pdf(
+        self,
+        mock_page_count,
+        mock_render_merged,
+        mock_get_rmapi,
+        mock_document,
+    ):
+        """Test render_merged falls back when document has no PDF underlay."""
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_document.is_folder = False
+        mock_client.get_meta_items.return_value = [mock_document]
+        mock_client.download.return_value = b"fake zip"
+        mock_page_count.return_value = 3
+        # Simulate merged function returning annotation-only with a note (no PDF)
+        fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+        mock_render_merged.return_value = (
+            fake_png,
+            "No PDF underlay found; returned annotation-only render.",
+        )
+
+        with patch("tempfile.NamedTemporaryFile") as mock_tmpfile:
+            mock_tmp = Mock()
+            mock_tmp.__enter__ = Mock(return_value=mock_tmp)
+            mock_tmp.__exit__ = Mock(return_value=False)
+            mock_tmp.name = "/tmp/test.zip"
+            mock_tmpfile.return_value = mock_tmp
+            with patch("pathlib.Path.unlink"):
+                result = await mcp.call_tool(
+                    "remarkable_image",
+                    {
+                        "document": "Test Document",
+                        "render_merged": True,
+                        "compatibility": True,
+                    },
+                )
+
+        data = json.loads(result[0].text)
+        # Should fall back to annotation-only since no PDF underlay
+        assert data.get("merged") is False
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_render_merged_svg_ignored(self, mock_get_rmapi, mock_document):
+        """Test that SVG format ignores render_merged gracefully."""
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_document.is_folder = False
+        mock_client.get_meta_items.return_value = [mock_document]
+        mock_client.download.return_value = b"fake zip"
+
+        with (
+            patch("tempfile.NamedTemporaryFile") as mock_tmpfile,
+            patch("remarkable_mcp.tools.get_document_page_count", return_value=2),
+            patch(
+                "remarkable_mcp.tools.render_page_from_document_zip_svg",
+                return_value='<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+            ),
+        ):
+            mock_tmp = Mock()
+            mock_tmp.__enter__ = Mock(return_value=mock_tmp)
+            mock_tmp.__exit__ = Mock(return_value=False)
+            mock_tmp.name = "/tmp/test.zip"
+            mock_tmpfile.return_value = mock_tmp
+            with patch("pathlib.Path.unlink"):
+                result = await mcp.call_tool(
+                    "remarkable_image",
+                    {
+                        "document": "Test Document",
+                        "output_format": "svg",
+                        "render_merged": True,
+                        "compatibility": True,
+                    },
+                )
+
+        data = json.loads(result[0].text)
+        # SVG should return successfully but merged=False
+        assert data.get("merged") is False
+        assert "render_merged is only supported with PNG" in data.get("_hint", "")
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    @patch("remarkable_mcp.tools.render_merged_page_from_document_zip")
+    @patch("remarkable_mcp.tools.get_document_page_count")
+    async def test_render_merged_success_path(
+        self,
+        mock_page_count,
+        mock_render_merged,
+        mock_get_rmapi,
+        mock_document,
+    ):
+        """Test render_merged success path: returns merged PNG with .merged.png URI."""
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_document.is_folder = False
+        mock_client.get_meta_items.return_value = [mock_document]
+        mock_client.download.return_value = b"fake zip"
+        mock_page_count.return_value = 5
+        # Simulate successful merged render (no fallback note)
+        composited_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+        mock_render_merged.return_value = (composited_png, None)
+
+        with patch("tempfile.NamedTemporaryFile") as mock_tmpfile:
+            mock_tmp = Mock()
+            mock_tmp.__enter__ = Mock(return_value=mock_tmp)
+            mock_tmp.__exit__ = Mock(return_value=False)
+            mock_tmp.name = "/tmp/test.zip"
+            mock_tmpfile.return_value = mock_tmp
+            with patch("pathlib.Path.unlink"):
+                result = await mcp.call_tool(
+                    "remarkable_image",
+                    {
+                        "document": "Test Document",
+                        "render_merged": True,
+                        "compatibility": True,
+                    },
+                )
+
+        data = json.loads(result[0].text)
+        assert data.get("merged") is True
+        assert data.get("resource_uri", "").endswith(".merged.png")
+        hint = data.get("_hint", "")
+        assert "PDF" in hint and "annotation" in hint.lower()
+        # The merged renderer should have been called once for this page
+        assert mock_render_merged.called
+
+
+# =============================================================================
 # Test Registration
 # =============================================================================
 
