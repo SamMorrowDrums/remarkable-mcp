@@ -3,6 +3,7 @@ Text extraction helpers for reMarkable documents.
 """
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -13,6 +14,8 @@ import zipfile
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def _rmc_executable() -> str:
@@ -1025,6 +1028,10 @@ def render_merged_page_from_document_zip(
         Tuple of (png_bytes, note) where note is an informational message
         or None. Returns (None, error_note) on failure.
     """
+    import io
+    import re
+
+    import fitz
     from PIL import Image as PILImage
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1038,7 +1045,9 @@ def render_merged_page_from_document_zip(
             png = render_page_from_document_zip(zip_path, page, background_color)
             return png, "Could not extract zip; returned annotation-only render."
 
-        # Find the PDF file in the extracted directory
+        # Find the PDF file in the extracted directory. If multiple are present
+        # (rare), prefer the one whose stem matches the .content document id so
+        # selection is deterministic.
         pdf_files = list(tmpdir_path.glob("**/*.pdf"))
         if not pdf_files:
             rm_files = _get_ordered_rm_files(tmpdir_path)
@@ -1047,7 +1056,10 @@ def render_merged_page_from_document_zip(
             png = render_rm_file_to_png(rm_files[page - 1], background_color=background_color)
             return png, "No PDF underlay found; returned annotation-only render."
 
-        pdf_bytes = pdf_files[0].read_bytes()
+        content_stems = {p.stem for p in tmpdir_path.glob("*.content")}
+        matching = [p for p in pdf_files if p.stem in content_stems]
+        pdf_path = matching[0] if matching else sorted(pdf_files)[0]
+        pdf_bytes = pdf_path.read_bytes()
 
         # Read cPages to find PDF page mapping
         cpages = _read_cpages_entries(tmpdir_path)
@@ -1070,8 +1082,6 @@ def render_merged_page_from_document_zip(
 
         # Get PDF page dimensions to set annotation viewBox correctly
         try:
-            import fitz
-
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             try:
                 if pdf_page_index >= len(doc):
@@ -1106,12 +1116,17 @@ def render_merged_page_from_document_zip(
                 ann_svg_path = Path(tmp_svg.name)
 
             if _rm_to_svg(target_rm_file, ann_svg_path):
-                # Read the SVG and adjust viewBox to match PDF page bounds
+                # Read the SVG and adjust viewBox to match PDF page bounds.
+                #
+                # rmc emits stroke coordinates in PDF points (after its internal
+                # SCALE = 72/226), with the origin at the top of the page and
+                # x=0 in the horizontal center (so x ranges roughly from
+                # -W_pt/2 to +W_pt/2). Setting the viewBox to
+                # (-W_pt/2, 0, W_pt, H_pt) maps that coordinate system to the
+                # PDF page bounds so annotations align. This is specific to
+                # rmc's v6 renderer; if the upstream coordinate convention
+                # changes this alignment will need to be revisited.
                 svg_content = ann_svg_path.read_text()
-
-                # rmc outputs strokes in PDF points (after its SCALE = 72/226).
-                # Set viewBox to match PDF page bounds so annotations align.
-                import re
 
                 svg_content = re.sub(
                     r'viewBox="[^"]*"',
@@ -1123,8 +1138,6 @@ def render_merged_page_from_document_zip(
                 svg_content = re.sub(r'height="[^"]*"', f'height="{out_h}"', svg_content)
 
                 # Render SVG to PNG with transparent background
-                import io
-
                 import cairosvg
 
                 ann_png_data = cairosvg.svg2png(
@@ -1133,16 +1146,19 @@ def render_merged_page_from_document_zip(
                     output_height=out_h,
                 )
                 ann_png_bytes = ann_png_data
-        except Exception:
-            pass  # Annotation rendering failed; we'll just return the PDF
+        except Exception as exc:
+            # Annotation rendering failed; we'll just return the PDF, but
+            # record the failure so callers can surface it as a note.
+            logger.debug("Annotation overlay rendering failed: %s", exc)
+            ann_render_error = exc
+        else:
+            ann_render_error = None
         finally:
             if ann_svg_path:
                 ann_svg_path.unlink(missing_ok=True)
 
         # 3. Composite: PDF base + annotation overlay
         try:
-            import io
-
             pdf_img = PILImage.open(io.BytesIO(pdf_png)).convert("RGBA")
 
             if ann_png_bytes:
@@ -1151,14 +1167,20 @@ def render_merged_page_from_document_zip(
                 if ann_img.size != pdf_img.size:
                     ann_img = ann_img.resize(pdf_img.size, PILImage.LANCZOS)
                 composite = PILImage.alpha_composite(pdf_img, ann_img)
+                merged_note = None
             else:
                 composite = pdf_img
+                merged_note = (
+                    "Annotation overlay failed to render; returned PDF page without annotations."
+                    if ann_render_error is not None
+                    else None
+                )
 
             # Convert to RGB for PNG output (no alpha needed in final)
             composite = composite.convert("RGB")
             buf = io.BytesIO()
             composite.save(buf, format="PNG")
-            return buf.getvalue(), None
+            return buf.getvalue(), merged_note
         except Exception:
             # Last resort: return annotation-only from already-extracted .rm file
             png = render_rm_file_to_png(target_rm_file, background_color=background_color)

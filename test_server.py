@@ -723,6 +723,52 @@ class TestMergedRendering:
         assert data.get("merged") is False
         assert "render_merged is only supported with PNG" in data.get("_hint", "")
 
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    @patch("remarkable_mcp.tools.render_merged_page_from_document_zip")
+    @patch("remarkable_mcp.tools.get_document_page_count")
+    async def test_render_merged_success_path(
+        self,
+        mock_page_count,
+        mock_render_merged,
+        mock_get_rmapi,
+        mock_document,
+    ):
+        """Test render_merged success path: returns merged PNG with .merged.png URI."""
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_document.is_folder = False
+        mock_client.get_meta_items.return_value = [mock_document]
+        mock_client.download.return_value = b"fake zip"
+        mock_page_count.return_value = 5
+        # Simulate successful merged render (no fallback note)
+        composited_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+        mock_render_merged.return_value = (composited_png, None)
+
+        with patch("tempfile.NamedTemporaryFile") as mock_tmpfile:
+            mock_tmp = Mock()
+            mock_tmp.__enter__ = Mock(return_value=mock_tmp)
+            mock_tmp.__exit__ = Mock(return_value=False)
+            mock_tmp.name = "/tmp/test.zip"
+            mock_tmpfile.return_value = mock_tmp
+            with patch("pathlib.Path.unlink"):
+                result = await mcp.call_tool(
+                    "remarkable_image",
+                    {
+                        "document": "Test Document",
+                        "render_merged": True,
+                        "compatibility": True,
+                    },
+                )
+
+        data = json.loads(result[0].text)
+        assert data.get("merged") is True
+        assert data.get("resource_uri", "").endswith(".merged.png")
+        hint = data.get("_hint", "")
+        assert "PDF" in hint and "annotation" in hint.lower()
+        # The merged renderer should have been called once for this page
+        assert mock_render_merged.called
+
 
 # =============================================================================
 # Test Registration

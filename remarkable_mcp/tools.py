@@ -1650,6 +1650,8 @@ async def remarkable_image(
                         hint = f"Page {page}/{total_pages}. No text detected via OCR."
                     if merged_note:
                         hint = f"{merged_note} {hint}"
+                    elif is_merged:
+                        hint = f"Rendered with PDF + annotation compositing. {hint}"
 
                     response_data = {
                         "data_uri": data_uri,
