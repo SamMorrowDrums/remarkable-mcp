@@ -34,45 +34,12 @@ from remarkable_mcp.ssh import XOCHITL_PATH, SSHClient
 logger = logging.getLogger(__name__)
 
 # Tool annotations for write operations
-UPLOAD_ANNOTATIONS = ToolAnnotations(
-    title="Upload Document to reMarkable",
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=False,
-    openWorldHint=False,
-)
-
-MKDIR_ANNOTATIONS = ToolAnnotations(
-    title="Create Folder on reMarkable",
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=False,
-    openWorldHint=False,
-)
-
-MOVE_ANNOTATIONS = ToolAnnotations(
-    title="Move reMarkable Document",
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=False,
-    openWorldHint=False,
-)
-
-RENAME_ANNOTATIONS = ToolAnnotations(
-    title="Rename reMarkable Document",
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=False,
-    openWorldHint=False,
-)
-
-DELETE_ANNOTATIONS = ToolAnnotations(
-    title="Delete reMarkable Document",
-    readOnlyHint=False,
-    destructiveHint=True,
-    idempotentHint=False,
-    openWorldHint=False,
-)
+WRITE_ANNOTATIONS = ToolAnnotations(readOnlyHint=False)
+UPLOAD_ANNOTATIONS = WRITE_ANNOTATIONS
+MKDIR_ANNOTATIONS = WRITE_ANNOTATIONS
+MOVE_ANNOTATIONS = WRITE_ANNOTATIONS
+RENAME_ANNOTATIONS = WRITE_ANNOTATIONS
+DELETE_ANNOTATIONS = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
 
 
 def write_enabled() -> bool:
@@ -739,28 +706,23 @@ def register_write_tools():
             )
 
     @mcp.tool(annotations=DELETE_ANNOTATIONS)
-    async def remarkable_delete(
-        document: str,
-        confirm: bool = False,
-    ) -> str:
+    async def remarkable_delete(document: str) -> str:
         """
         <usecase>Delete a document or folder on the reMarkable tablet.</usecase>
         <instructions>
         DESTRUCTIVE operation — marks a document as deleted in its metadata.
         The document won't appear in the tablet UI after restart.
 
-        Safety: requires confirm=True to actually delete. Without it, returns
-        a dry-run preview showing what would be deleted.
-
         Requires SSH mode and --write flag. Not available in USB web mode.
+        The MCP client is responsible for any user confirmation; this tool
+        performs the delete immediately.
         </instructions>
         <parameters>
         - document: Name or path of the document/folder to delete
-        - confirm: Must be True to actually delete (default: False for dry-run)
         </parameters>
         <examples>
-        - remarkable_delete("Old Notes")  # Dry-run preview
-        - remarkable_delete("Old Notes", confirm=True)  # Actually delete
+        - remarkable_delete("Old Notes")
+        - remarkable_delete("/Books/Archive/Old Draft")
         </examples>
         """
         error = _require_ssh_mode()
@@ -786,23 +748,6 @@ def register_write_tools():
                 )
 
             doc_path = get_item_path(target, items_by_id)
-
-            if not confirm:
-                # Dry-run: show what would be deleted
-                return make_response(
-                    {
-                        "dry_run": True,
-                        "would_delete": {
-                            "name": target.VissibleName,
-                            "path": doc_path,
-                            "type": "folder" if target.is_folder else "document",
-                            "uuid": target.ID,
-                        },
-                        "confirm_required": True,
-                    },
-                    "This is a dry-run preview. To actually delete, call "
-                    f'remarkable_delete("{document}", confirm=True).',
-                )
 
             # Read existing metadata
             meta_content = ssh_client._scp_download(f"{XOCHITL_PATH}/{target.ID}.metadata")

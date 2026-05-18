@@ -1838,6 +1838,7 @@ class TestUSBWebInterface:
 # Test Retry Backoff
 # =============================================================================
 
+
 class TestRetryBackoff:
     """Test retry with exponential backoff for cloud API requests."""
 
@@ -2075,8 +2076,8 @@ class TestWriteTools:
                 mcp._tool_manager._tools.pop(name, None)
 
     @pytest.mark.asyncio
-    async def test_delete_dry_run(self):
-        """Test that delete without confirm returns preview."""
+    async def test_delete_marks_document_deleted(self):
+        """Test that delete marks the document's metadata as deleted."""
         from remarkable_mcp.write_tools import register_write_tools
 
         register_write_tools()
@@ -2091,6 +2092,8 @@ class TestWriteTools:
 
             with (
                 patch("remarkable_mcp.write_tools.get_rmapi") as mock_get_rmapi,
+                patch("remarkable_mcp.write_tools._write_metadata") as mock_write_meta,
+                patch("remarkable_mcp.write_tools._restart_xochitl"),
                 patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
             ):
                 import importlib
@@ -2114,6 +2117,9 @@ class TestWriteTools:
                         ]
                     )
                     mock_client.get_meta_items.return_value = [mock_doc]
+                    mock_client._scp_download.return_value = (
+                        b'{"visibleName": "Test Doc", "deleted": false}'
+                    )
                     mock_get_rmapi.return_value = mock_client
 
                     result = await mcp.call_tool(
@@ -2123,9 +2129,12 @@ class TestWriteTools:
                         },
                     )
                     data = json.loads(result[0][0].text)
-                    assert data["dry_run"] is True
-                    assert data["confirm_required"] is True
-                    assert data["would_delete"]["name"] == "Test Doc"
+                    assert data["deleted"] is True
+                    assert data["name"] == "Test Doc"
+                    # Verify metadata was written with deleted=True
+                    mock_write_meta.assert_called_once()
+                    written_metadata = mock_write_meta.call_args[0][2]
+                    assert written_metadata["deleted"] is True
                 finally:
                     if "REMARKABLE_USE_SSH" in os.environ:
                         del os.environ["REMARKABLE_USE_SSH"]

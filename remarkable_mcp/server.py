@@ -151,10 +151,10 @@ Write operations are enabled. These tools modify your tablet's filesystem:
 - `remarkable_mkdir(folder_name, parent)` - Create a folder
 - `remarkable_move(document, dest_folder)` - Move a document/folder
 - `remarkable_rename(document, new_name)` - Rename a document/folder
-- `remarkable_delete(document, confirm)` - Delete (requires confirm=True)
+- `remarkable_delete(document)` - Delete a document/folder (destructive)
 
 ### Safety
-- **Delete is destructive**: always call without `confirm` first to preview
+- **Delete is destructive** and immediate — the MCP client should confirm with the user first
 - After each write operation, the tablet UI restarts automatically
 - Use `remarkable_browse()` to verify changes after write operations
 """

@@ -452,19 +452,19 @@ Or set the environment variable:
 
 ### Available Write Tools
 
-| Tool | Description | Destructive? |
-|------|-------------|:------------:|
-| `remarkable_upload(file_path, parent_folder, document_name)` | Upload a PDF or EPUB file | No |
-| `remarkable_mkdir(folder_name, parent)` | Create a new folder (SSH only) | No |
-| `remarkable_move(document, dest_folder)` | Move a document or folder (SSH only) | No |
-| `remarkable_rename(document, new_name)` | Rename a document or folder (SSH only) | No |
-| `remarkable_delete(document, confirm)` | Delete a document or folder (SSH only) | ⚠️ Yes |
+| Tool | Description |
+|------|-------------|
+| `remarkable_upload(file_path, parent_folder, document_name)` | Upload a PDF or EPUB file |
+| `remarkable_mkdir(folder_name, parent)` | Create a new folder (SSH only) |
+| `remarkable_move(document, dest_folder)` | Move a document or folder (SSH only) |
+| `remarkable_rename(document, new_name)` | Rename a document or folder (SSH only) |
+| `remarkable_delete(document)` | Delete a document or folder — destructive (SSH only) |
 
 ### Safety
 
 - **Upload works in SSH and USB web mode** — cloud mode returns a clear error
 - **mkdir, move, rename, delete require SSH mode** — USB web and cloud return a clear error
-- **Delete requires confirmation** — calling without `confirm=True` returns a dry-run preview
+- **Delete is destructive and immediate** — the MCP client is responsible for confirming with the user before invoking
 - After each write operation (SSH), the tablet UI restarts automatically to reflect changes
 
 ### Examples
@@ -482,9 +482,8 @@ remarkable_move("Meeting Notes", "/Archive/2024 Archive")
 # Rename a document (SSH only)
 remarkable_rename("Untitled", "Q4 Planning Notes")
 
-# Delete (dry-run first, then confirm) (SSH only)
-remarkable_delete("Old Draft")           # Preview what would be deleted
-remarkable_delete("Old Draft", confirm=True)  # Actually delete
+# Delete (destructive — confirm with user first) (SSH only)
+remarkable_delete("Old Draft")
 ```
 
 ---
