@@ -60,13 +60,26 @@ def _build_instructions() -> str:
     """Build server instructions based on current configuration."""
     # Check environment
     ssh_mode = os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
+    usb_web_mode = os.environ.get("REMARKABLE_USE_USB_WEB", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     has_google_vision = bool(os.environ.get("GOOGLE_VISION_API_KEY"))
     ocr_backend = os.environ.get("REMARKABLE_OCR_BACKEND", "auto").lower()
 
-    instructions = """# reMarkable MCP Server
+    write_mode = os.environ.get("REMARKABLE_ENABLE_WRITE", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    ) and (ssh_mode or usb_web_mode)
 
-Access documents from your reMarkable tablet. All operations are read-only.
+    read_only_note = "" if write_mode else " All operations are read-only."
 
+    instructions = (
+        "# reMarkable MCP Server\n\n"
+        f"Access documents from your reMarkable tablet.{read_only_note}\n"
+        """
 ## Available Tools
 
 - `remarkable_browse(path, query)` - Browse folders or search for documents
@@ -111,8 +124,9 @@ Documents are registered as resources for direct access:
 - `remarkableimg:///{path}.page-{N}.png` - Get PNG image of page N (notebooks only)
 - Use resources when you need complete document content without pagination
 """
+    )
 
-    # Add SSH-specific instructions
+    # Add transport-specific instructions
     if ssh_mode:
         instructions += """
 ## SSH Mode (Active)
@@ -126,6 +140,34 @@ You're connected directly to the tablet via SSH. This enables:
 - `"text"` (default) - Full content: raw PDF/EPUB text + annotations
 - `"raw"` - Only original PDF/EPUB text (no annotations)
 - `"annotations"` - Only typed text, highlights, and OCR content
+"""
+        if write_mode:
+            instructions += """
+## Write Tools (Active)
+
+Write operations are enabled. These tools modify your tablet's filesystem:
+
+- `remarkable_upload(file_path, parent_folder, document_name)` - Upload a PDF/EPUB
+- `remarkable_mkdir(folder_name, parent)` - Create a folder
+- `remarkable_move(document, dest_folder)` - Move a document/folder
+- `remarkable_rename(document, new_name)` - Rename a document/folder
+- `remarkable_delete(document)` - Delete a document/folder (destructive)
+
+### Safety
+- **Delete is destructive** and immediate — the MCP client should confirm with the user first
+- After each write operation, the tablet UI restarts automatically
+- Use `remarkable_browse()` to verify changes after write operations
+"""
+    elif usb_web_mode:
+        if write_mode:
+            instructions += """
+## Write Tools (Active — USB Web)
+
+Upload is available via the USB web interface:
+
+- `remarkable_upload(file_path)` - Upload a PDF/EPUB file
+
+Note: mkdir, move, rename, and delete require SSH mode.
 """
     else:
         instructions += """
@@ -218,6 +260,12 @@ from remarkable_mcp import (  # noqa: E402
     resources,  # noqa: F401
     tools,  # noqa: F401
 )
+
+# Conditionally register write tools when enabled
+from remarkable_mcp import write_tools as _write_tools  # noqa: E402
+
+if _write_tools.write_enabled():
+    _write_tools.register_write_tools()
 
 
 def run():
