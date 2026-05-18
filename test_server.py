@@ -459,6 +459,74 @@ class TestRemarkableRecent:
 
 
 # =============================================================================
+# Test remarkable_search Tool
+# =============================================================================
+
+
+class TestRemarkableSearch:
+    """Test remarkable_search tool."""
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_search_awaits_remarkable_read(self, mock_get_rmapi):
+        """Regression test: remarkable_search must await the async remarkable_read.
+
+        Previously remarkable_search was a sync function calling the async
+        remarkable_read without awaiting it, resulting in per-document errors:
+            'the JSON object must be str, bytes or bytearray, not coroutine'
+        because json.loads() was called on a coroutine object.
+        """
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+
+        doc = Mock()
+        doc.VissibleName = "mcp notes"
+        doc.ID = "doc-mcp-1"
+        doc.Parent = ""
+        doc.ModifiedClient = "2024-01-15T10:30:00Z"
+        doc.is_folder = False
+        doc.is_cloud_archived = False
+        doc.tags = []
+
+        mock_client.get_meta_items.return_value = [doc]
+
+        # Minimal zip so remarkable_read can succeed end-to-end
+        import io
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr("doc-mcp-1.content", '{"fileType": "notebook"}')
+        mock_client.download.return_value = zip_buffer.getvalue()
+
+        result = await mcp.call_tool("remarkable_search", {"query": "mcp", "limit": 2})
+        data = json.loads(result[0][0].text)
+
+        # Top-level call must succeed (not surface a coroutine TypeError)
+        assert "_error" not in data, f"Unexpected top-level error: {data.get('_error')}"
+        assert "documents" in data
+        assert data["count"] >= 1
+
+        # No per-document result should contain the coroutine error
+        for doc_result in data["documents"]:
+            err = doc_result.get("error", "")
+            assert "coroutine" not in err, f"Per-document coroutine error leaked through: {err}"
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_search_no_documents_found(self, mock_get_rmapi):
+        """Test search returns clean error when no documents match."""
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_client.get_meta_items.return_value = []
+
+        result = await mcp.call_tool("remarkable_search", {"query": "nonexistent-xyz"})
+        data = json.loads(result[0][0].text)
+
+        assert "_error" in data
+        assert data["_error"]["type"] == "no_documents_found"
+
+
+# =============================================================================
 # Test remarkable_read Tool
 # =============================================================================
 
