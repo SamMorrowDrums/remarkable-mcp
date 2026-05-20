@@ -1912,6 +1912,104 @@ class TestUSBWebInterface:
 # =============================================================================
 
 
+class TestCloudSyncFileHeaders:
+    """Regression tests for reMarkable cloud rm-filename header validation."""
+
+    def _response(self, *, text="", content=b"", json_data=None):
+        response = Mock()
+        response.status_code = 200
+        response.text = text
+        response.content = content
+        response.headers = {}
+        response.raise_for_status = Mock()
+        if json_data is not None:
+            response.json.return_value = json_data
+        return response
+
+    @patch("remarkable_mcp.sync._http_request_with_retry")
+    def test_get_meta_items_sends_logical_rm_filename_headers(self, mock_request):
+        """Cloud sync list requests must send the logical filename for each blob."""
+        from remarkable_mcp.sync import FILES_URL, RemarkableClient
+
+        root_hash = "root-hash"
+        doc_id = "doc-123"
+        doc_hash = "doc-hash"
+        metadata_hash = "metadata-hash"
+
+        mock_request.side_effect = [
+            self._response(text='{"hash": "root-hash"}', json_data={"hash": root_hash}),
+            self._response(content=f"3\n{doc_hash}:80000000:{doc_id}:1:123\n".encode("utf-8")),
+            self._response(
+                content=(f"3\n{metadata_hash}:0:{doc_id}.metadata:0:77\n").encode("utf-8")
+            ),
+            self._response(
+                content=json.dumps(
+                    {
+                        "visibleName": "Header Test",
+                        "type": "DocumentType",
+                        "lastModified": "1710000000000",
+                    }
+                ).encode("utf-8")
+            ),
+        ]
+
+        client = RemarkableClient(user_token="user-token")
+        docs = client.get_meta_items()
+
+        assert [doc.name for doc in docs] == ["Header Test"]
+        file_headers = {
+            call.args[1]: call.kwargs["headers"].get("rm-filename")
+            for call in mock_request.call_args_list
+            if call.args[1].startswith(FILES_URL)
+        }
+        assert file_headers == {
+            f"{FILES_URL}/{root_hash}": "root.docSchema",
+            f"{FILES_URL}/{doc_hash}": f"{doc_id}.docSchema",
+            f"{FILES_URL}/{metadata_hash}": f"{doc_id}.metadata",
+        }
+
+    @patch("remarkable_mcp.sync._http_request_with_retry")
+    def test_download_sends_entry_ids_as_rm_filename_headers(self, mock_request):
+        """Cloud sync downloads must pass each blob's index id as rm-filename."""
+        from remarkable_mcp.sync import FILES_URL, Document, RemarkableClient
+
+        doc_id = "doc-123"
+        doc_hash = "doc-hash"
+        content_hash = "content-hash"
+        page_hash = "page-hash"
+
+        mock_request.side_effect = [
+            self._response(
+                content=(
+                    f"3\n{content_hash}:0:{doc_id}.content:0:18\n"
+                    f"{page_hash}:0:{doc_id}/page-1.rm:0:9\n"
+                ).encode("utf-8")
+            ),
+            self._response(content=b'{"fileType": "notebook"}'),
+            self._response(content=b"rm-bytes"),
+        ]
+
+        client = RemarkableClient(user_token="user-token")
+        doc = Document(id=doc_id, hash=doc_hash, name="Header Test", doc_type="DocumentType")
+        payload = client.download(doc)
+
+        import io
+
+        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+            assert zf.read(f"{doc_id}.content") == b'{"fileType": "notebook"}'
+            assert zf.read(f"{doc_id}/page-1.rm") == b"rm-bytes"
+        file_headers = {
+            call.args[1]: call.kwargs["headers"].get("rm-filename")
+            for call in mock_request.call_args_list
+            if call.args[1].startswith(FILES_URL)
+        }
+        assert file_headers == {
+            f"{FILES_URL}/{doc_hash}": f"{doc_id}.docSchema",
+            f"{FILES_URL}/{content_hash}": f"{doc_id}.content",
+            f"{FILES_URL}/{page_hash}": f"{doc_id}/page-1.rm",
+        }
+
+
 class TestRetryBackoff:
     """Test retry with exponential backoff for cloud API requests."""
 

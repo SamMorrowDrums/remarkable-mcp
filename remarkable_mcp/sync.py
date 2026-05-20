@@ -220,25 +220,31 @@ class RemarkableClient:
             "Get a new code from: https://my.remarkable.com/device/desktop/connect"
         )
 
-    def _request(self, url: str, method: str = "GET") -> requests.Response:
+    def _request(
+        self, url: str, method: str = "GET", headers: Optional[Dict[str, str]] = None
+    ) -> requests.Response:
         """Make an authenticated request."""
         if not self.user_token:
             self.renew_token()
 
-        headers = {"Authorization": f"Bearer {self.user_token}"}
-        response = _http_request_with_retry(method, url, headers=headers, timeout=60)
+        request_headers = {"Authorization": f"Bearer {self.user_token}"}
+        if headers:
+            request_headers.update(headers)
+        response = _http_request_with_retry(method, url, headers=request_headers, timeout=60)
 
         if response.status_code == 401:
             # Token expired, try to renew
             self.renew_token()
-            headers = {"Authorization": f"Bearer {self.user_token}"}
-            response = _http_request_with_retry(method, url, headers=headers, timeout=60)
+            request_headers = {"Authorization": f"Bearer {self.user_token}"}
+            if headers:
+                request_headers.update(headers)
+            response = _http_request_with_retry(method, url, headers=request_headers, timeout=60)
 
         return response
 
-    def _get_file(self, file_hash: str) -> bytes:
+    def _get_file(self, file_hash: str, file_name: str) -> bytes:
         """Download a file by its hash."""
-        response = self._request(f"{FILES_URL}/{file_hash}")
+        response = self._request(f"{FILES_URL}/{file_hash}", headers={"rm-filename": file_name})
         response.raise_for_status()
         return response.content
 
@@ -298,7 +304,7 @@ class RemarkableClient:
         root_hash = root_data["hash"]
 
         # Get root index
-        root_index = self._get_file(root_hash)
+        root_index = self._get_file(root_hash, "root.docSchema")
         entries = self._parse_index(root_index)
 
         documents = []
@@ -309,7 +315,7 @@ class RemarkableClient:
 
             # Fetch the document's blob index
             try:
-                blob_content = self._get_file(doc_hash)
+                blob_content = self._get_file(doc_hash, f"{doc_id}.docSchema")
                 blob_entries = self._parse_index(blob_content)
             except Exception:
                 continue
@@ -322,7 +328,7 @@ class RemarkableClient:
                 files.append(blob_entry)
                 if blob_entry["id"].endswith(".metadata"):
                     try:
-                        meta_content = self._get_file(blob_entry["hash"])
+                        meta_content = self._get_file(blob_entry["hash"], blob_entry["id"])
                         metadata = json.loads(meta_content.decode("utf-8"))
                     except Exception:
                         pass
@@ -378,7 +384,7 @@ class RemarkableClient:
         import io
         import zipfile
 
-        blob_content = self._get_file(doc.hash)
+        blob_content = self._get_file(doc.hash, f"{doc.id}.docSchema")
         blob_entries = self._parse_index(blob_content)
 
         zip_buffer = io.BytesIO()
@@ -389,7 +395,7 @@ class RemarkableClient:
 
                 # Download the file
                 try:
-                    file_content = self._get_file(file_hash)
+                    file_content = self._get_file(file_hash, file_id)
                     zf.writestr(file_id, file_content)
                 except Exception:
                     continue
