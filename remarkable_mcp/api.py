@@ -147,8 +147,17 @@ def download_raw_file(client, doc, extension: str):
     if hasattr(client, "download_raw_file"):
         return client.download_raw_file(doc, extension)
 
-    # Cloud client - raw files are not available via API
-    # The cloud API only returns the notebook annotations, not source PDFs/EPUBs
+    # Cloud client: the source PDF/EPUB IS present in the document's blob package.
+    # Fetch it directly by its content-addressed hash (doc.files lists every blob).
+    files = getattr(doc, "files", None)
+    if files and hasattr(client, "_get_file"):
+        suffix = "." + extension.lstrip(".")
+        for entry in files:
+            if str(entry.get("id", "")).endswith(suffix):
+                try:
+                    return client._get_file(entry["hash"], entry["id"])
+                except Exception:
+                    return None
     return None
 
 
@@ -168,6 +177,32 @@ def get_file_type(client, doc) -> str:
         file_type = client.get_file_type(doc)
         if file_type:
             return file_type
+
+    # Cloud client: read the authoritative fileType from the document's .content
+    # blob (reMarkable stores "pdf" | "epub" | "notebook" there). Without this the
+    # cloud path defaulted every doc to "notebook", so PDFs/EPUBs were misrouted to
+    # the .rm parser and failed to read/render.
+    files = getattr(doc, "files", None)
+    if files and hasattr(client, "_get_file"):
+        for entry in files:
+            if str(entry.get("id", "")).endswith(".content"):
+                try:
+                    content = json_module.loads(
+                        client._get_file(entry["hash"], entry["id"]).decode("utf-8")
+                    )
+                    ft = content.get("fileType")
+                    if ft:
+                        return ft
+                except Exception:
+                    break
+        # Fallback: a PDF/EPUB-backed doc has the payload blob even if .content
+        # didn't name a fileType.
+        for entry in files:
+            fid = str(entry.get("id", ""))
+            if fid.endswith(".pdf"):
+                return "pdf"
+            if fid.endswith(".epub"):
+                return "epub"
 
     # Infer from document name
     name = doc.VissibleName.lower()

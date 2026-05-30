@@ -927,6 +927,29 @@ def document_zip_has_pdf_underlay(zip_path: Path) -> bool:
         return False
 
 
+def document_zip_is_pure_pdf(zip_path: Path) -> bool:
+    """Return True when the zip is a PDF-backed doc with no annotation .rm files.
+
+    A pure-PDF document has a .pdf entry but zero .rm entries.  The render
+    path for such documents should rasterize the PDF directly rather than
+    trying to interpret an empty annotation layer.
+
+    Args:
+        zip_path: Path to the reMarkable document zip file.
+
+    Returns:
+        True if the zip contains a .pdf file and no .rm files.
+    """
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = zf.namelist()
+            has_pdf = any(name.endswith(".pdf") for name in names)
+            has_rm = any(name.endswith(".rm") for name in names)
+            return has_pdf and not has_rm
+    except Exception:
+        return False
+
+
 def _read_cpages_entries(tmpdir_path: Path) -> List[Dict[str, Any]]:
     """Read cPages.pages entries from the .content metadata file.
 
@@ -1002,6 +1025,62 @@ def _render_pdf_page_to_png(
         return None
 
 
+def render_pdf_page_from_document_zip(
+    zip_path: Path,
+    page: int = 1,
+) -> Optional[bytes]:
+    """Rasterize a page from a PDF-backed reMarkable document zip.
+
+    Extracts the embedded .pdf file from the zip and rasterizes the requested
+    page using pymupdf (fitz).  This function is the correct render path for
+    pure-PDF documents (no annotation .rm layer).
+
+    Args:
+        zip_path: Path to the reMarkable document zip file.
+        page: Page number (1-indexed).
+
+    Returns:
+        PNG image bytes, or None if rendering failed or page is out of range.
+    """
+    try:
+        import fitz
+    except ImportError:
+        return None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(tmpdir_path)
+
+        pdf_files = list(tmpdir_path.glob("**/*.pdf"))
+        if not pdf_files:
+            return None
+
+        # Prefer the PDF whose stem matches the .content document id
+        content_stems = {p.stem for p in tmpdir_path.glob("*.content")}
+        matching = [p for p in pdf_files if p.stem in content_stems]
+        pdf_path = matching[0] if matching else sorted(pdf_files)[0]
+
+        pdf_bytes = pdf_path.read_bytes()
+
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            try:
+                page_index = page - 1  # convert to 0-based
+                if page_index < 0 or page_index >= doc.page_count:
+                    return None
+                pdf_page = doc[page_index]
+                # Render at 2× resolution for readability (150 dpi equivalent)
+                mat = fitz.Matrix(2.0, 2.0)
+                pix = pdf_page.get_pixmap(matrix=mat, alpha=False)
+                return pix.tobytes("png")
+            finally:
+                doc.close()
+        except Exception:
+            return None
+
+
 def render_merged_page_from_document_zip(
     zip_path: Path,
     page: int = 1,
@@ -1065,10 +1144,47 @@ def render_merged_page_from_document_zip(
         cpages = _read_cpages_entries(tmpdir_path)
         rm_files = _get_ordered_rm_files(tmpdir_path)
 
-        if page < 1 or page > len(rm_files):
-            return None, f"Page {page} out of range (document has {len(rm_files)} pages)."
+        # For PDF-backed docs the authoritative page count is the PDF itself,
+        # not the (possibly empty) .rm layer.
+        try:
+            pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            try:
+                pdf_total_pages = pdf_doc.page_count
+            finally:
+                pdf_doc.close()
+        except Exception:
+            pdf_total_pages = len(rm_files)
 
-        target_rm_file = rm_files[page - 1]
+        if page < 1 or page > pdf_total_pages:
+            return None, f"Page {page} out of range (document has {pdf_total_pages} pages)."
+
+        # For pure PDF (no .rm overlay), rasterize the PDF page directly.
+        if not rm_files:
+            # 0-based PDF page index: page 1 → index 0
+            pdf_page_index = page - 1
+            pdf_png = _render_pdf_page_to_png(
+                pdf_bytes,
+                pdf_page_index,
+                canvas_width or int(1190 * 2),  # ~A4 at 96 dpi × 2
+                canvas_height or int(1684 * 2),
+            )
+            if pdf_png is None:
+                return None, f"PDF rasterization failed for page {page}."
+            return pdf_png, None
+
+        target_rm_file = rm_files[page - 1] if page <= len(rm_files) else None
+        if target_rm_file is None:
+            # Page exists in PDF but has no annotation layer — render PDF only.
+            pdf_page_index = page - 1
+            pdf_png = _render_pdf_page_to_png(
+                pdf_bytes,
+                pdf_page_index,
+                canvas_width or int(1190 * 2),
+                canvas_height or int(1684 * 2),
+            )
+            if pdf_png is None:
+                return None, f"PDF rasterization failed for page {page}."
+            return pdf_png, "Page has no annotation layer; returned PDF-only render."
 
         # Determine which PDF page this reMarkable page maps to
         pdf_page_index: Optional[int] = None
@@ -1191,8 +1307,9 @@ def get_document_page_count(zip_path: Path) -> int:
     """
     Get the number of pages in a reMarkable document zip.
 
-    Uses the .content metadata file for accurate page count (includes
-    user-added pages in PDFs). Falls back to counting .rm files.
+    For PDF-backed documents (fileType=="pdf" in .content), returns the PDF's
+    actual page count via pymupdf (falling back to the .content pageCount field).
+    For notebooks, uses cPages/pages arrays or counts .rm files.
 
     Args:
         zip_path: Path to the document zip file
@@ -1207,16 +1324,39 @@ def get_document_page_count(zip_path: Path) -> int:
             zf.extractall(tmpdir_path)
 
         # Try .content metadata first — it's the authoritative page list
+        content_data: Optional[Dict[str, Any]] = None
         for content_file in tmpdir_path.glob("*.content"):
             try:
-                data = json.loads(content_file.read_text())
-                if "cPages" in data and "pages" in data["cPages"]:
-                    return len(data["cPages"]["pages"])
-                if "pages" in data and isinstance(data["pages"], list):
-                    return len(data["pages"])
+                content_data = json.loads(content_file.read_text())
             except Exception:
                 pass
             break
+
+        if content_data is not None:
+            # PDF-backed document: page count comes from the PDF itself
+            if content_data.get("fileType") == "pdf":
+                pdf_files = list(tmpdir_path.glob("**/*.pdf"))
+                if pdf_files:
+                    try:
+                        import fitz
+
+                        doc = fitz.open(str(pdf_files[0]))
+                        try:
+                            return doc.page_count
+                        finally:
+                            doc.close()
+                    except Exception:
+                        pass
+                # Fall back to pageCount field in .content
+                page_count = content_data.get("pageCount")
+                if isinstance(page_count, int) and page_count > 0:
+                    return page_count
+
+            # Notebook: use cPages or pages array
+            if "cPages" in content_data and "pages" in content_data["cPages"]:
+                return len(content_data["cPages"]["pages"])
+            if "pages" in content_data and isinstance(content_data["pages"], list):
+                return len(content_data["pages"])
 
         # Fallback to counting .rm files
         return len(list(tmpdir_path.glob("**/*.rm")))

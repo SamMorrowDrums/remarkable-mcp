@@ -33,6 +33,7 @@ from remarkable_mcp.api import (
 from remarkable_mcp.concurrency import run_blocking
 from remarkable_mcp.extract import (
     cache_page_ocr,
+    document_zip_is_pure_pdf,
     extract_text_from_document_zip,
     extract_text_from_epub,
     extract_text_from_pdf,
@@ -44,6 +45,7 @@ from remarkable_mcp.extract import (
     render_merged_page_from_document_zip,
     render_page_from_document_zip,
     render_page_from_document_zip_svg,
+    render_pdf_page_from_document_zip,
 )
 from remarkable_mcp.responses import make_error, make_response
 from remarkable_mcp.sampling import (
@@ -1591,7 +1593,15 @@ async def remarkable_image(
                     return [info, embedded]
             else:
                 # PNG format
+
+                # Detect pure-PDF docs (has .pdf, no .rm overlay) so we can
+                # rasterize the PDF directly instead of routing through the
+                # empty annotation-layer path.
+                is_pure_pdf = await run_blocking(document_zip_is_pure_pdf, tmp_path)
+
                 if render_merged:
+                    # render_merged_page_from_document_zip handles pure-PDF
+                    # correctly (returns rasterized PDF page when no .rm layer).
                     png_data, merged_note = await run_blocking(
                         render_merged_page_from_document_zip,
                         tmp_path,
@@ -1599,6 +1609,13 @@ async def remarkable_image(
                         background_color=background,
                     )
                     is_merged = png_data is not None and merged_note is None
+                elif is_pure_pdf:
+                    # Pure PDF: rasterize the PDF page directly via pymupdf.
+                    png_data = await run_blocking(
+                        render_pdf_page_from_document_zip,
+                        tmp_path,
+                        page,
+                    )
                 else:
                     png_data = await run_blocking(
                         render_page_from_document_zip,
