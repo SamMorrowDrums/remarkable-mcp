@@ -427,10 +427,12 @@ def load_all_documents_sync() -> int:
     """
     global _registered_docs, _registered_raw, _registered_img
 
+    from remarkable_mcp import document_cache
     from remarkable_mcp.api import get_items_by_id, get_rmapi
 
     client = get_rmapi()
     items = client.get_meta_items()
+    document_cache.set_collection(client, items)
     items_by_id = get_items_by_id(items)
     documents = [item for item in items if not item.is_folder]
 
@@ -523,7 +525,9 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
             batch_docs = documents[offset : offset + batch_size]
 
             if not batch_docs:
-                # No more documents
+                from remarkable_mcp import document_cache
+
+                document_cache.set_collection(client, items)
                 logger.info(
                     f"Background loader complete: {len(_registered_docs)} documents registered"
                     + (f" (filtered to {root})" if root != "/" else "")

@@ -21,6 +21,7 @@ from mcp.types import (
     ToolAnnotations,
 )
 
+from remarkable_mcp import document_cache
 from remarkable_mcp.api import (
     REMARKABLE_TOKEN,
     download_raw_file,
@@ -111,6 +112,16 @@ def _resolve_root_path(path: str) -> str:
         return root
     # Prepend root to the path
     return root + path
+
+
+async def _get_collection():
+    cached = document_cache.get_collection()
+    if cached is not None:
+        return document_cache.get_client(), cached
+    client = get_rmapi()
+    collection = await run_blocking(client.get_meta_items)
+    document_cache.set_collection(client, collection)
+    return client, collection
 
 
 # Base annotations for read-only operations
@@ -297,8 +308,7 @@ async def remarkable_read(
     </examples>
     """
     try:
-        client = get_rmapi()
-        collection = await run_blocking(client.get_meta_items)
+        client, collection = await _get_collection()
         items_by_id = get_items_by_id(collection)
 
         # Validate parameters
@@ -803,8 +813,7 @@ async def remarkable_browse(
     </examples>
     """
     try:
-        client = get_rmapi()
-        collection = await run_blocking(client.get_meta_items)
+        client, collection = await _get_collection()
         items_by_id = get_items_by_id(collection)
         items_by_parent = get_items_by_parent(collection)
 
@@ -1031,8 +1040,7 @@ async def remarkable_recent(limit: int = 10, include_preview: bool = False) -> s
     </examples>
     """
     try:
-        client = get_rmapi()
-        collection = await run_blocking(client.get_meta_items)
+        client, collection = await _get_collection()
         items_by_id = get_items_by_id(collection)
 
         # Clamp limit - lower max when previews enabled (expensive operation)
@@ -1296,8 +1304,7 @@ async def remarkable_status() -> str:
         connection_info = "environment variable" if REMARKABLE_TOKEN else "file (~/.rmapi)"
 
     try:
-        client = get_rmapi()
-        collection = await run_blocking(client.get_meta_items)
+        client, collection = await _get_collection()
         items_by_id = get_items_by_id(collection)
 
         root = _get_root_path()
@@ -1442,8 +1449,7 @@ async def remarkable_image(
         if background is None:
             background = await run_blocking(get_background_color)
 
-        client = get_rmapi()
-        collection = await run_blocking(client.get_meta_items)
+        client, collection = await _get_collection()
         items_by_id = get_items_by_id(collection)
 
         root = _get_root_path()
