@@ -37,6 +37,15 @@ from remarkable_mcp.server import mcp
 # =============================================================================
 
 
+@pytest.fixture(autouse=True)
+def clear_document_cache():
+    from remarkable_mcp import document_cache
+
+    document_cache.invalidate()
+    yield
+    document_cache.invalidate()
+
+
 @pytest.fixture
 def mock_document():
     """Create a mock Document object."""
@@ -2470,6 +2479,10 @@ class TestConcurrentToolDispatch:
         import asyncio
         import time
 
+        from remarkable_mcp import document_cache
+
+        document_cache.invalidate()
+
         call_delay = 0.4
 
         def slow_get_meta_items():
@@ -2494,3 +2507,103 @@ class TestConcurrentToolDispatch:
             f"Concurrent tool calls appear serialized: elapsed={elapsed:.2f}s "
             f"vs single-call delay={call_delay}s"
         )
+
+
+class TestDocumentCache:
+    def setup_method(self):
+        from remarkable_mcp import document_cache
+
+        document_cache.invalidate()
+
+    def teardown_method(self):
+        from remarkable_mcp import document_cache
+
+        document_cache.invalidate()
+
+    def test_empty_cache_returns_none(self):
+        from remarkable_mcp import document_cache
+
+        assert document_cache.get_collection() is None
+
+    def test_set_and_get_collection(self):
+        from remarkable_mcp import document_cache
+
+        client = Mock()
+        items = [Mock(ID="a"), Mock(ID="b")]
+        document_cache.set_collection(client, items)
+        result = document_cache.get_collection()
+        assert result is not None
+        assert len(result) == 2
+
+    def test_get_client(self):
+        from remarkable_mcp import document_cache
+
+        client = Mock()
+        document_cache.set_collection(client, [])
+        assert document_cache.get_client() is client
+
+    def test_is_fresh_after_set(self):
+        from remarkable_mcp import document_cache
+
+        document_cache.set_collection(Mock(), [])
+        assert document_cache.is_fresh() is True
+
+    def test_is_fresh_false_when_empty(self):
+        from remarkable_mcp import document_cache
+
+        assert document_cache.is_fresh() is False
+
+    def test_invalidate_clears_cache(self):
+        from remarkable_mcp import document_cache
+
+        document_cache.set_collection(Mock(), [Mock(ID="x")])
+        document_cache.invalidate()
+        assert document_cache.get_collection() is None
+        assert document_cache.get_client() is None
+        assert document_cache.is_fresh() is False
+
+    def test_ttl_expiry(self):
+        import time
+
+        from remarkable_mcp import document_cache
+
+        document_cache.set_collection(Mock(), [Mock(ID="x")])
+        with patch.object(document_cache, "_loaded_at", time.monotonic() - 400):
+            assert document_cache.get_collection() is None
+            assert document_cache.is_fresh() is False
+
+    def test_returns_copy_not_reference(self):
+        from remarkable_mcp import document_cache
+
+        items = [Mock(ID="a")]
+        document_cache.set_collection(Mock(), items)
+        result = document_cache.get_collection()
+        result.append(Mock(ID="b"))
+        assert len(document_cache.get_collection()) == 1
+
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_tools_use_cache_on_second_call(self, mock_get_rmapi):
+        from remarkable_mcp import document_cache
+
+        document_cache.invalidate()
+
+        mock_client = Mock()
+        mock_client.get_meta_items.return_value = []
+        mock_get_rmapi.return_value = mock_client
+
+        await mcp.call_tool("remarkable_browse", {})
+        await mcp.call_tool("remarkable_browse", {})
+
+        mock_client.get_meta_items.assert_called_once()
+
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_tools_skip_get_rmapi_when_cache_warm(self, mock_get_rmapi):
+        from remarkable_mcp import document_cache
+
+        mock_client = Mock()
+        mock_client.get_meta_items.return_value = []
+        document_cache.set_collection(mock_client, [])
+
+        await mcp.call_tool("remarkable_browse", {})
+
+        mock_get_rmapi.assert_not_called()
