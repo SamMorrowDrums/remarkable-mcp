@@ -170,12 +170,12 @@ def download_raw_file(client, doc, extension: str):
     Returns:
         Raw file bytes, or None if file doesn't exist or not supported
     """
-    # SSH client has direct download_raw_file method
+    # All transports (cloud, SSH, USB web) implement download_raw_file. The
+    # cloud store keeps the original source blob alongside the notebook data, so
+    # PDFs/EPUBs are downloadable in every mode.
     if hasattr(client, "download_raw_file"):
         return client.download_raw_file(doc, extension)
 
-    # Cloud client - raw files are not available via API
-    # The cloud API only returns the notebook annotations, not source PDFs/EPUBs
     return None
 
 
@@ -190,13 +190,14 @@ def get_file_type(client, doc) -> str:
     Returns:
         File type string: 'pdf', 'epub', or 'notebook'
     """
-    # SSH client has direct get_file_type method
+    # Every transport implements get_file_type. Cloud derives it from the blob
+    # index, SSH/USB read the .content fileType field.
     if hasattr(client, "get_file_type"):
         file_type = client.get_file_type(doc)
         if file_type:
             return file_type
 
-    # Infer from document name
+    # Last-resort fallback: infer from the document name.
     name = doc.VissibleName.lower()
     if name.endswith(".pdf"):
         return "pdf"

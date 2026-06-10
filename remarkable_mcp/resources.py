@@ -142,9 +142,6 @@ def _make_raw_resource(client, document, file_type: str):
 
     def raw_resource() -> str:
         try:
-            if not _is_ssh_mode():
-                return "Error: Raw file download only available in SSH mode"
-
             raw_data = download_raw_file(client, document, file_type)
 
             if not raw_data:
@@ -257,7 +254,7 @@ def _register_document(
 
     Registers:
     - Text resource for all documents
-    - Raw resource for PDF/EPUB files (SSH mode only)
+    - Raw resource for PDF/EPUB files (all transports)
     - Image template resource for notebooks (not PDF/EPUB)
 
     Args:
@@ -333,8 +330,8 @@ def _register_document(
         else:
             file_type = "notebook"
 
-    # Register raw resource for PDF/EPUB files (SSH mode only)
-    if _is_ssh_mode() and file_type in ("pdf", "epub"):
+    # Register raw resource for PDF/EPUB files (all transports support this)
+    if file_type in ("pdf", "epub"):
         # Raw resources now return extracted text, use .txt extension
         raw_uri = f"remarkableraw:///{uri_path}.{file_type}.txt"
         raw_counter = 1
@@ -440,9 +437,11 @@ def load_all_documents_sync() -> int:
 
     logger.info(f"Found {len(documents)} documents")
 
-    # Pre-load all file types in a single SSH call (SSH mode optimization)
+    # Pre-load all file types up front. Every transport implements this now:
+    # cloud derives types from the already-fetched blob index (no extra network),
+    # SSH batches a single command, USB reads its cached listing.
     file_types = {}
-    if _is_ssh_mode() and hasattr(client, "get_all_file_types"):
+    if hasattr(client, "get_all_file_types"):
         logger.info("Pre-loading file types for raw resources...")
         file_types = client.get_all_file_types()
         logger.info(f"Loaded {len(file_types)} file types")
@@ -453,7 +452,7 @@ def load_all_documents_sync() -> int:
                 client,
                 doc,
                 items_by_id,
-                file_types if _is_ssh_mode() else None,
+                file_types or None,
                 root=root,
             )
         except Exception as e:

@@ -160,7 +160,12 @@ class SSHClient:
                     "brew install hudochenkov/sshpass/sshpass (macOS), "
                     "or set up SSH key authentication instead."
                 )
-            raise RuntimeError("SSH client not found. Install openssh-client.")
+            raise RuntimeError(
+                "SSH client ('ssh') not found on PATH. Install OpenSSH: "
+                "Windows (Settings → Optional Features → OpenSSH Client, or it is "
+                "built in on Windows 10+), macOS (preinstalled), "
+                "Linux (apt install openssh-client / equivalent)."
+            )
 
     def _scp_download(self, remote_path: str, timeout: int = 60) -> bytes:
         """Download a file from the tablet via SSH cat (more reliable than SCP)."""
@@ -360,9 +365,11 @@ class SSHClient:
             except Exception:
                 pass
 
-        # Create zip archive
+        # Create zip archive. This archive is an internal transport container that
+        # is extracted in-memory by the caller and never written to disk, so we use
+        # ZIP_STORED (no compression) to avoid pointless compress/decompress CPU cost.
         zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_STORED) as zf:
             for remote_path in file_list:
                 try:
                     content = self._scp_download(remote_path)

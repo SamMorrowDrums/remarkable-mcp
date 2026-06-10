@@ -11,7 +11,7 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import requests
@@ -278,6 +278,38 @@ class TestRemarkableStatus:
         assert "connection" in data
         assert data["status"] == "connected"
         assert "_hint" in data
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_status_capability_matrix(self, mock_get_rmapi):
+        """Status exposes per-transport and effective capability matrices."""
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_client.get_meta_items.return_value = []
+
+        result = await mcp.call_tool("remarkable_status", {})
+        data = json.loads(result[0][0].text)
+
+        assert "write_enabled" in data
+        assert "capabilities" in data
+        assert "capabilities_by_transport" in data
+
+        matrix = data["capabilities_by_transport"]
+        # All three transports are described.
+        assert set(matrix) == {"cloud", "ssh", "usb-web"}
+        # Read/render are universal.
+        for caps in matrix.values():
+            assert caps["read"] is True
+            assert caps["render"] is True
+        # Cloud and SSH have full write surface; USB web is upload-only.
+        for mode in ("cloud", "ssh"):
+            assert all(matrix[mode][op] for op in ("upload", "mkdir", "move", "rename", "delete"))
+        assert matrix["usb-web"]["upload"] is True
+        assert not any(matrix["usb-web"][op] for op in ("mkdir", "move", "rename", "delete"))
+
+        # Effective capabilities for the active transport always cover read/render.
+        assert data["capabilities"]["read"] is True
+        assert data["capabilities"]["render"] is True
 
     @pytest.mark.asyncio
     @patch("remarkable_mcp.tools.get_rmapi")
@@ -2493,8 +2525,8 @@ class TestWriteTools:
                 mcp._tool_manager._tools.pop(name, None)
 
     @pytest.mark.asyncio
-    async def test_mkdir_not_registered_in_cloud_mode(self):
-        """SSH-only write tools must not be exposed when there's no SSH transport."""
+    async def test_managed_write_tools_registered_in_cloud_mode(self):
+        """Cloud mode now has full write parity: mkdir/move/rename/delete register."""
         from remarkable_mcp.write_tools import register_write_tools
 
         # Cloud mode: neither SSH nor USB web
@@ -2505,11 +2537,11 @@ class TestWriteTools:
             try:
                 tools = await mcp.list_tools()
                 names = {t.name for t in tools}
-                # Upload is transport-checked at call time and may still register
-                assert "remarkable_mkdir" not in names
-                assert "remarkable_move" not in names
-                assert "remarkable_rename" not in names
-                assert "remarkable_delete" not in names
+                assert "remarkable_upload" in names
+                assert "remarkable_mkdir" in names
+                assert "remarkable_move" in names
+                assert "remarkable_rename" in names
+                assert "remarkable_delete" in names
             finally:
                 for name in [
                     "remarkable_upload",
@@ -2557,46 +2589,52 @@ class TestWriteTools:
                 mcp._tool_manager._tools.pop(name, None)
 
     @pytest.mark.asyncio
-    async def test_upload_error_in_cloud_mode(self):
-        """Test that upload returns error in cloud mode (no SSH or USB web)."""
+    async def test_upload_dispatches_to_cloud(self):
+        """Upload in cloud mode dispatches to the cloud client's upload_document."""
+        import tempfile
+
         from remarkable_mcp.write_tools import register_write_tools
 
-        register_write_tools()
-
-        try:
-            # Ensure neither SSH nor USB web mode is set
-            old_ssh = os.environ.pop("REMARKABLE_USE_SSH", None)
-            old_usb = os.environ.pop("REMARKABLE_USE_USB_WEB", None)
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env.pop("REMARKABLE_USE_USB_WEB", None)
+        env["REMARKABLE_ENABLE_WRITE"] = "1"
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(b"%PDF-1.4 test")
+                pdf_path = tmp.name
             try:
-                import importlib
+                mock_doc = Mock()
+                mock_doc.id = "new-doc-id"
+                mock_client = Mock(spec=["get_meta_items", "upload_document"])
+                mock_client.get_meta_items.return_value = []
+                mock_client.upload_document.return_value = mock_doc
 
-                import remarkable_mcp.api
-
-                importlib.reload(remarkable_mcp.api)
-
-                result = await mcp.call_tool(
-                    "remarkable_upload",
-                    {"file_path": "/tmp/test.pdf"},
-                )
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=mock_client):
+                    result = await mcp.call_tool(
+                        "remarkable_upload",
+                        {"file_path": pdf_path, "document_name": "My Doc"},
+                    )
                 data = json.loads(result[0][0].text)
-                assert "_error" in data
-                assert data["_error"]["type"] == "write_transport_required"
-                assert "SSH or USB web" in data["_error"]["message"]
+                assert data["uploaded"] is True
+                assert data["transport"] == "cloud"
+                assert data["uuid"] == "new-doc-id"
+                mock_client.upload_document.assert_called_once()
+                # content, name, ext, parent_id
+                args = mock_client.upload_document.call_args[0]
+                assert args[1] == "My Doc"
+                assert args[2] == "pdf"
+                assert args[3] == ""  # root
             finally:
-                if old_ssh is not None:
-                    os.environ["REMARKABLE_USE_SSH"] = old_ssh
-                if old_usb is not None:
-                    os.environ["REMARKABLE_USE_USB_WEB"] = old_usb
-                importlib.reload(remarkable_mcp.api)
-        finally:
-            for name in [
-                "remarkable_upload",
-                "remarkable_mkdir",
-                "remarkable_move",
-                "remarkable_rename",
-                "remarkable_delete",
-            ]:
-                mcp._tool_manager._tools.pop(name, None)
+                os.unlink(pdf_path)
+                for name in [
+                    "remarkable_upload",
+                    "remarkable_mkdir",
+                    "remarkable_move",
+                    "remarkable_rename",
+                    "remarkable_delete",
+                ]:
+                    mcp._tool_manager._tools.pop(name, None)
 
     @pytest.mark.asyncio
     async def test_mkdir_not_registered_in_usb_web_mode(self):
@@ -2624,6 +2662,151 @@ class TestWriteTools:
                     "remarkable_delete",
                 ]:
                     mcp._tool_manager._tools.pop(name, None)
+
+
+class TestCloudWriteDispatch:
+    """Cloud-mode write tools dispatch to the RemarkableClient methods."""
+
+    def _cloud_env(self):
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env.pop("REMARKABLE_USE_USB_WEB", None)
+        env["REMARKABLE_ENABLE_WRITE"] = "1"
+        return env
+
+    def _make_item(self, doc_id, name, parent="", is_folder=False):
+        item = Mock()
+        item.ID = doc_id
+        item.VissibleName = name
+        item.Parent = parent
+        item.is_folder = is_folder
+        return item
+
+    def _cleanup(self):
+        for name in [
+            "remarkable_upload",
+            "remarkable_mkdir",
+            "remarkable_move",
+            "remarkable_rename",
+            "remarkable_delete",
+        ]:
+            mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
+    async def test_cloud_mkdir_dispatch(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                new_folder = Mock()
+                new_folder.id = "folder-xyz"
+                client = Mock(spec=["get_meta_items", "create_folder"])
+                client.get_meta_items.return_value = []
+                client.create_folder.return_value = new_folder
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await mcp.call_tool("remarkable_mkdir", {"folder_name": "Projects"})
+                data = json.loads(result[0][0].text)
+                assert data["created"] is True
+                assert data["transport"] == "cloud"
+                assert data["uuid"] == "folder-xyz"
+                client.create_folder.assert_called_once_with("Projects", "")
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_rename_dispatch(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                target = self._make_item("doc-1", "Old Name")
+                client = Mock(spec=["get_meta_items", "rename"])
+                client.get_meta_items.return_value = [target]
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await mcp.call_tool(
+                        "remarkable_rename",
+                        {"document": "Old Name", "new_name": "New Name"},
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["renamed"] is True
+                assert data["transport"] == "cloud"
+                client.rename.assert_called_once_with("doc-1", "New Name")
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_move_dispatch(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                target = self._make_item("doc-1", "Report")
+                dest = self._make_item("fold-1", "Archive", is_folder=True)
+                client = Mock(spec=["get_meta_items", "move"])
+                client.get_meta_items.return_value = [target, dest]
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await mcp.call_tool(
+                        "remarkable_move",
+                        {"document": "Report", "dest_folder": "Archive"},
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["moved"] is True
+                assert data["transport"] == "cloud"
+                client.move.assert_called_once_with("doc-1", "fold-1")
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_delete_dispatch(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                target = self._make_item("doc-1", "Old Notes")
+                client = Mock(spec=["get_meta_items", "delete"])
+                client.get_meta_items.return_value = [target]
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await mcp.call_tool("remarkable_delete", {"document": "Old Notes"})
+                data = json.loads(result[0][0].text)
+                assert data["deleted"] is True
+                assert data["transport"] == "cloud"
+                client.delete.assert_called_once_with("doc-1")
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_delete_cancelled_by_elicitation(self):
+        """When the user declines elicitation, delete is aborted and nothing changes."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                client = Mock(spec=["get_meta_items", "delete"])
+                decline = Mock()
+                decline.action = "decline"
+                decline.data = None
+                with (
+                    patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+                    patch(
+                        "remarkable_mcp.write_tools.client_supports_elicitation",
+                        return_value=True,
+                    ),
+                    patch(
+                        "mcp.server.fastmcp.Context.elicit",
+                        new=AsyncMock(return_value=decline),
+                    ),
+                ):
+                    result = await mcp.call_tool("remarkable_delete", {"document": "Old Notes"})
+                data = json.loads(result[0][0].text)
+                assert data["deleted"] is False
+                assert data["cancelled"] is True
+                client.delete.assert_not_called()
+            finally:
+                self._cleanup()
 
 
 class TestConcurrentToolDispatch:

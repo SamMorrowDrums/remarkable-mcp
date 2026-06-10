@@ -1,8 +1,9 @@
 """
 MCP Tools for reMarkable tablet access.
 
-All tools are read-only and idempotent - they only retrieve data from the
-reMarkable Cloud and do not modify any documents.
+All tools in this module are read-only and idempotent - they only retrieve
+data from your reMarkable (via whichever transport is active: cloud, SSH, or
+USB web) and do not modify any documents.
 """
 
 import base64
@@ -292,7 +293,9 @@ async def remarkable_read(
 
     Content types:
     - "text" (default): Full extracted text (PDF/EPUB content + annotations)
-    - "raw": Original PDF/EPUB text only (no annotations). SSH mode only.
+    - "raw": Original PDF/EPUB text only (no annotations). Works in every
+      transport, as long as the source file is present (very large PDFs/EPUBs
+      may not be synced to the cloud).
     - "annotations": Only annotations, highlights, and handwritten notes
 
     Use pagination to read large documents without overwhelming context:
@@ -395,14 +398,13 @@ async def remarkable_read(
                 finally:
                     tmp_path.unlink(missing_ok=True)
             elif content_type == "raw":
-                # Raw requested but not available (likely cloud mode)
+                # The document has no source PDF/EPUB blob (e.g. a pure notebook).
                 return make_error(
                     error_type="raw_not_available",
-                    message="Raw file download only available in SSH mode",
+                    message=f"No raw {file_type.upper()} source file found for this document",
                     suggestion=(
                         "Use content_type='text' for extracted content, "
-                        "or switch to SSH mode for raw file access. "
-                        "See: https://remarkable.guide/guide/access/ssh.html"
+                        "or content_type='annotations' for handwritten notes."
                     ),
                 )
 
@@ -779,7 +781,11 @@ async def remarkable_read(
             hint_parts.append(f"Page {page}/{total_pages} (complete).")
 
         if content_type == "text" and not raw_available and file_type in ("pdf", "epub"):
-            hint_parts.append("Raw content requires SSH mode.")
+            hint_parts.append(
+                "No source PDF/EPUB blob was found for this document, so only "
+                "annotations were extracted. Very large files may not be synced "
+                "to the cloud; try SSH/USB mode with the device connected."
+            )
 
         return make_response(result, " ".join(hint_parts))
 
@@ -1278,10 +1284,20 @@ async def remarkable_search(
 @mcp.tool(annotations=STATUS_ANNOTATIONS)
 async def remarkable_status() -> str:
     """
-    <usecase>Check connection status and authentication with reMarkable Cloud.</usecase>
+    <usecase>Check connection status, active transport, and write capabilities.</usecase>
     <instructions>
-    Returns authentication status and diagnostic information.
-    Use this to verify your connection or troubleshoot issues.
+    Returns authentication status, the active transport (cloud, ssh, or usb-web),
+    the document count, and a capability matrix describing what each transport can
+    do. Use this to verify your connection, choose a transport, or troubleshoot.
+
+    Capability notes:
+    - Cloud (default): full read/render/upload/mkdir/move/rename/delete — no device
+      needed, works from anywhere your token is valid.
+    - SSH: full capabilities over a local/USB connection to the tablet.
+    - USB web: read, render, and upload (to root) only — the tablet's USB web
+      interface firmware exposes no folder/move/rename/delete endpoints. For full
+      write parity over a USB cable, use SSH mode pointed at the USB IP.
+    Write tools (upload/mkdir/move/rename/delete) require the --write flag.
     </instructions>
     <examples>
     - remarkable_status()
@@ -1290,6 +1306,7 @@ async def remarkable_status() -> str:
     import os
 
     from remarkable_mcp.api import REMARKABLE_USE_SSH, REMARKABLE_USE_USB_WEB
+    from remarkable_mcp.write_tools import write_enabled
 
     # Determine transport mode
     if REMARKABLE_USE_USB_WEB:
@@ -1314,6 +1331,46 @@ async def remarkable_status() -> str:
         transport = "cloud"
         connection_info = "environment variable" if REMARKABLE_TOKEN else "file (~/.rmapi)"
 
+    # What each transport is capable of (independent of whether --write is on).
+    # read/render are always available; the booleans below are the write surface.
+    capability_matrix = {
+        "cloud": {
+            "read": True,
+            "render": True,
+            "upload": True,
+            "mkdir": True,
+            "move": True,
+            "rename": True,
+            "delete": True,
+        },
+        "ssh": {
+            "read": True,
+            "render": True,
+            "upload": True,
+            "mkdir": True,
+            "move": True,
+            "rename": True,
+            "delete": True,
+        },
+        "usb-web": {
+            "read": True,
+            "render": True,
+            "upload": True,
+            "mkdir": False,
+            "move": False,
+            "rename": False,
+            "delete": False,
+        },
+    }
+    writes_on = write_enabled()
+    # Effective capabilities for the active transport: write ops only count when
+    # the --write flag is enabled.
+    transport_caps = capability_matrix[transport]
+    effective_caps = {
+        cap: (supported if cap in ("read", "render") else supported and writes_on)
+        for cap, supported in transport_caps.items()
+    }
+
     try:
         client = get_rmapi()
         collection = await run_blocking(client.get_meta_items)
@@ -1336,6 +1393,9 @@ async def remarkable_status() -> str:
             "connection": connection_info,
             "status": "connected",
             "document_count": doc_count,
+            "write_enabled": writes_on,
+            "capabilities": effective_caps,
+            "capabilities_by_transport": capability_matrix,
         }
 
         # Add root path info if configured
@@ -1345,6 +1405,18 @@ async def remarkable_status() -> str:
         hint_parts = [f"Connected successfully via {transport}. Found {doc_count} documents."]
         if root != "/":
             hint_parts.append(f"Filtered to root: {root}")
+        if writes_on:
+            if transport == "usb-web":
+                hint_parts.append(
+                    "Write is enabled, but the USB web interface only supports upload "
+                    "(to root). For mkdir/move/rename/delete over USB, use SSH mode."
+                )
+            else:
+                hint_parts.append(
+                    "Write is enabled: upload, mkdir, move, rename, and delete are available."
+                )
+        else:
+            hint_parts.append("Read-only. Add the --write flag to enable write tools.")
         hint_parts.append(
             "Use remarkable_browse() to see your files, "
             "or remarkable_recent() for recent documents."
@@ -1360,26 +1432,34 @@ async def remarkable_status() -> str:
             "transport": transport,
             "connection": connection_info,
             "error": error_msg,
+            "write_enabled": writes_on,
+            "capabilities_by_transport": capability_matrix,
         }
 
         if REMARKABLE_USE_SSH:
             hint = (
                 "SSH connection failed. Make sure:\n"
-                "1) Developer mode is enabled on your tablet\n"
-                "2) Your reMarkable is connected via USB\n"
+                "1) Developer mode / SSH is enabled on your tablet\n"
+                "2) Your reMarkable is connected (USB or same network)\n"
                 "3) You can run: ssh root@10.11.99.1\n\n"
                 "See: https://remarkable.guide/guide/access/ssh.html\n\n"
-                "Or use cloud mode instead (remove --ssh flag)."
+                "Or use cloud mode instead (remove --ssh flag) — no device needed."
+            )
+        elif REMARKABLE_USE_USB_WEB:
+            hint = (
+                "USB web interface not reachable. Make sure:\n"
+                "1) Your reMarkable is connected via USB\n"
+                "2) USB web interface is enabled (Settings → Storage)\n"
+                "3) The device is on and unlocked"
             )
         else:
             hint = (
-                "To authenticate: "
-                "1) Go to https://my.remarkable.com/device/browser/connect "
-                "2) Get a one-time code "
-                "3) Run: uv run python server.py --register YOUR_CODE "
-                "4) Add REMARKABLE_TOKEN to your MCP config.\n\n"
-                "Or use SSH mode (faster, recommended): uvx remarkable-mcp --ssh\n"
-                "SSH setup guide: https://remarkable.guide/guide/access/ssh.html"
+                "Cloud authentication failed. To connect:\n"
+                "1) Go to https://my.remarkable.com/device/browser/connect\n"
+                "2) Get a one-time code\n"
+                "3) Run: uvx remarkable-mcp --register YOUR_CODE\n"
+                "Cloud mode works from anywhere — no device required. SSH/USB modes "
+                "are also available for local access (add --ssh or --usb)."
             )
 
         return make_response(result, hint)
@@ -1632,12 +1712,12 @@ async def remarkable_image(
                 # Portable fallback: the local stroke renderer can fail to
                 # produce an image for empty pages, newer .rm block formats, or
                 # when the client machine lacks a working cairo/libcairo for
-                # cairosvg. In USB and SSH modes the tablet exports a
-                # natively-rendered PDF that covers all of those cases, so
-                # rasterize the requested page from it with PyMuPDF (which needs
-                # no system cairo). Cloud mode has no such export, so
-                # download_raw_file returns None there and this safely no-ops.
-                # Credit: ljdutel (#95).
+                # cairosvg. In that case we rasterize the requested page from the
+                # document's source PDF with PyMuPDF (which needs no system
+                # cairo). USB/SSH expose the tablet's natively-rendered (merged)
+                # PDF; cloud exposes the original source PDF — either covers the
+                # failure cases above. Notebooks have no PDF, so download_raw_file
+                # returns None and this safely no-ops. Credit: ljdutel (#95).
                 rendered_via_pdf = False
                 if png_data is None:
                     pdf_bytes = await run_blocking(download_raw_file, client, target_doc, "pdf")
@@ -1654,9 +1734,8 @@ async def remarkable_image(
                         suggestion=(
                             "The page may be empty, or local rendering "
                             "dependencies (cairo/libcairo for cairosvg) may be "
-                            "missing. In USB/SSH mode the tablet's native PDF "
-                            "export is used automatically as a fallback—make "
-                            "sure the tablet is connected. You can also try "
+                            "missing. For PDF-backed documents the source PDF is "
+                            "used automatically as a fallback. You can also try "
                             "remarkable_read() to extract text instead."
                         ),
                     )
