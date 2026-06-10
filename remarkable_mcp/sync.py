@@ -12,21 +12,67 @@ import logging
 import math
 import os
 import random
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
 
 logger = logging.getLogger(__name__)
+
+# Thread-local HTTP sessions for connection pooling under parallel traversal.
+_thread_local = threading.local()
 
 # Retry configuration
 DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY = 2.0
 MAX_RETRY_DELAY = 20.0
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+# Concurrency / cache configuration for metadata traversal.
+# The cloud sync API is content-addressed (every blob is identified by its
+# hash), so per-document blob/metadata fetches are independent and immutable:
+# they parallelize cleanly and cache forever.
+DEFAULT_SYNC_WORKERS = 16
+MAX_SYNC_WORKERS = 64
+# Only cache blobs at or below this size. Index/metadata blobs are tiny; this
+# keeps large document content (PDF/.rm) out of the metadata cache by default.
+DEFAULT_CACHE_MAX_BLOB_BYTES = 4 * 1024 * 1024
+
+
+def _get_sync_workers() -> int:
+    """Number of parallel workers for cloud metadata traversal (env-tunable)."""
+    try:
+        val = int(os.environ.get("REMARKABLE_SYNC_WORKERS", DEFAULT_SYNC_WORKERS))
+    except (ValueError, TypeError):
+        return DEFAULT_SYNC_WORKERS
+    return max(1, min(val, MAX_SYNC_WORKERS))
+
+
+def _cache_enabled() -> bool:
+    """Whether the content-addressed blob cache is enabled (default: yes)."""
+    return os.environ.get("REMARKABLE_DISABLE_CACHE", "").lower() not in ("1", "true", "yes")
+
+
+def _cache_max_blob_bytes() -> int:
+    try:
+        return int(os.environ.get("REMARKABLE_CACHE_MAX_BLOB", DEFAULT_CACHE_MAX_BLOB_BYTES))
+    except (ValueError, TypeError):
+        return DEFAULT_CACHE_MAX_BLOB_BYTES
+
+
+def _cache_dir() -> Path:
+    """Directory for the content-addressed blob cache (env-overridable)."""
+    override = os.environ.get("REMARKABLE_CACHE_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / ".remarkable" / "cache" / "blobs"
+
 
 # API endpoints
 # Note: my.remarkable.com endpoints redirect to doesnotexist.remarkable.com
@@ -86,6 +132,32 @@ def _compute_sleep(base_delay: float, attempt: int) -> float:
     return random.uniform(0, min(base_delay * 2**attempt, MAX_RETRY_DELAY))
 
 
+def _get_session() -> requests.Session:
+    """Return a thread-local pooled HTTP session.
+
+    Connection reuse (keep-alive) avoids a fresh TLS handshake on every request,
+    which otherwise dominates cloud metadata traversal latency. Each worker
+    thread gets its own session, so this is safe under the parallel traversal.
+    """
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _thread_local.session = session
+    return session
+
+
+def _issue_request(method: str, url: str, **kwargs) -> requests.Response:
+    """Issue a single HTTP request via the thread-local pooled session.
+
+    This is the single seam through which all HTTP traffic flows (tests patch
+    it to simulate responses).
+    """
+    return _get_session().request(method, url, **kwargs)
+
+
 def _http_request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
     """
     Make an HTTP request with exponential backoff and jitter.
@@ -99,7 +171,7 @@ def _http_request_with_retry(method: str, url: str, **kwargs) -> requests.Respon
 
     for attempt in range(max_attempts):
         try:
-            response = requests.request(method, url, **kwargs)
+            response = _issue_request(method, url, **kwargs)
 
             if response.status_code not in RETRYABLE_STATUS_CODES:
                 return response
@@ -242,11 +314,46 @@ class RemarkableClient:
 
         return response
 
+    def _cache_read(self, file_hash: str) -> Optional[bytes]:
+        """Return cached bytes for a content hash, or None on miss/disabled."""
+        if not _cache_enabled():
+            return None
+        try:
+            path = _cache_dir() / file_hash
+            if path.is_file():
+                return path.read_bytes()
+        except Exception as e:  # pragma: no cover - cache must never break fetches
+            logger.debug(f"Blob cache read failed for {file_hash}: {e}")
+        return None
+
+    def _cache_write(self, file_hash: str, content: bytes) -> None:
+        """Persist bytes for a content hash (best-effort, atomic)."""
+        if not _cache_enabled() or len(content) > _cache_max_blob_bytes():
+            return
+        try:
+            cache_dir = _cache_dir()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            path = cache_dir / file_hash
+            tmp = cache_dir / f".{file_hash}.{os.getpid()}.tmp"
+            tmp.write_bytes(content)
+            os.replace(tmp, path)
+        except Exception as e:  # pragma: no cover - cache must never break fetches
+            logger.debug(f"Blob cache write failed for {file_hash}: {e}")
+
     def _get_file(self, file_hash: str, file_name: str) -> bytes:
-        """Download a file by its hash."""
+        """Download a file by its content hash.
+
+        Blobs are content-addressed (immutable), so results are served from and
+        stored in a local hash-keyed cache to make warm startups near-instant.
+        """
+        cached = self._cache_read(file_hash)
+        if cached is not None:
+            return cached
         response = self._request(f"{FILES_URL}/{file_hash}", headers={"rm-filename": file_name})
         response.raise_for_status()
-        return response.content
+        content = response.content
+        self._cache_write(file_hash, content)
+        return content
 
     def _parse_index(self, content: bytes) -> List[Dict[str, Any]]:
         """Parse an index file into entries."""
@@ -307,69 +414,96 @@ class RemarkableClient:
         root_index = self._get_file(root_hash, "root.docSchema")
         entries = self._parse_index(root_index)
 
-        documents = []
+        # `limit` caps how many entries we fetch (used to bound work). Slicing
+        # before fetching preserves the early-stop intent while letting us load
+        # the rest in parallel.
+        if limit is not None:
+            entries = entries[:limit]
 
-        for entry in entries:
-            doc_id = entry["id"]
-            doc_hash = entry["hash"]
+        # Each entry's blob index + metadata are independent, immutable fetches,
+        # so load them in parallel. Results are placed back in entry order for
+        # stable, deterministic output.
+        documents_indexed: List[Optional[Document]] = [None] * len(entries)
+        workers = _get_sync_workers()
 
-            # Fetch the document's blob index
-            try:
-                blob_content = self._get_file(doc_hash, f"{doc_id}.docSchema")
-                blob_entries = self._parse_index(blob_content)
-            except Exception:
-                continue
-
-            # Find and fetch the metadata file
-            metadata = {}
-            files = []
-
-            for blob_entry in blob_entries:
-                files.append(blob_entry)
-                if blob_entry["id"].endswith(".metadata"):
+        if workers <= 1 or len(entries) <= 1:
+            for i, entry in enumerate(entries):
+                documents_indexed[i] = self._load_document(entry)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_idx = {
+                    executor.submit(self._load_document, entry): i
+                    for i, entry in enumerate(entries)
+                }
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
                     try:
-                        meta_content = self._get_file(blob_entry["hash"], blob_entry["id"])
-                        metadata = json.loads(meta_content.decode("utf-8"))
-                    except Exception:
-                        pass
+                        documents_indexed[idx] = future.result()
+                    except Exception as e:
+                        logger.debug(f"Failed to load document at index {idx}: {e}")
 
-            # Skip deleted documents
-            if metadata.get("deleted", False):
-                continue
-
-            # Parse last modified timestamp
-            last_modified = None
-            if "lastModified" in metadata:
-                try:
-                    ts = int(metadata["lastModified"]) / 1000  # Convert ms to seconds
-                    last_modified = datetime.fromtimestamp(ts)
-                except (ValueError, TypeError):
-                    pass
-
-            doc = Document(
-                id=doc_id,
-                hash=doc_hash,
-                name=metadata.get("visibleName", doc_id),
-                doc_type=metadata.get("type", "DocumentType"),
-                parent=metadata.get("parent", ""),
-                deleted=metadata.get("deleted", False),
-                pinned=metadata.get("pinned", False),
-                last_modified=last_modified,
-                size=entry["size"],
-                files=files,
-                tags=metadata.get("tags", []),
-            )
-
-            documents.append(doc)
-
-            # Stop early if we have enough
-            if limit is not None and len(documents) >= limit:
-                break
+        documents = [doc for doc in documents_indexed if doc is not None]
 
         self._documents = documents
         self._documents_by_id = {d.id: d for d in documents}
 
         return documents
+
+    def _load_document(self, entry: Dict[str, Any]) -> Optional[Document]:
+        """Load a single document's metadata from its index entry.
+
+        Returns a Document, or None if the blob index can't be fetched or the
+        document is marked deleted.
+        """
+        doc_id = entry["id"]
+        doc_hash = entry["hash"]
+
+        # Fetch the document's blob index
+        try:
+            blob_content = self._get_file(doc_hash, f"{doc_id}.docSchema")
+            blob_entries = self._parse_index(blob_content)
+        except Exception:
+            return None
+
+        # Find and fetch the metadata file
+        metadata: Dict[str, Any] = {}
+        files = []
+
+        for blob_entry in blob_entries:
+            files.append(blob_entry)
+            if blob_entry["id"].endswith(".metadata"):
+                try:
+                    meta_content = self._get_file(blob_entry["hash"], blob_entry["id"])
+                    metadata = json.loads(meta_content.decode("utf-8"))
+                except Exception:
+                    pass
+
+        # Skip deleted documents
+        if metadata.get("deleted", False):
+            return None
+
+        # Parse last modified timestamp
+        last_modified = None
+        if "lastModified" in metadata:
+            try:
+                ts = int(metadata["lastModified"]) / 1000  # Convert ms to seconds
+                last_modified = datetime.fromtimestamp(ts)
+            except (ValueError, TypeError):
+                pass
+
+        return Document(
+            id=doc_id,
+            hash=doc_hash,
+            name=metadata.get("visibleName", doc_id),
+            doc_type=metadata.get("type", "DocumentType"),
+            parent=metadata.get("parent", ""),
+            deleted=metadata.get("deleted", False),
+            pinned=metadata.get("pinned", False),
+            last_modified=last_modified,
+            size=entry["size"],
+            files=files,
+            tags=metadata.get("tags", []),
+        )
 
     def get_doc(self, doc_id: str) -> Optional[Document]:
         """Get a document by ID."""
@@ -378,27 +512,42 @@ class RemarkableClient:
         return self._documents_by_id.get(doc_id)
 
     def download(self, doc: Document) -> bytes:
-        """Download a document's content as a zip file."""
-        # The document blob contains all the files
-        # We need to fetch each file and create a zip
+        """Download a document's content as a zip file.
+
+        Per-file blobs are fetched in parallel (and served from the
+        content-addressed cache when present) so multi-page documents render
+        without paying a sequential round-trip per page. The zip is assembled
+        in the original blob order for deterministic output.
+        """
         import io
         import zipfile
 
         blob_content = self._get_file(doc.hash, f"{doc.id}.docSchema")
         blob_entries = self._parse_index(blob_content)
 
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for entry in blob_entries:
-                file_id = entry["id"]
-                file_hash = entry["hash"]
+        contents: List[Optional[bytes]] = [None] * len(blob_entries)
 
-                # Download the file
-                try:
-                    file_content = self._get_file(file_hash, file_id)
-                    zf.writestr(file_id, file_content)
-                except Exception:
-                    continue
+        def fetch(index: int, entry: Dict[str, Any]) -> None:
+            try:
+                contents[index] = self._get_file(entry["hash"], entry["id"])
+            except Exception:
+                contents[index] = None
+
+        workers = _get_sync_workers()
+        if workers > 1 and len(blob_entries) > 1:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(fetch, i, entry) for i, entry in enumerate(blob_entries)]
+                for future in as_completed(futures):
+                    future.result()
+        else:
+            for i, entry in enumerate(blob_entries):
+                fetch(i, entry)
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_STORED) as zf:
+            for entry, content in zip(blob_entries, contents):
+                if content is not None:
+                    zf.writestr(entry["id"], content)
 
         zip_buffer.seek(0)
         return zip_buffer.read()

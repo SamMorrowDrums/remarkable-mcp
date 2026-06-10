@@ -103,7 +103,9 @@ See [SSH Setup Guide](docs/ssh-setup.md) for detailed instructions.
 
 ### ☁️ Cloud Mode (Wireless)
 
-For wireless or remote access when USB isn't available. Requires a reMarkable Connect subscription and is significantly slower than USB modes.
+Wireless access with **no device connection required** — your reMarkable syncs to the cloud and the MCP reads from there, so it works from anywhere. Requires a reMarkable Connect subscription.
+
+Cloud mode fetches your whole library in parallel and caches content-addressed blobs on disk, so after the first run startups and document reads are near-instant (a 388-document library lists in ~4s cold, ~0.5s warm). See [Cloud Performance & Caching](#cloud-performance--caching) to tune it.
 
 <details>
 <summary>📋 Cloud Mode Setup</summary>
@@ -178,18 +180,22 @@ AI assistants use the tools to read documents, search content, and more:
 
 ## Connection Modes
 
-Choose the connection method that works best for you:
+All three modes expose the same read tools, so pick based on how your tablet is connected — not on capability. Here's each option and when to reach for it:
 
-| Mode | Setup Difficulty | Speed | Requirements | Best For |
-|------|-----------------|-------|--------------|----------|
-| **🔌 USB Web (Recommended)** | ✅ Easy | Fast | USB cable, enable in Storage Settings | Everyone |
-| **⚡ SSH** | ⚠️ Advanced | Very Fast | Developer mode, USB connection | Power users |
-| **☁️ Cloud** | ✅ Easy | Slow | reMarkable Connect subscription | Remote/wireless access |
+- **🔌 USB Web Interface** — *the recommended default.* Plug in over USB and enable the web interface in Storage Settings. No subscription, no developer mode, fast, and supports raw PDF export and write tools. Use this whenever your tablet is in front of you.
+- **☁️ Cloud** — *recommended when the device isn't connected.* Reads your library straight from reMarkable's cloud, so it works wirelessly from anywhere with a Connect subscription — no cable, no developer mode. Parallel fetching plus an on-disk blob cache make it fast after the first sync. Choose this for remote/headless setups or when you simply don't want to plug in.
+- **⚡ SSH** — *for power users who need filesystem-level access.* Requires developer mode over USB. Adds folder create/move/rename/delete on top of the read and upload tools. Pick this only if you specifically need those filesystem operations.
+
+| Mode | Setup | Subscription | Offline | Raw files | Write tools |
+|------|-------|--------------|---------|-----------|-------------|
+| **🔌 USB Web** | Enable in Settings | Not required | ✅ | ✅ PDF | ✅ upload |
+| **☁️ Cloud** | One-time code | Connect | ❌ | ❌ | ❌ |
+| **⚡ SSH** | Developer mode | Not required | ✅ | ✅ PDF/EPUB | ✅ upload + mkdir/move/rename/delete |
 
 **📖 Detailed Setup Guides:**
-- [USB Web Interface Setup](docs/usb-web-setup.md) — **Recommended** — simple setup, full feature support
-- [SSH Setup Guide](docs/ssh-setup.md) — For advanced users who need filesystem access
-- Cloud setup is documented in the Quick Install section above
+- [USB Web Interface Setup](docs/usb-web-setup.md) — **recommended** — simple setup, full feature support
+- [SSH Setup Guide](docs/ssh-setup.md) — for advanced users who need filesystem access
+- Cloud setup is documented in the Quick Install section above; tuning in [Cloud Performance & Caching](#cloud-performance--caching)
 
 ---
 
@@ -397,7 +403,7 @@ When `REMARKABLE_OCR_BACKEND=auto` (default):
 
 | Feature | SSH Mode | USB Web | Cloud API |
 |---------|----------|---------|-----------|
-| Speed | ⚡ 10-100x faster | ⚡ Fast | Slower |
+| Speed | ⚡ 10-100x faster | ⚡ Fast | ⚡ Fast (parallel + cached) |
 | Offline | ✅ Yes | ✅ Yes | ❌ No |
 | Subscription | ✅ Not required | ✅ Not required | ❌ Connect required |
 | Raw files | ✅ PDFs, EPUBs | ✅ PDFs | ❌ Not available |
@@ -562,6 +568,27 @@ Cloud API requests automatically retry on transient failures (HTTP 429, 500, 502
 | `REMARKABLE_RETRY_DELAY` | `2.0` | Base delay in seconds for exponential backoff |
 
 The retry logic honours the `Retry-After` header from rate-limited responses, capped at 20 seconds. Auth failures (401) are not retried — they trigger automatic token renewal instead.
+
+---
+
+### Cloud Performance & Caching
+
+Cloud mode is built to make a device-free workflow fast:
+
+- **Parallel traversal** — document metadata is fetched concurrently instead of one document at a time, turning a multi-minute first load into a few seconds.
+- **Connection pooling** — HTTP connections are reused (keep-alive), avoiding a fresh TLS handshake per request.
+- **Content-addressed blob cache** — reMarkable's cloud is an immutable, hash-addressed store (like Git), so a blob's bytes can never change for a given hash. Downloaded blobs are cached on disk and reused on later runs; changed documents get new hashes and are re-fetched automatically. This makes warm startups and repeat document reads near-instant, and it is invalidation-safe by construction.
+
+You normally don't need to configure any of this, but these environment variables let you tune it:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REMARKABLE_SYNC_WORKERS` | `16` | Parallel workers for cloud fetches (clamped to `64`). |
+| `REMARKABLE_DISABLE_CACHE` | unset | Set to `1` to disable the on-disk blob cache entirely. |
+| `REMARKABLE_CACHE_DIR` | `~/.remarkable/cache/blobs` | Where cached blobs are stored. |
+| `REMARKABLE_CACHE_MAX_BLOB` | `4194304` (4 MiB) | Blobs larger than this are streamed through but not cached. |
+
+The cache is purely a local accelerator: deleting `REMARKABLE_CACHE_DIR` only forces the next read to re-download. The mutable cloud root hash is always fetched fresh, so you never see a stale library.
 
 ---
 
