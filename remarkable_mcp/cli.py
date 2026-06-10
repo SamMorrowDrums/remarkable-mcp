@@ -44,6 +44,9 @@ Examples:
   # SSH with custom host (e.g., using SSH config)
   REMARKABLE_SSH_HOST="remarkable" uvx remarkable-mcp --ssh
 
+  # SSH pinning an explicit key (ignores ssh-agent, e.g. 1Password)
+  uvx remarkable-mcp --ssh --ssh-key ~/.ssh/id_ed25519
+
 USB Web Interface Environment Variables:
   REMARKABLE_USB_HOST      USB web interface host (default: http://10.11.99.1)
   REMARKABLE_USB_TIMEOUT   Request timeout in seconds (default: 10)
@@ -53,6 +56,9 @@ SSH Environment Variables:
   REMARKABLE_SSH_USER      SSH user (default: root)
   REMARKABLE_SSH_PORT      SSH port (default: 22)
   REMARKABLE_SSH_PASSWORD  SSH password (optional, requires sshpass)
+  REMARKABLE_SSH_KEY       Private key path for key auth (optional). Pins this
+                           on-disk identity and ignores any ssh-agent, avoiding
+                           hangs with interactive agents like 1Password.
 
 Security Note:
   For better security, set up SSH key authentication instead of using
@@ -68,6 +74,15 @@ Security Note:
         "--ssh",
         action="store_true",
         help="Use SSH transport instead of cloud API (requires developer mode)",
+    )
+    parser.add_argument(
+        "--ssh-key",
+        metavar="PATH",
+        help=(
+            "Path to a private key for SSH key auth (sets REMARKABLE_SSH_KEY). "
+            "Pins this on-disk identity and ignores any ssh-agent, avoiding hangs "
+            "with interactive agents like 1Password in a headless server."
+        ),
     )
     parser.add_argument(
         "--usb",
@@ -127,6 +142,8 @@ Security Note:
     elif args.ssh:
         # SSH mode - set environment variable and run server
         os.environ["REMARKABLE_USE_SSH"] = "1"
+        if args.ssh_key:
+            os.environ["REMARKABLE_SSH_KEY"] = args.ssh_key
         if args.write:
             os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
         from remarkable_mcp.server import run
