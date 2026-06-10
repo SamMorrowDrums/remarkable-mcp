@@ -3,10 +3,13 @@ reMarkable Cloud API client helpers.
 """
 
 import json as json_module
+import logging
 import os
 import threading
 from pathlib import Path
 from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
 
 # Configuration - check env var first, then fall back to file
 REMARKABLE_TOKEN = os.environ.get("REMARKABLE_TOKEN")
@@ -16,6 +19,18 @@ REMARKABLE_USE_SSH = os.environ.get("REMARKABLE_USE_SSH", "").lower() in (
     "yes",
 )
 REMARKABLE_USE_USB_WEB = os.environ.get("REMARKABLE_USE_USB_WEB", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+# When a device transport (USB web / SSH) is selected but the tablet is not
+# reachable at startup, automatically fall back to cloud mode if a cloud token
+# is configured. This lets the *same* configuration work whether or not the
+# physical device is connected. Set REMARKABLE_DISABLE_CLOUD_FALLBACK=1 to
+# keep the strict behaviour (fail instead of falling back).
+REMARKABLE_DISABLE_CLOUD_FALLBACK = os.environ.get(
+    "REMARKABLE_DISABLE_CLOUD_FALLBACK", ""
+).lower() in (
     "1",
     "true",
     "yes",
@@ -32,39 +47,53 @@ _cloud_client = None
 _cloud_client_key = None
 _cloud_client_lock = threading.Lock()
 
+# Process-level cache for the device-transport resolution. Resolving the
+# transport probes the device once (USB/SSH check_connection), so we cache the
+# outcome to avoid re-probing on every tool call. `_fell_back_to_cloud` records
+# that a device transport was selected but unreachable and we switched to cloud.
+_device_client = None
+_fell_back_to_cloud = False
+_device_resolve_lock = threading.Lock()
+
 
 def reset_client_cache() -> None:
-    """Clear the cached cloud client (e.g. after re-registering a token)."""
+    """Clear the cached clients (e.g. after re-registering a token)."""
     global _cloud_client, _cloud_client_key
+    global _device_client, _fell_back_to_cloud
     with _cloud_client_lock:
         _cloud_client = None
         _cloud_client_key = None
+    with _device_resolve_lock:
+        _device_client = None
+        _fell_back_to_cloud = False
 
 
-def get_rmapi():
+def _is_cloud_token_available() -> bool:
+    """Return True if a cloud token is configured (env var or saved file)."""
+    if REMARKABLE_TOKEN:
+        return True
+    return (Path.home() / ".rmapi").exists()
+
+
+def _safe_check_connection(client) -> bool:
+    """Probe a device client's reachability without raising.
+
+    Returns True when the client has no ``check_connection`` (can't probe, so
+    assume usable) or the probe succeeds; False when the probe returns falsy or
+    raises (network/subprocess failure => treat the device as unreachable).
     """
-    Get or initialize the reMarkable API client.
+    check = getattr(client, "check_connection", None)
+    if not callable(check):
+        return True
+    try:
+        return bool(check())
+    except Exception as e:
+        logger.debug("Device connectivity probe failed: %s", e)
+        return False
 
-    Priority order:
-    1. USB web interface (if REMARKABLE_USE_USB_WEB=1)
-    2. SSH (if REMARKABLE_USE_SSH=1)
-    3. Cloud API (default, requires token)
 
-    Returns RemarkableClient, SSHClient, or USBWebClient (all have compatible interfaces).
-    """
-    # Try USB web interface first (no auth required)
-    if REMARKABLE_USE_USB_WEB:
-        from remarkable_mcp.usb_web import create_usb_web_client
-
-        return create_usb_web_client()
-
-    # Check if SSH mode is enabled
-    if REMARKABLE_USE_SSH:
-        from remarkable_mcp.ssh import create_ssh_client
-
-        return create_ssh_client()
-
-    # Cloud API mode
+def _get_cloud_client():
+    """Resolve (and cache) the cloud client from the configured token."""
     from remarkable_mcp.sync import load_client_from_token
 
     # Resolve the token: env var wins, else the saved ~/.rmapi file.
@@ -99,6 +128,86 @@ def get_rmapi():
             _cloud_client = load_client_from_token(token_json)
             _cloud_client_key = token_json
         return _cloud_client
+
+
+def get_rmapi():
+    """
+    Get or initialize the reMarkable API client.
+
+    Priority order:
+    1. USB web interface (if REMARKABLE_USE_USB_WEB=1)
+    2. SSH (if REMARKABLE_USE_SSH=1)
+    3. Cloud API (default, requires token)
+
+    When a device transport (USB/SSH) is selected but the tablet is unreachable
+    at startup, this falls back to cloud mode if a cloud token is configured
+    (unless REMARKABLE_DISABLE_CLOUD_FALLBACK is set), so the same configuration
+    works with or without the physical device connected.
+
+    Returns RemarkableClient, SSHClient, or USBWebClient (all have compatible interfaces).
+    """
+    global _device_client, _fell_back_to_cloud
+
+    # Device transports (USB web / SSH) — probe once, cache the resolution, and
+    # optionally fall back to cloud if the device is unreachable.
+    if REMARKABLE_USE_USB_WEB or REMARKABLE_USE_SSH:
+        with _device_resolve_lock:
+            if _fell_back_to_cloud:
+                return _get_cloud_client()
+            if _device_client is not None:
+                return _device_client
+
+            if REMARKABLE_USE_USB_WEB:
+                from remarkable_mcp.usb_web import create_usb_web_client
+
+                client = create_usb_web_client()
+                mode_label = "USB web interface"
+            else:
+                from remarkable_mcp.ssh import create_ssh_client
+
+                client = create_ssh_client()
+                mode_label = "SSH"
+
+            if _safe_check_connection(client):
+                _device_client = client
+                return client
+
+            # Device unreachable — fall back to cloud if allowed and possible.
+            if not REMARKABLE_DISABLE_CLOUD_FALLBACK and _is_cloud_token_available():
+                logger.warning(
+                    "%s is not reachable; falling back to cloud mode because a "
+                    "cloud token is configured. Set "
+                    "REMARKABLE_DISABLE_CLOUD_FALLBACK=1 to disable this fallback.",
+                    mode_label,
+                )
+                _fell_back_to_cloud = True
+                return _get_cloud_client()
+
+            # No fallback: return the (unreachable) device client so its own
+            # operation errors surface, and don't cache it so a later call
+            # works once the device is connected.
+            return client
+
+    # Cloud API mode (default).
+    return _get_cloud_client()
+
+
+def get_active_transport() -> str:
+    """Return the transport actually in use ("cloud", "ssh", or "usb-web").
+
+    Reflects the resolution performed by get_rmapi(): if a device transport was
+    selected but the tablet was unreachable and we fell back to cloud, this
+    returns "cloud". Note the fallback decision is only made once get_rmapi()
+    has been called, so callers should resolve the client first if they need an
+    accurate post-fallback value.
+    """
+    if _fell_back_to_cloud:
+        return "cloud"
+    if REMARKABLE_USE_USB_WEB:
+        return "usb-web"
+    if REMARKABLE_USE_SSH:
+        return "ssh"
+    return "cloud"
 
 
 def ensure_config_dir():

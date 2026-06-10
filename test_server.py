@@ -325,6 +325,32 @@ class TestRemarkableStatus:
         # Hint should include registration instructions or SSH mode
         assert "register" in data["_hint"].lower() or "ssh" in data["_hint"].lower()
 
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_status_reports_cloud_after_fallback(self, mock_get_rmapi, monkeypatch):
+        """When USB/SSH falls back to cloud, status reports the effective transport."""
+        import remarkable_mcp.api as api
+
+        monkeypatch.setattr(api, "REMARKABLE_USE_USB_WEB", True)
+        monkeypatch.setattr(api, "REMARKABLE_USE_SSH", False)
+        # Simulate that get_rmapi() already resolved to a cloud fallback.
+        monkeypatch.setattr(api, "get_active_transport", lambda: "cloud")
+
+        mock_client = Mock()
+        mock_client.get_meta_items.return_value = []
+        mock_get_rmapi.return_value = mock_client
+
+        result = await mcp.call_tool("remarkable_status", {})
+        data = json.loads(result[0][0].text)
+
+        assert data["authenticated"] is True
+        assert data["transport"] == "cloud"
+        assert data["fell_back_to_cloud"] is True
+        # Effective capabilities reflect cloud (full write surface when enabled).
+        assert data["capabilities"]["read"] is True
+        assert "usb-web" in data["_hint"]  # mentions what it fell back from
+        assert "fell back" in data["_hint"].lower()
+
 
 # =============================================================================
 # Test remarkable_browse Tool
@@ -3184,6 +3210,124 @@ class TestCloudClientCache:
         third = api.get_rmapi()
         assert third is not first
         assert len(created) == 2
+
+
+class TestCloudStartupFallback:
+    """USB/SSH selected but unreachable should fall back to cloud when a token exists."""
+
+    @staticmethod
+    def _device_client(reachable):
+        client = Mock(name="device")
+        client.check_connection = Mock(return_value=reachable)
+        return client
+
+    def _setup_cloud(self, monkeypatch, tmp_path, token):
+        """Redirect HOME, set the cloud token, and stub the cloud client loader."""
+        import remarkable_mcp.api as api
+
+        monkeypatch.setattr(api.Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(api, "REMARKABLE_TOKEN", token)
+        cloud = Mock(name="cloud")
+        monkeypatch.setattr("remarkable_mcp.sync.load_client_from_token", lambda token_json: cloud)
+        return api, cloud
+
+    def test_usb_unreachable_falls_back_to_cloud(self, monkeypatch, tmp_path):
+        api, cloud = self._setup_cloud(monkeypatch, tmp_path, '{"devicetoken": "d"}')
+        monkeypatch.setattr(api, "REMARKABLE_USE_USB_WEB", True)
+        monkeypatch.setattr(api, "REMARKABLE_USE_SSH", False)
+        monkeypatch.setattr(api, "REMARKABLE_DISABLE_CLOUD_FALLBACK", False)
+
+        device = self._device_client(reachable=False)
+        creations = []
+
+        def factory():
+            creations.append(1)
+            return device
+
+        monkeypatch.setattr("remarkable_mcp.usb_web.create_usb_web_client", factory)
+
+        api.reset_client_cache()
+        try:
+            result = api.get_rmapi()
+            assert result is cloud
+            assert api.get_active_transport() == "cloud"
+            # Resolution is cached: the device is probed once, later calls return
+            # the cloud client directly without re-probing.
+            assert api.get_rmapi() is cloud
+            assert len(creations) == 1
+            device.check_connection.assert_called_once()
+        finally:
+            api.reset_client_cache()
+
+    def test_ssh_unreachable_falls_back_to_cloud_via_file_token(self, monkeypatch, tmp_path):
+        # Token available via ~/.rmapi file rather than the env var.
+        api, cloud = self._setup_cloud(monkeypatch, tmp_path, None)
+        (tmp_path / ".rmapi").write_text('{"devicetoken": "d"}')
+        monkeypatch.setattr(api, "REMARKABLE_USE_SSH", True)
+        monkeypatch.setattr(api, "REMARKABLE_USE_USB_WEB", False)
+        monkeypatch.setattr(api, "REMARKABLE_DISABLE_CLOUD_FALLBACK", False)
+
+        device = self._device_client(reachable=False)
+        monkeypatch.setattr("remarkable_mcp.ssh.create_ssh_client", lambda: device)
+
+        api.reset_client_cache()
+        try:
+            assert api.get_rmapi() is cloud
+            assert api.get_active_transport() == "cloud"
+        finally:
+            api.reset_client_cache()
+
+    def test_device_reachable_no_fallback(self, monkeypatch, tmp_path):
+        api, cloud = self._setup_cloud(monkeypatch, tmp_path, '{"devicetoken": "d"}')
+        monkeypatch.setattr(api, "REMARKABLE_USE_USB_WEB", True)
+        monkeypatch.setattr(api, "REMARKABLE_USE_SSH", False)
+        monkeypatch.setattr(api, "REMARKABLE_DISABLE_CLOUD_FALLBACK", False)
+
+        device = self._device_client(reachable=True)
+        monkeypatch.setattr("remarkable_mcp.usb_web.create_usb_web_client", lambda: device)
+
+        api.reset_client_cache()
+        try:
+            assert api.get_rmapi() is device
+            assert api.get_active_transport() == "usb-web"
+        finally:
+            api.reset_client_cache()
+
+    def test_no_token_no_fallback_returns_device(self, monkeypatch, tmp_path):
+        # No env token and an empty HOME => no cloud token => cannot fall back.
+        api, cloud = self._setup_cloud(monkeypatch, tmp_path, None)
+        monkeypatch.setattr(api, "REMARKABLE_USE_USB_WEB", True)
+        monkeypatch.setattr(api, "REMARKABLE_USE_SSH", False)
+        monkeypatch.setattr(api, "REMARKABLE_DISABLE_CLOUD_FALLBACK", False)
+
+        device = self._device_client(reachable=False)
+        monkeypatch.setattr("remarkable_mcp.usb_web.create_usb_web_client", lambda: device)
+
+        api.reset_client_cache()
+        try:
+            # Returns the unreachable device client so its own errors surface;
+            # the unreachable client is NOT cached, so a later call can succeed
+            # once the device is connected.
+            assert api.get_rmapi() is device
+            assert api.get_active_transport() == "usb-web"
+        finally:
+            api.reset_client_cache()
+
+    def test_fallback_disabled_returns_device(self, monkeypatch, tmp_path):
+        api, cloud = self._setup_cloud(monkeypatch, tmp_path, '{"devicetoken": "d"}')
+        monkeypatch.setattr(api, "REMARKABLE_USE_SSH", True)
+        monkeypatch.setattr(api, "REMARKABLE_USE_USB_WEB", False)
+        monkeypatch.setattr(api, "REMARKABLE_DISABLE_CLOUD_FALLBACK", True)
+
+        device = self._device_client(reachable=False)
+        monkeypatch.setattr("remarkable_mcp.ssh.create_ssh_client", lambda: device)
+
+        api.reset_client_cache()
+        try:
+            assert api.get_rmapi() is device
+            assert api.get_active_transport() == "ssh"
+        finally:
+            api.reset_client_cache()
 
 
 class TestSSHKeyAuth:

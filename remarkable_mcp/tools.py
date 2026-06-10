@@ -1305,14 +1305,18 @@ async def remarkable_status() -> str:
     """
     import os
 
-    from remarkable_mcp.api import REMARKABLE_USE_SSH, REMARKABLE_USE_USB_WEB
+    from remarkable_mcp.api import (
+        REMARKABLE_USE_SSH,
+        REMARKABLE_USE_USB_WEB,
+        get_active_transport,
+    )
     from remarkable_mcp.write_tools import write_enabled
 
-    # Determine transport mode
+    # Determine the *selected* transport from configuration (pre-fallback).
     if REMARKABLE_USE_USB_WEB:
         from remarkable_mcp.usb_web import DEFAULT_USB_HOST
 
-        transport = "usb-web"
+        selected_transport = "usb-web"
         usb_host = os.environ.get("REMARKABLE_USB_HOST", DEFAULT_USB_HOST)
         connection_info = f"USB web interface at {usb_host}"
     elif REMARKABLE_USE_SSH:
@@ -1322,13 +1326,13 @@ async def remarkable_status() -> str:
             DEFAULT_SSH_USER,
         )
 
-        transport = "ssh"
+        selected_transport = "ssh"
         ssh_host = os.environ.get("REMARKABLE_SSH_HOST", DEFAULT_SSH_HOST)
         ssh_user = os.environ.get("REMARKABLE_SSH_USER", DEFAULT_SSH_USER)
         ssh_port = int(os.environ.get("REMARKABLE_SSH_PORT", str(DEFAULT_SSH_PORT)))
         connection_info = f"SSH to {ssh_user}@{ssh_host}:{ssh_port}"
     else:
-        transport = "cloud"
+        selected_transport = "cloud"
         connection_info = "environment variable" if REMARKABLE_TOKEN else "file (~/.rmapi)"
 
     # What each transport is capable of (independent of whether --write is on).
@@ -1363,16 +1367,19 @@ async def remarkable_status() -> str:
         },
     }
     writes_on = write_enabled()
-    # Effective capabilities for the active transport: write ops only count when
-    # the --write flag is enabled.
-    transport_caps = capability_matrix[transport]
-    effective_caps = {
-        cap: (supported if cap in ("read", "render") else supported and writes_on)
-        for cap, supported in transport_caps.items()
-    }
+    transport = selected_transport
 
     try:
         client = get_rmapi()
+        # Reflect any startup fallback to cloud (device unreachable + token set).
+        transport = get_active_transport()
+        fell_back = transport != selected_transport
+        if fell_back:
+            connection_info = (
+                f"cloud (fell back from {selected_transport}: device unreachable, "
+                "cloud token configured)"
+            )
+
         collection = await run_blocking(client.get_meta_items)
         items_by_id = get_items_by_id(collection)
 
@@ -1387,6 +1394,14 @@ async def remarkable_status() -> str:
             if _is_within_root(item_path, root):
                 doc_count += 1
 
+        # Effective capabilities for the active transport: write ops only count
+        # when the --write flag is enabled.
+        transport_caps = capability_matrix[transport]
+        effective_caps = {
+            cap: (supported if cap in ("read", "render") else supported and writes_on)
+            for cap, supported in transport_caps.items()
+        }
+
         result = {
             "authenticated": True,
             "transport": transport,
@@ -1397,12 +1412,20 @@ async def remarkable_status() -> str:
             "capabilities": effective_caps,
             "capabilities_by_transport": capability_matrix,
         }
+        if fell_back:
+            result["fell_back_to_cloud"] = True
 
         # Add root path info if configured
         if root != "/":
             result["root_path"] = root
 
         hint_parts = [f"Connected successfully via {transport}. Found {doc_count} documents."]
+        if fell_back:
+            hint_parts.append(
+                f"Note: {selected_transport} was selected but not reachable, so it "
+                "fell back to cloud (a cloud token is configured). Set "
+                "REMARKABLE_DISABLE_CLOUD_FALLBACK=1 to disable this."
+            )
         if root != "/":
             hint_parts.append(f"Filtered to root: {root}")
         if writes_on:
@@ -1426,6 +1449,8 @@ async def remarkable_status() -> str:
 
     except Exception as e:
         error_msg = str(e)
+        # Reflect fallback in the reported transport when one occurred.
+        transport = get_active_transport()
 
         result = {
             "authenticated": False,
@@ -1436,7 +1461,7 @@ async def remarkable_status() -> str:
             "capabilities_by_transport": capability_matrix,
         }
 
-        if REMARKABLE_USE_SSH:
+        if transport == "ssh":
             hint = (
                 "SSH connection failed. Make sure:\n"
                 "1) Developer mode / SSH is enabled on your tablet\n"
@@ -1445,7 +1470,7 @@ async def remarkable_status() -> str:
                 "See: https://remarkable.guide/guide/access/ssh.html\n\n"
                 "Or use cloud mode instead (remove --ssh flag) — no device needed."
             )
-        elif REMARKABLE_USE_USB_WEB:
+        elif transport == "usb-web":
             hint = (
                 "USB web interface not reachable. Make sure:\n"
                 "1) Your reMarkable is connected via USB\n"
