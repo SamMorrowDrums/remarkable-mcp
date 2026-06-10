@@ -2142,16 +2142,23 @@ class TestCloudSyncFileHeaders:
         content_hash = "content-hash"
         page_hash = "page-hash"
 
-        mock_request.side_effect = [
-            self._response(
-                content=(
-                    f"3\n{content_hash}:0:{doc_id}.content:0:18\n"
-                    f"{page_hash}:0:{doc_id}/page-1.rm:0:9\n"
-                ).encode("utf-8")
-            ),
-            self._response(content=b'{"fileType": "notebook"}'),
-            self._response(content=b"rm-bytes"),
-        ]
+        index_bytes = (
+            f"3\n{content_hash}:0:{doc_id}.content:0:18\n{page_hash}:0:{doc_id}/page-1.rm:0:9\n"
+        ).encode("utf-8")
+
+        # Key responses by hash: download() fetches the content blobs in
+        # parallel, so a positional side_effect list would be consumed in a
+        # nondeterministic order.
+        blob_by_hash = {
+            doc_hash: index_bytes,
+            content_hash: b'{"fileType": "notebook"}',
+            page_hash: b"rm-bytes",
+        }
+
+        def fake_request(method, url, **kwargs):
+            return self._response(content=blob_by_hash[url.rsplit("/", 1)[-1]])
+
+        mock_request.side_effect = fake_request
 
         client = RemarkableClient(user_token="user-token")
         doc = Document(id=doc_id, hash=doc_hash, name="Header Test", doc_type="DocumentType")
