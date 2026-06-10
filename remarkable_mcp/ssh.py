@@ -110,18 +110,40 @@ class SSHClient:
         user: str = DEFAULT_SSH_USER,
         port: int = DEFAULT_SSH_PORT,
         password: Optional[str] = None,
+        key_path: Optional[str] = None,
     ):
         self.host = host
         self.user = user
         self.port = port
         self.password = password
+        self.key_path = os.path.expanduser(key_path) if key_path else None
         self._documents: List[Document] = []
         self._documents_by_id: Dict[str, Document] = {}
+
+    def _auth_ssh_options(self) -> List[str]:
+        """SSH options for key-based auth.
+
+        When a password is set, auth is handled by wrapping the command with
+        ``sshpass`` (see callers), so no options are added here.
+
+        Otherwise we use ``BatchMode=yes`` (never prompt) and, if an explicit
+        key is configured, pin it with ``-i`` plus ``IdentitiesOnly=yes``. The
+        latter makes ssh use only that on-disk key and ignore any ssh-agent
+        (e.g. 1Password), so signing never blocks on interactive approval in a
+        headless MCP server.
+        """
+        if self.password:
+            return []
+        opts = ["-o", "BatchMode=yes"]
+        if self.key_path:
+            opts += ["-i", self.key_path, "-o", "IdentitiesOnly=yes"]
+        return opts
 
     def _ssh_command(self, command: str, timeout: int = 30) -> str:
         """Execute a command on the tablet via SSH."""
         ssh_args = [
             "ssh",
+            *self._auth_ssh_options(),
             "-o",
             "ConnectTimeout=5",
             "-o",
@@ -132,12 +154,8 @@ class SSHClient:
             command,
         ]
 
-        # If no password, use BatchMode for key-based auth
-        if not self.password:
-            ssh_args.insert(1, "-o")
-            ssh_args.insert(2, "BatchMode=yes")
-        else:
-            # Use sshpass for password authentication
+        # Use sshpass for password authentication
+        if self.password:
             ssh_args = ["sshpass", "-p", self.password] + ssh_args
 
         try:
@@ -173,6 +191,7 @@ class SSHClient:
         # This avoids issues with /dev/stdout on various platforms
         ssh_args = [
             "ssh",
+            *self._auth_ssh_options(),
             "-o",
             "ConnectTimeout=5",
             "-o",
@@ -183,12 +202,8 @@ class SSHClient:
             f"cat '{remote_path}'",
         ]
 
-        # If no password, use BatchMode for key-based auth
-        if not self.password:
-            ssh_args.insert(1, "-o")
-            ssh_args.insert(2, "BatchMode=yes")
-        else:
-            # Use sshpass for password authentication
+        # Use sshpass for password authentication
+        if self.password:
             ssh_args = ["sshpass", "-p", self.password] + ssh_args
 
         try:
@@ -486,7 +501,7 @@ def check_ssh_available(
     port: int = DEFAULT_SSH_PORT,
 ) -> bool:
     """Check if SSH connection to reMarkable tablet is available."""
-    client = SSHClient(host=host, user=user, port=port)
+    client = create_ssh_client(host=host, user=user, port=port)
     return client.check_connection()
 
 
@@ -495,6 +510,7 @@ def create_ssh_client(
     user: Optional[str] = None,
     port: Optional[int] = None,
     password: Optional[str] = None,
+    key_path: Optional[str] = None,
 ) -> SSHClient:
     """
     Create an SSH client with settings from environment or defaults.
@@ -503,11 +519,16 @@ def create_ssh_client(
     - REMARKABLE_SSH_HOST: SSH host (default: 10.11.99.1)
     - REMARKABLE_SSH_USER: SSH user (default: root)
     - REMARKABLE_SSH_PORT: SSH port (default: 22)
-    - REMARKABLE_SSH_PASSWORD: SSH password (optional, key-based auth recommended)
+    - REMARKABLE_SSH_PASSWORD: SSH password (optional, requires sshpass)
+    - REMARKABLE_SSH_KEY: path to a private key for key-based auth (optional).
+      When set, ssh uses only this identity (IdentitiesOnly) and ignores any
+      ssh-agent, avoiding hangs with interactive agents such as 1Password in a
+      headless server.
     """
     return SSHClient(
         host=host or os.environ.get("REMARKABLE_SSH_HOST", DEFAULT_SSH_HOST),
         user=user or os.environ.get("REMARKABLE_SSH_USER", DEFAULT_SSH_USER),
         port=port or int(os.environ.get("REMARKABLE_SSH_PORT", str(DEFAULT_SSH_PORT))),
         password=password or os.environ.get("REMARKABLE_SSH_PASSWORD"),
+        key_path=key_path or os.environ.get("REMARKABLE_SSH_KEY"),
     )

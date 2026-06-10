@@ -124,6 +124,22 @@ Some password managers provide built-in SSH agents, letting you use passphrase-p
 
 These integrate seamlessly — the agent handles authentication automatically, and you get the security benefits of passphrase-protected keys without manual setup.
 
+> ⚠️ **Headless servers and interactive agents:** Agents like 1Password sign keys only after **interactive approval** (a GUI prompt or biometric). When the MCP server runs somewhere that approval can't be shown — a remote box, CI, or an automated agent — that prompt never appears and SSH calls **hang** until they time out. In that case, pin an unencrypted on-disk key instead:
+>
+> ```json
+> {
+>   "servers": {
+>     "remarkable": {
+>       "command": "uvx",
+>       "args": ["remarkable-mcp", "--ssh", "--ssh-key", "~/.ssh/id_ed25519"],
+>       "env": { "GOOGLE_VISION_API_KEY": "your-api-key" }
+>     }
+>   }
+> }
+> ```
+>
+> `--ssh-key` (or the `REMARKABLE_SSH_KEY` env var) makes ssh use **only** that key (`IdentitiesOnly=yes`) and ignore the agent, so authentication never blocks. Make sure that key's public half is in the tablet's `~/.ssh/authorized_keys` (e.g. via `ssh-copy-id`).
+
 ### SSH Config Alias
 
 For convenience, add to `~/.ssh/config`:
@@ -170,6 +186,7 @@ Note: WiFi is slower than USB but works from anywhere on your network.
 | `REMARKABLE_SSH_USER` | `root` | SSH username |
 | `REMARKABLE_SSH_PORT` | `22` | SSH port |
 | `REMARKABLE_SSH_PASSWORD` | *(none)* | SSH password (requires `sshpass`, key auth recommended) |
+| `REMARKABLE_SSH_KEY` | *(none)* | Path to a private key for key auth. Pins this on-disk identity (`IdentitiesOnly`) and ignores any ssh-agent. |
 
 ## Troubleshooting
 
@@ -190,6 +207,10 @@ Note: WiFi is slower than USB but works from anywhere on your network.
 - The tablet may be asleep — tap the screen to wake it
 - Try unplugging and reconnecting the USB cable
 - Restart the tablet if issues persist
+
+### Commands hang, then time out
+
+If SSH connects but every command stalls for the full timeout, an **interactive ssh-agent** (e.g. 1Password) is likely holding the authorized key and waiting for approval the server can't show. Pin an unencrypted on-disk key with `--ssh-key ~/.ssh/id_ed25519` (or `REMARKABLE_SSH_KEY`) to bypass the agent. See [SSH Key Authentication](#ssh-key-authentication-recommended).
 
 ### Slow Performance
 

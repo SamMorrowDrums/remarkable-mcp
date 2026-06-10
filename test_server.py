@@ -3066,3 +3066,90 @@ class TestCloudClientCache:
         third = api.get_rmapi()
         assert third is not first
         assert len(created) == 2
+
+
+class TestSSHKeyAuth:
+    """SSH command construction for key-based / password / agent-free auth."""
+
+    def _capture(self, monkeypatch, *, text):
+        """Patch subprocess.run in ssh module and capture the argv it receives."""
+        import remarkable_mcp.ssh as ssh_mod
+
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return Mock(returncode=0, stdout=("ok" if text else b"ok"), stderr="")
+
+        monkeypatch.setattr(ssh_mod.subprocess, "run", fake_run)
+        return captured
+
+    def test_explicit_key_pins_identity_and_ignores_agent(self, monkeypatch):
+        from remarkable_mcp.ssh import SSHClient
+
+        captured = self._capture(monkeypatch, text=True)
+        client = SSHClient(key_path="~/.ssh/id_ed25519")
+        client._ssh_command("echo ok")
+
+        argv = captured["args"]
+        expected_key = os.path.expanduser("~/.ssh/id_ed25519")
+        assert "sshpass" not in argv
+        assert "-o" in argv and "BatchMode=yes" in argv
+        assert "-i" in argv
+        assert expected_key in argv
+        assert "IdentitiesOnly=yes" in argv
+        # Identity must be supplied before the destination/command.
+        assert argv.index(expected_key) < argv.index("echo ok")
+
+    def test_keyless_default_has_batchmode_but_no_identity(self, monkeypatch):
+        from remarkable_mcp.ssh import SSHClient
+
+        captured = self._capture(monkeypatch, text=True)
+        client = SSHClient()
+        client._ssh_command("echo ok")
+
+        argv = captured["args"]
+        assert "BatchMode=yes" in argv
+        assert "-i" not in argv
+        assert "IdentitiesOnly=yes" not in argv
+        assert "sshpass" not in argv
+
+    def test_password_uses_sshpass_without_batchmode(self, monkeypatch):
+        from remarkable_mcp.ssh import SSHClient
+
+        captured = self._capture(monkeypatch, text=True)
+        client = SSHClient(password="secret")
+        client._ssh_command("echo ok")
+
+        argv = captured["args"]
+        assert argv[:3] == ["sshpass", "-p", "secret"]
+        # Password auth must not force BatchMode (it would block the password).
+        assert "BatchMode=yes" not in argv
+        assert "IdentitiesOnly=yes" not in argv
+
+    def test_scp_download_also_pins_identity(self, monkeypatch):
+        from remarkable_mcp.ssh import SSHClient
+
+        captured = self._capture(monkeypatch, text=False)
+        client = SSHClient(key_path="/keys/rm_ed25519")
+        client._scp_download("/home/root/file.pdf")
+
+        argv = captured["args"]
+        assert "-i" in argv
+        assert "/keys/rm_ed25519" in argv
+        assert "IdentitiesOnly=yes" in argv
+        assert "BatchMode=yes" in argv
+
+    def test_create_ssh_client_reads_key_env(self, monkeypatch):
+        from remarkable_mcp.ssh import create_ssh_client
+
+        monkeypatch.setenv("REMARKABLE_SSH_KEY", "~/.ssh/rm_key")
+        monkeypatch.delenv("REMARKABLE_SSH_PASSWORD", raising=False)
+        client = create_ssh_client()
+        assert client.key_path == os.path.expanduser("~/.ssh/rm_key")
+
+    def test_key_path_defaults_to_none(self):
+        from remarkable_mcp.ssh import SSHClient
+
+        assert SSHClient().key_path is None
