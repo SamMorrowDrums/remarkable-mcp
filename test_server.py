@@ -7,7 +7,6 @@ Tests the 4 intent-based tools using FastMCP's testing capabilities.
 
 import json
 import os
-import shutil
 import tempfile
 import zipfile
 from pathlib import Path
@@ -1833,63 +1832,118 @@ class TestIsCloudArchivedFix:
         assert doc.is_cloud_archived is True
 
 
-class TestRmcResolution:
-    """Regression tests for rmc binary resolution (issues #52, #78, #80)."""
+def _make_v6_rm_bytes() -> bytes:
+    """Build a minimal current-firmware (v6) .rm file with a single line.
 
-    def test_rmc_executable_returns_string(self):
-        """_rmc_executable should always return a string path."""
-        from remarkable_mcp.extract import _rmc_executable
+    Uses rmscene's own writer, which both produces a deterministic fixture and
+    exercises the rmscene>=0.8.0 read/write round-trip our renderer relies on
+    (the version that parses the current scene format — see #95 / PR #97).
+    """
+    import io
+    import uuid
 
-        result = _rmc_executable()
-        assert isinstance(result, str)
-        assert len(result) > 0
+    from rmscene import scene_items as si
+    from rmscene.crdt_sequence import CrdtSequenceItem
+    from rmscene.scene_stream import (
+        AuthorIdsBlock,
+        MigrationInfoBlock,
+        PageInfoBlock,
+        SceneLineItemBlock,
+        SceneTreeBlock,
+        TreeNodeBlock,
+        write_blocks,
+    )
+    from rmscene.tagged_block_common import CrdtId
 
-    def test_rmc_executable_finds_venv_binary(self):
-        """_rmc_executable should find rmc in the venv's bin directory."""
-        from remarkable_mcp.extract import _rmc_executable
+    points = [
+        si.Point(x=float(x), y=0.0, speed=0, direction=0, width=2, pressure=0) for x in (-50, 0, 50)
+    ]
+    line = si.Line(
+        color=si.PenColor.BLACK,
+        tool=si.Pen.BALLPOINT_1,
+        points=points,
+        thickness_scale=1.0,
+        starting_length=0.0,
+    )
+    node_id = CrdtId(0, 11)
+    blocks = [
+        AuthorIdsBlock(author_uuids={1: uuid.uuid4()}),
+        MigrationInfoBlock(migration_id=CrdtId(0, 1), is_device=True),
+        PageInfoBlock(loads_count=1, merges_count=0, text_chars_count=0, text_lines_count=0),
+        SceneTreeBlock(
+            tree_id=node_id,
+            node_id=CrdtId(0, 0),
+            is_update=True,
+            parent_id=CrdtId(0, 0),
+        ),
+        TreeNodeBlock(group=si.Group(node_id=node_id)),
+        SceneLineItemBlock(
+            parent_id=node_id,
+            item=CrdtSequenceItem(
+                item_id=CrdtId(0, 12),
+                left_id=CrdtId(0, 0),
+                right_id=CrdtId(0, 0),
+                deleted_length=0,
+                value=line,
+            ),
+        ),
+    ]
+    buf = io.BytesIO()
+    write_blocks(buf, blocks)
+    return buf.getvalue()
 
-        result = _rmc_executable()
-        # Should find it either on PATH or in venv
-        assert Path(result).stem == "rmc"
 
-    def test_rmc_executable_falls_back_to_venv(self):
-        """When rmc is not on PATH, should find it in the venv bin."""
-        import sys
+class TestRmToSvgRendering:
+    """Regression tests for .rm -> SVG rendering after dropping rmc (PR #97).
 
-        from remarkable_mcp.extract import _rmc_executable
+    rmc transitively pinned rmscene<0.7.0, which cannot parse current-firmware
+    .rm scene blocks (#95). _rm_to_svg now renders via the in-repo rmscene v6/v5
+    renderers directly, with no rmc subprocess.
+    """
 
-        venv_rmc = Path(sys.executable).parent / "rmc"
-        if not venv_rmc.exists():
-            pytest.skip("rmc not in venv bin")
+    def test_rmc_dependency_removed(self):
+        """The rmc subprocess helper is gone; rmscene is the modern (>=0.8) parser."""
+        from importlib.metadata import version
 
-        # Capture real which() before patching
-        real_which = shutil.which
+        from packaging.version import Version
 
-        # Patch so PATH lookup returns None, but venv-bin lookup works
-        with patch("remarkable_mcp.extract.shutil.which") as mock_which:
-            mock_which.side_effect = lambda name, path=None: (
-                real_which(name, path=path) if path else None
-            )
-            result = _rmc_executable()
-        assert Path(result).stem == "rmc"
+        from remarkable_mcp import extract
 
-    @patch("remarkable_mcp.extract.shutil.which", return_value=None)
-    def test_rmc_executable_falls_back_to_bare(self, mock_which):
-        """When rmc is nowhere, should return bare 'rmc' for clear error."""
-        from remarkable_mcp.extract import _rmc_executable
+        assert not hasattr(extract, "_rmc_executable")
+        assert Version(version("rmscene")) >= Version("0.8.0")
 
-        result = _rmc_executable()
-        assert result == "rmc"
+    def test_rm_to_svg_renders_v6_current_firmware(self):
+        """_rm_to_svg renders a current-firmware (v6) file via rmscene (the #95 fix)."""
+        from remarkable_mcp.extract import _rm_to_svg
 
-    @patch("remarkable_mcp.extract.subprocess.run")
-    def test_rm_to_svg_v5_fallback(self, mock_run):
-        """_rm_to_svg should use v5 fallback when rmc is not available."""
+        try:
+            data = _make_v6_rm_bytes()
+        except Exception as exc:  # pragma: no cover - guards rmscene API drift
+            pytest.skip(f"could not synthesize a v6 fixture with rmscene: {exc}")
+
+        assert data[:33] == b"reMarkable .lines file, version=6"
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(data)
+            rm_path = Path(rm_tmp.name)
+        with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as svg_tmp:
+            svg_path = Path(svg_tmp.name)
+
+        try:
+            result = _rm_to_svg(rm_path, svg_path)
+            assert result is True
+            svg_content = svg_path.read_text()
+            assert "<svg" in svg_content
+            assert "<path" in svg_content
+        finally:
+            rm_path.unlink(missing_ok=True)
+            svg_path.unlink(missing_ok=True)
+
+    def test_rm_to_svg_renders_v5(self):
+        """_rm_to_svg renders a v5 file via the built-in renderer (no rmc needed)."""
         import struct
 
         from remarkable_mcp.extract import _rm_to_svg
-
-        # Simulate rmc not found
-        mock_run.side_effect = FileNotFoundError("rmc not found")
 
         # Build minimal v5 .rm file with one stroke
         buf = bytearray()

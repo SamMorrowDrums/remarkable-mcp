@@ -5,9 +5,6 @@ Text extraction helpers for reMarkable documents.
 import json
 import logging
 import os
-import shutil
-import subprocess
-import sys
 import tempfile
 import time
 import zipfile
@@ -18,49 +15,21 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
-def _rmc_executable() -> str:
-    """Return a usable path to the ``rmc`` CLI.
-
-    When installed via ``uvx``, ``rmc`` lives in the venv's ``bin/`` (or
-    ``Scripts/`` on Windows) directory and is not on the system PATH. We
-    check PATH first, then the venv's bin directory (using ``shutil.which``
-    to handle platform-specific extensions like ``.exe``), then fall back
-    to bare ``"rmc"`` (which lets subprocess raise a clear
-    ``FileNotFoundError`` if nothing is found).
-
-    Credit: ColinSha (PR #79)
-    """
-    found = shutil.which("rmc")
-    if found:
-        return found
-    # Check the venv's bin/Scripts directory — shutil.which handles .exe/.cmd
-    venv_bin = str(Path(sys.executable).parent)
-    found = shutil.which("rmc", path=venv_bin)
-    if found:
-        return found
-    return "rmc"
-
-
 def _rm_to_svg(rm_file_path: Path, output_svg_path: Path) -> bool:
-    """Convert a .rm file to SVG, trying rmc then v5/v6 fallback renderers.
+    """Convert a .rm file to SVG using the built-in rmscene renderers.
+
+    The ``rmc`` dependency has been dropped: it transitively pinned
+    ``rmscene<0.7.0``, which cannot parse current-firmware ``.rm`` scene
+    blocks (e.g. ``SceneInfo`` ``block_type=13``). We render via ``rmscene``
+    directly using the in-repo v6/v5 renderers. v6 is tried first since it is
+    the current firmware format.
 
     Writes the SVG content to output_svg_path and returns True on success.
     Returns False if no renderer could handle the file.
-    """
-    # Try rmc first
-    try:
-        result = subprocess.run(
-            [_rmc_executable(), "-t", "svg", "-o", str(output_svg_path), str(rm_file_path)],
-            capture_output=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
 
-    # rmc failed or not found — try built-in v5/v6 renderers
-    svg_content = _render_rm_v5_to_svg(rm_file_path) or _render_rm_v6_to_svg(rm_file_path)
+    Credit: khalid-hasan (PR #97), ljdutel (#95)
+    """
+    svg_content = _render_rm_v6_to_svg(rm_file_path) or _render_rm_v5_to_svg(rm_file_path)
     if svg_content is not None:
         output_svg_path.write_text(svg_content)
         return True
@@ -594,7 +563,7 @@ def render_rm_file_to_png(
     """
     Render a .rm file to PNG image bytes.
 
-    Uses rmc to convert .rm to SVG, then cairosvg to convert to PNG.
+    Uses the rmscene renderers to convert .rm to SVG, then cairosvg to convert to PNG.
     The output is sized based on the SVG content bounds with a margin.
 
     Args:
@@ -620,7 +589,7 @@ def render_rm_file_to_png(
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
             tmp_png_path = Path(tmp_png.name)
 
-        # Convert .rm to SVG (rmc with v5/v6 fallback)
+        # Convert .rm to SVG via the rmscene renderers
         if not _rm_to_svg(rm_file_path, tmp_svg_path):
             return None
 
@@ -711,7 +680,7 @@ def render_rm_file_to_svg(
     """
     Render a .rm file to SVG string.
 
-    Uses rmc to convert .rm to SVG, optionally adding a background.
+    Uses the rmscene renderers to convert .rm to SVG, optionally adding a background.
 
     Args:
         rm_file_path: Path to the .rm file
@@ -731,7 +700,7 @@ def render_rm_file_to_svg(
         with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
             tmp_svg_path = Path(tmp_svg.name)
 
-        # Convert .rm to SVG (rmc with v5/v6 fallback)
+        # Convert .rm to SVG via the rmscene renderers
         if not _rm_to_svg(rm_file_path, tmp_svg_path):
             return None
 
@@ -1171,14 +1140,13 @@ def render_merged_page_from_document_zip(
             if _rm_to_svg(target_rm_file, ann_svg_path):
                 # Read the SVG and adjust viewBox to match PDF page bounds.
                 #
-                # rmc emits stroke coordinates in PDF points (after its internal
-                # SCALE = 72/226), with the origin at the top of the page and
-                # x=0 in the horizontal center (so x ranges roughly from
-                # -W_pt/2 to +W_pt/2). Setting the viewBox to
-                # (-W_pt/2, 0, W_pt, H_pt) maps that coordinate system to the
-                # PDF page bounds so annotations align. This is specific to
-                # rmc's v6 renderer; if the upstream coordinate convention
-                # changes this alignment will need to be revisited.
+                # rmscene's v6 renderer emits stroke coordinates with the
+                # origin at the top of the page and x=0 in the horizontal
+                # center (so x ranges roughly from -W/2 to +W/2). Setting the
+                # viewBox to (-W_pt/2, 0, W_pt, H_pt) maps that coordinate
+                # system to the PDF page bounds so annotations align. If the
+                # upstream coordinate convention changes, this alignment will
+                # need to be revisited.
                 svg_content = ann_svg_path.read_text()
 
                 svg_content = re.sub(
@@ -1432,7 +1400,7 @@ def extract_handwriting_ocr(rm_files: List[Path]) -> tuple[Optional[List[str]], 
     Supports multiple backends (set REMARKABLE_OCR_BACKEND env var):
     - "sampling": Uses client's LLM via MCP sampling (requires async context, tools only)
     - "google": Google Cloud Vision - best for handwriting
-    - "tesseract": pytesseract - basic OCR, requires rmc + cairosvg
+    - "tesseract": pytesseract - basic OCR, requires cairosvg (or inkscape)
     - "auto" (default): Google if API key provided, else Tesseract
 
     Note: "sampling" backend requires async context and is only available via tools,
@@ -1511,7 +1479,7 @@ def _ocr_google_vision_rest(rm_files: List[Path], api_key: str) -> Optional[List
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
                 tmp_png_path = Path(tmp_png.name)
 
-            # Convert .rm to SVG (rmc with v5/v6 fallback)
+            # Convert .rm to SVG via the rmscene renderers
             if not _rm_to_svg(rm_file, tmp_svg_path):
                 continue
             # Convert SVG to PNG
@@ -1616,7 +1584,7 @@ def _ocr_google_vision_sdk(rm_files: List[Path]) -> Optional[List[str]]:
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
                     tmp_png_path = Path(tmp_png.name)
 
-                # Convert .rm to SVG (rmc with v5/v6 fallback)
+                # Convert .rm to SVG via the rmscene renderers
                 if not _rm_to_svg(rm_file, tmp_svg_path):
                     continue
                 try:
@@ -1697,7 +1665,7 @@ def _ocr_tesseract(rm_files: List[Path]) -> Optional[List[str]]:
     OCR using Tesseract.
     Basic quality - designed for printed text, not handwriting.
 
-    Requires: pytesseract, rmc, cairosvg (or inkscape)
+    Requires: pytesseract, cairosvg (or inkscape)
     """
     try:
         import subprocess
@@ -1719,7 +1687,7 @@ def _ocr_tesseract(rm_files: List[Path]) -> Optional[List[str]]:
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
                     tmp_png_path = Path(tmp_png.name)
 
-                # Convert .rm to SVG (rmc with v5/v6 fallback)
+                # Convert .rm to SVG via the rmscene renderers
                 if not _rm_to_svg(rm_file, tmp_svg_path):
                     continue
 
