@@ -582,7 +582,7 @@ Cloud API requests automatically retry on transient failures (HTTP 429, 500, 502
 | `REMARKABLE_RETRY_ATTEMPTS` | `3` | Maximum number of request attempts (minimum 1) |
 | `REMARKABLE_RETRY_DELAY` | `2.0` | Base delay in seconds for exponential backoff |
 
-The retry logic honours the `Retry-After` header from rate-limited responses, capped at 20 seconds. Auth failures (401) are not retried — they trigger automatic token renewal instead.
+The retry logic honours the `Retry-After` header from rate-limited responses — both the numeric (seconds) form and the HTTP-date form (which Cloudflare, fronting the reMarkable cloud, often sends) — capped at 20 seconds. Auth failures (401) are not retried — they trigger automatic token renewal instead.
 
 ---
 

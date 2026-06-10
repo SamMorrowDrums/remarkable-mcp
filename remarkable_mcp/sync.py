@@ -18,7 +18,8 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -117,16 +118,39 @@ def _get_retry_delay() -> float:
 def _parse_retry_after(response: requests.Response) -> Optional[float]:
     """Parse the Retry-After header, returning seconds or None.
 
-    Only the numeric form (seconds) is supported; HTTP-date values
-    and invalid/negative/non-finite values fall back to jittered backoff.
+    Supports both forms defined by RFC 9110:
+    - delay-seconds (e.g. ``120``)
+    - HTTP-date (e.g. ``Wed, 21 Oct 2026 07:28:00 GMT``) — Cloudflare, which
+      fronts the reMarkable cloud, often uses this on 429s. The delay is the
+      time from now until that date.
+
+    The result is clamped to ``[0, MAX_RETRY_DELAY]`` (consistent with the
+    jittered backoff). Missing/invalid/negative values return None, so the
+    caller falls back to exponential backoff with jitter.
     """
     header = response.headers.get("Retry-After")
     if header is None:
         return None
+
+    # delay-seconds form.
+    val: Optional[float]
     try:
         val = float(header)
     except (ValueError, TypeError):
-        return None
+        val = None
+
+    # HTTP-date form.
+    if val is None:
+        try:
+            retry_at = parsedate_to_datetime(header)
+        except (TypeError, ValueError):
+            return None
+        if retry_at is None:
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        val = (retry_at - datetime.now(timezone.utc)).total_seconds()
+
     if not math.isfinite(val) or val < 0:
         return None
     return min(val, MAX_RETRY_DELAY)
