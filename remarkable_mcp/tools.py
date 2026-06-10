@@ -9,6 +9,7 @@ import base64
 import os
 import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
 
@@ -164,6 +165,28 @@ def _is_cloud_archived(item) -> bool:
     # Cloud mode: check parent == "trash"
     parent = item.Parent if hasattr(item, "Parent") else getattr(item, "parent", "")
     return parent == "trash"
+
+
+def _modified_sort_key(item) -> float:
+    """Return a sortable timestamp for an item's modified date.
+
+    Normalizes ``ModifiedClient`` to a float epoch timestamp so documents with a
+    missing/null modified date (e.g. freshly-created notebooks) sort to the
+    bottom instead of crashing the comparator.
+
+    A plain sentinel ``datetime`` cannot be used here: USB ``ModifiedClient``
+    values are timezone-aware (parsed via ``fromisoformat``) while cloud and SSH
+    values are naive (parsed via ``fromtimestamp``), and Python refuses to
+    compare naive and aware datetimes. Reducing everything to ``.timestamp()``
+    sidesteps both the str/datetime and the naive/aware comparison errors.
+    """
+    modified = getattr(item, "ModifiedClient", None)
+    if isinstance(modified, datetime):
+        try:
+            return modified.timestamp()
+        except (OverflowError, OSError, ValueError):
+            return 0.0
+    return 0.0
 
 
 def _ocr_png_tesseract(png_path: Path) -> Optional[str]:
@@ -1051,12 +1074,7 @@ async def remarkable_recent(limit: int = 10, include_preview: bool = False) -> s
                 continue
             documents.append(item)
 
-        documents.sort(
-            key=lambda x: (
-                x.ModifiedClient if hasattr(x, "ModifiedClient") and x.ModifiedClient else ""
-            ),
-            reverse=True,
-        )
+        documents.sort(key=_modified_sort_key, reverse=True)
 
         results = []
         for doc in documents[:limit]:

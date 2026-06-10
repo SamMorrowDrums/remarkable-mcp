@@ -457,6 +457,44 @@ class TestRemarkableRecent:
         assert "_error" not in data
         assert "documents" in data
 
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_recent_handles_null_and_mixed_modified_dates(self, mock_get_rmapi):
+        """Regression test for #96: remarkable_recent must not crash when documents
+        have a null modified date, nor when modified dates mix tz-aware (USB) and
+        tz-naive (cloud/SSH) datetimes.
+
+        Previously the sort key returned "" (str) for missing dates and a datetime
+        otherwise, raising TypeError ('<' not supported between str and datetime).
+        A tz-aware sentinel would still crash cloud/SSH (naive vs aware compare).
+        """
+        from datetime import datetime, timezone
+
+        class FakeDoc:
+            def __init__(self, doc_id, name, modified):
+                self.ID = doc_id
+                self.VissibleName = name
+                self.Parent = ""
+                self.is_folder = False
+                self.tags = []
+                self.ModifiedClient = modified
+
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        # newest: tz-aware (USB style); middle: tz-naive (cloud style); oldest: None
+        mock_client.get_meta_items.return_value = [
+            FakeDoc("a", "Naive Middle", datetime(2024, 6, 1, 12, 0, 0)),
+            FakeDoc("b", "Fresh Notebook", None),
+            FakeDoc("c", "Aware Newest", datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)),
+        ]
+
+        result = await mcp.call_tool("remarkable_recent", {})
+        data = json.loads(result[0][0].text)
+
+        assert "_error" not in data
+        names = [d["name"] for d in data["documents"]]
+        assert names == ["Aware Newest", "Naive Middle", "Fresh Notebook"]
+
 
 # =============================================================================
 # Test remarkable_search Tool
