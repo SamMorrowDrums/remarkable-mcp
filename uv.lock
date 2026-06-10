@@ -1362,7 +1362,6 @@ dependencies = [
     { name = "pymupdf" },
     { name = "pytesseract" },
     { name = "requests" },
-    { name = "rmc" },
     { name = "rmscene" },
 ]
 
@@ -1397,8 +1396,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "requests", specifier = ">=2.28.0" },
-    { name = "rmc", specifier = ">=0.3.0" },
-    { name = "rmscene", specifier = ">=0.6.0" },
+    { name = "rmscene", specifier = ">=0.8.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
 ]
 provides-extras = ["dev", "ocr"]
@@ -1425,28 +1423,15 @@ wheels = [
 ]
 
 [[package]]
-name = "rmc"
-version = "0.3.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "click" },
-    { name = "rmscene" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/f0/00/5e05be08e8905f888ece9e5835b96e4ec3aabb480cce564c4ec5e5e0ca32/rmc-0.3.0.tar.gz", hash = "sha256:57afe14d56694085b6a382aa2b93b7b86eb21e93e720b16a82990aa0d6513dcb", size = 10799, upload-time = "2025-03-21T08:04:46.362Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a8/b0/486783b0321557d4294195e73e10b58dc5b5e1ac8519791c48160f863097/rmc-0.3.0-py3-none-any.whl", hash = "sha256:f2957bf08c48902bf50b047ee08aeb0be5a8c0a64bf7a1a46e23ae02c0c75780", size = 12626, upload-time = "2025-03-21T08:04:45.074Z" },
-]
-
-[[package]]
 name = "rmscene"
-version = "0.6.1"
+version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "packaging" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/92/27/bb1c99959216af939ade7b5b470d049cfa368a179a2c021153e93a922c5a/rmscene-0.6.1.tar.gz", hash = "sha256:82f7797bdfa407f9ad27245e7333a7c6e81f8da3390a4f9d9d89736643fe163c", size = 22790, upload-time = "2024-12-03T21:21:57.361Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/de/dd/2ec964e1f5e007e3b6492e3aace7bfdb58422d6770a2cda08988068089bf/rmscene-0.8.0.tar.gz", hash = "sha256:db9417a6b8cc86e80c1be8cefa29cec24d4d49777433d49d1fc741773f10d5be", size = 23794, upload-time = "2026-04-05T14:56:59.883Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b2/77/4de4d4e0203d83288d33b4e448aafbe9aff6fe4deeb344f28c1cca901b98/rmscene-0.6.1-py3-none-any.whl", hash = "sha256:9cd50ae8eede26e3263d78102db880644d39dcc6a5376d38627c060e47bf9045", size = 25316, upload-time = "2024-12-03T21:21:56.043Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/bb/c98189fa471986c13acb35dbce444345e05d8b58096b4457c1c4b3494443/rmscene-0.8.0-py3-none-any.whl", hash = "sha256:78f2bb8a746ceb6428005aa5fcb576eb7cf10ad537d043c49659c950633b01d1", size = 26765, upload-time = "2026-04-05T14:56:58.525Z" },
 ]
 
 [[package]]
