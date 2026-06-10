@@ -883,6 +883,132 @@ class TestMergedRendering:
         assert mock_render_merged.called
 
 
+def _make_synthetic_pdf(pages: int = 2) -> bytes:
+    """Build a small multi-page PDF in memory for fallback tests."""
+    import fitz
+
+    doc = fitz.open()
+    for _ in range(pages):
+        # reMarkable-ish portrait page dimensions in points
+        doc.new_page(width=445, height=594)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+class TestRenderTabletPdfFallback:
+    """Tests for the portable tablet-PDF render fallback (issue #95/#102/#94)."""
+
+    def test_render_tablet_pdf_page_to_png_returns_png(self):
+        """A valid PDF page rasterizes to PNG bytes."""
+        from remarkable_mcp.extract import render_tablet_pdf_page_to_png
+
+        pdf = _make_synthetic_pdf(2)
+        png = render_tablet_pdf_page_to_png(pdf, page=1)
+        assert png is not None
+        assert png.startswith(b"\x89PNG\r\n\x1a\n")
+
+    def test_render_tablet_pdf_page_out_of_range(self):
+        """Out-of-range page returns None rather than raising."""
+        from remarkable_mcp.extract import render_tablet_pdf_page_to_png
+
+        pdf = _make_synthetic_pdf(1)
+        assert render_tablet_pdf_page_to_png(pdf, page=5) is None
+        assert render_tablet_pdf_page_to_png(pdf, page=0) is None
+
+    def test_render_tablet_pdf_invalid_bytes(self):
+        """Invalid PDF bytes return None rather than raising."""
+        from remarkable_mcp.extract import render_tablet_pdf_page_to_png
+
+        assert render_tablet_pdf_page_to_png(b"not a pdf", page=1) is None
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.download_raw_file")
+    @patch("remarkable_mcp.tools.render_page_from_document_zip")
+    @patch("remarkable_mcp.tools.get_document_page_count")
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_image_falls_back_to_tablet_pdf(
+        self,
+        mock_get_rmapi,
+        mock_page_count,
+        mock_render,
+        mock_download_raw,
+        mock_document,
+    ):
+        """When local stroke render returns None, fall back to the tablet PDF."""
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_document.is_folder = False
+        mock_client.get_meta_items.return_value = [mock_document]
+        mock_client.download.return_value = b"fake zip"
+        mock_page_count.return_value = 2
+        # Local stroke renderer fails (e.g. empty page or missing libcairo)
+        mock_render.return_value = None
+        # Tablet exposes a natively-rendered PDF
+        mock_download_raw.return_value = _make_synthetic_pdf(2)
+
+        with patch("tempfile.NamedTemporaryFile") as mock_tmpfile:
+            mock_tmp = Mock()
+            mock_tmp.__enter__ = Mock(return_value=mock_tmp)
+            mock_tmp.__exit__ = Mock(return_value=False)
+            mock_tmp.name = "/tmp/test.zip"
+            mock_tmpfile.return_value = mock_tmp
+            with patch("pathlib.Path.unlink"):
+                result = await mcp.call_tool(
+                    "remarkable_image",
+                    {"document": "Test Document", "page": 2, "compatibility": True},
+                )
+
+        data = json.loads(result[0].text)
+        assert "_error" not in data
+        assert data.get("render_source") == "tablet_pdf"
+        assert data.get("image_base64")
+        assert "native PDF export" in data.get("_hint", "")
+        mock_download_raw.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.download_raw_file")
+    @patch("remarkable_mcp.tools.render_page_from_document_zip")
+    @patch("remarkable_mcp.tools.get_document_page_count")
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_image_render_failed_when_no_fallback(
+        self,
+        mock_get_rmapi,
+        mock_page_count,
+        mock_render,
+        mock_download_raw,
+        mock_document,
+    ):
+        """With no local render and no tablet PDF (e.g. cloud), report render_failed."""
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_document.is_folder = False
+        mock_client.get_meta_items.return_value = [mock_document]
+        mock_client.download.return_value = b"fake zip"
+        mock_page_count.return_value = 1
+        mock_render.return_value = None
+        mock_download_raw.return_value = None  # cloud: no native export
+
+        with patch("tempfile.NamedTemporaryFile") as mock_tmpfile:
+            mock_tmp = Mock()
+            mock_tmp.__enter__ = Mock(return_value=mock_tmp)
+            mock_tmp.__exit__ = Mock(return_value=False)
+            mock_tmp.name = "/tmp/test.zip"
+            mock_tmpfile.return_value = mock_tmp
+            with patch("pathlib.Path.unlink"):
+                result = await mcp.call_tool(
+                    "remarkable_image",
+                    {"document": "Test Document", "page": 1, "compatibility": True},
+                )
+
+        data = json.loads(result[0].text)
+        assert data["_error"]["type"] == "render_failed"
+        # The misleading "v5 / rmc" message is gone; guidance is actionable
+        suggestion = data["_error"]["suggestion"].lower()
+        assert "v5" not in suggestion
+        assert "cairo" in suggestion or "native pdf" in suggestion
+
+
 # =============================================================================
 # Test Registration
 # =============================================================================

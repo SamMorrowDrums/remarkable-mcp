@@ -1002,6 +1002,59 @@ def _render_pdf_page_to_png(
         return None
 
 
+def render_tablet_pdf_page_to_png(
+    pdf_bytes: bytes, page: int = 1, target_long_edge: int = 2048
+) -> Optional[bytes]:
+    """Rasterize one page of the tablet's native PDF export to PNG bytes.
+
+    This is the portable fallback used when the local stroke renderer cannot
+    produce an image. The reMarkable's own firmware renders every notebook (and
+    annotated PDF/EPUB) to a PDF served at ``/download/<uuid>/pdf``, so this path
+    works regardless of the .rm block format, handles empty pages, and—crucially
+    for portability—does not depend on a working ``cairo``/``libcairo`` for
+    ``cairosvg`` (PyMuPDF bundles its own renderer). Credit: ljdutel (#95).
+
+    Args:
+        pdf_bytes: Raw bytes of the tablet-exported PDF.
+        page: 1-based page number (matches notebook page ordering 1:1).
+        target_long_edge: Target pixel size for the longest page edge.
+
+    Returns:
+        PNG image bytes, or None on failure / out-of-range page.
+    """
+    try:
+        import fitz
+    except ImportError:
+        return None
+
+    # The tablet's PDFs sometimes reference graphics-state resources MuPDF
+    # considers malformed; it still rasterizes them correctly, so suppress the
+    # noisy non-fatal error output.
+    try:
+        fitz.TOOLS.mupdf_display_errors(False)
+    except Exception:
+        pass
+
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception:
+        return None
+
+    try:
+        index = page - 1
+        if index < 0 or index >= len(doc):
+            return None
+        pdf_page = doc[index]
+        longest_edge = max(pdf_page.rect.width, pdf_page.rect.height) or 1.0
+        zoom = target_long_edge / longest_edge
+        pix = pdf_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        return pix.tobytes("png")
+    except Exception:
+        return None
+    finally:
+        doc.close()
+
+
 def render_merged_page_from_document_zip(
     zip_path: Path,
     page: int = 1,

@@ -45,6 +45,7 @@ from remarkable_mcp.extract import (
     render_merged_page_from_document_zip,
     render_page_from_document_zip,
     render_page_from_document_zip_svg,
+    render_tablet_pdf_page_to_png,
 )
 from remarkable_mcp.responses import make_error, make_response
 from remarkable_mcp.sampling import (
@@ -1567,8 +1568,11 @@ async def remarkable_image(
                         error_type="render_failed",
                         message="Failed to render page to SVG.",
                         suggestion=(
-                            "This may be an older notebook format (v5) not supported by rmc. "
-                            "Try remarkable_read() to extract text instead."
+                            "SVG output requires local stroke parsing, so the "
+                            "page may be empty or in a newer format. Try "
+                            "output_format='png', which falls back to the "
+                            "tablet's native PDF export in USB/SSH mode, or "
+                            "remarkable_read() to extract text instead."
                         ),
                     )
 
@@ -1625,13 +1629,35 @@ async def remarkable_image(
                         background_color=background,
                     )
 
+                # Portable fallback: the local stroke renderer can fail to
+                # produce an image for empty pages, newer .rm block formats, or
+                # when the client machine lacks a working cairo/libcairo for
+                # cairosvg. In USB and SSH modes the tablet exports a
+                # natively-rendered PDF that covers all of those cases, so
+                # rasterize the requested page from it with PyMuPDF (which needs
+                # no system cairo). Cloud mode has no such export, so
+                # download_raw_file returns None there and this safely no-ops.
+                # Credit: ljdutel (#95).
+                rendered_via_pdf = False
+                if png_data is None:
+                    pdf_bytes = await run_blocking(download_raw_file, client, target_doc, "pdf")
+                    if pdf_bytes:
+                        png_data = await run_blocking(
+                            render_tablet_pdf_page_to_png, pdf_bytes, page
+                        )
+                        rendered_via_pdf = png_data is not None
+
                 if png_data is None:
                     return make_error(
                         error_type="render_failed",
                         message="Failed to render page to image.",
                         suggestion=(
-                            "This may be an older notebook format (v5) not supported by rmc. "
-                            "Try remarkable_read() to extract text instead."
+                            "The page may be empty, or local rendering "
+                            "dependencies (cairo/libcairo for cairosvg) may be "
+                            "missing. In USB/SSH mode the tablet's native PDF "
+                            "export is used automatically as a fallback—make "
+                            "sure the tablet is connected. You can also try "
+                            "remarkable_read() to extract text instead."
                         ),
                     )
 
@@ -1702,6 +1728,11 @@ async def remarkable_image(
                         hint = f"{merged_note} {hint}"
                     elif is_merged:
                         hint = f"Rendered with PDF + annotation compositing. {hint}"
+                    if rendered_via_pdf:
+                        hint = (
+                            "Rendered via the tablet's native PDF export "
+                            "(local stroke render unavailable). " + hint
+                        )
 
                     response_data = {
                         "data_uri": data_uri,
@@ -1711,6 +1742,7 @@ async def remarkable_image(
                         "total_pages": total_pages,
                         "resource_uri": resource_uri,
                         "merged": is_merged,
+                        "render_source": "tablet_pdf" if rendered_via_pdf else "strokes",
                         **ocr_info,
                     }
                     return make_response(response_data, hint)
@@ -1727,6 +1759,11 @@ async def remarkable_image(
                     info_text += f"Resource URI: {resource_uri}"
                     if is_merged:
                         info_text += "\nRendered with PDF + annotation compositing."
+                    if rendered_via_pdf:
+                        info_text += (
+                            "\nRendered via the tablet's native PDF export "
+                            "(local stroke render unavailable)."
+                        )
                     if merged_note:
                         info_text += f"\nNote: {merged_note}"
                     if include_ocr and ocr_text:

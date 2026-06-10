@@ -12,6 +12,7 @@ Your reMarkable tablet is a powerful tool for thinking, note-taking, and researc
 - **Typed text extraction** — Native support for Type Folio and typed annotations
 - **Handwriting OCR** — Convert handwritten notes to searchable text
 - **PDF & EPUB support** — Extract text from documents, plus your annotations
+- **Robust page rendering** — Renders pages locally and, in USB/SSH mode, automatically falls back to the tablet's own PDF export, so images work across firmware versions and even without system graphics libraries installed
 - **Smart search** — Find content across your entire library
 - **Second brain integration** — Use with Obsidian, note-taking apps, or any AI workflow
 
@@ -284,6 +285,12 @@ remarkable_image("Logo Sketch", background="#00000000")
 # Compatibility mode: return resource URI instead of embedded resource
 remarkable_image("Diagram", compatibility=True)
 ```
+
+> **Note:** In USB and SSH modes, PNG rendering automatically falls back to the
+> tablet's native PDF export when the local stroke renderer can't produce an
+> image (empty pages, newer `.rm` formats, or a machine without `libcairo`).
+> This keeps `remarkable_image` working across firmware versions and platforms.
+> Cloud mode has no native export, so it relies on the local renderer.
 
 ---
 
