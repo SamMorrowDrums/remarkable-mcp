@@ -229,19 +229,26 @@ async def lifespan(app: FastMCP) -> AsyncIterator[None]:
     logger.info(f"SSH mode detected: {ssh_mode}")
 
     if ssh_mode:
-        # SSH mode: load all documents in executor to not block event loop
-        # Wrap in try/except so server starts even if connection fails
-        logger.info("SSH mode: loading documents...")
-        loop = asyncio.get_event_loop()
-        try:
-            await loop.run_in_executor(None, load_all_documents_sync)
-            logger.info("SSH mode: documents loaded")
-        except Exception as e:
-            logger.warning(f"SSH mode: failed to load documents on startup: {e}")
-            logger.warning("Server will start, but tools will show connection errors")
+        # SSH mode: load documents in the background so we do NOT block the MCP
+        # initialize handshake. Tools query the device live, so they work before
+        # the load finishes; this load only pre-populates browsable resources.
+        logger.info("SSH mode: starting background document load...")
+
+        async def _ssh_background_load():
+            loop = asyncio.get_event_loop()
+            try:
+                await loop.run_in_executor(None, load_all_documents_sync)
+                logger.info("SSH mode: documents loaded")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"SSH mode: failed to load documents on startup: {e}")
+                logger.warning("Server will start, but tools will show connection errors")
+
+        task = asyncio.create_task(_ssh_background_load())
     else:
-        # Cloud mode: load in background to not block startup
-        logger.info("Cloud mode: starting background loader...")
+        # Cloud/USB mode: load in background to not block startup
+        logger.info("Cloud/USB mode: starting background loader...")
         task = start_background_loader()
 
     try:

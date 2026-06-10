@@ -470,8 +470,11 @@ def load_all_documents_sync() -> int:
 
 async def _load_documents_background(shutdown_event: asyncio.Event):
     """
-    Background task to load and register documents in batches.
-    Used for Cloud mode only - SSH mode uses load_all_documents_sync().
+    Background task to load and register documents.
+
+    Fetches the full document list once, then registers documents in
+    cooperative batches so the event loop stays responsive. Used for cloud and
+    USB modes; SSH mode uses load_all_documents_sync().
 
     Respects REMARKABLE_ROOT_PATH environment variable.
     """
@@ -481,77 +484,46 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
         client = get_rmapi()
         loop = asyncio.get_event_loop()
 
-        batch_size = 10
-        offset = 0
-        consecutive_errors = 0
-        max_consecutive_errors = 3
-        items_by_id = {}  # Build incrementally
-
         root = _get_root_path()
         if root != "/":
             logger.info(f"Root path filter: {root}")
 
-        while True:
-            # Check for shutdown
+        # Fetch the entire library exactly once. The previous implementation
+        # called get_meta_items(limit=offset + batch_size) in a growing loop,
+        # which re-walked the whole tree every iteration (O(n^2) fetches) and
+        # transiently overwrote the client's document cache with a PARTIAL list
+        # that concurrent tool calls could observe. A single unbounded fetch
+        # avoids both problems.
+        try:
+            items = await loop.run_in_executor(None, client.get_meta_items)
+        except Exception as e:
+            logger.warning(f"Background loader could not fetch documents: {e}")
+            return
+
+        items_by_id = get_items_by_id(items)
+        documents = [item for item in items if not item.is_folder]
+
+        batch_size = 50
+        for start in range(0, len(documents), batch_size):
             if shutdown_event.is_set():
                 logger.info("Background document loader cancelled by shutdown")
                 break
 
-            # Fetch next batch - run sync code in executor to not block
-            try:
-                items = await loop.run_in_executor(
-                    None, lambda: client.get_meta_items(limit=offset + batch_size)
-                )
-                # Update items_by_id with all items for path resolution
-                items_by_id = get_items_by_id(items)
-                consecutive_errors = 0  # Reset on success
-            except Exception as e:
-                consecutive_errors += 1
-                logger.warning(f"Error fetching documents (attempt {consecutive_errors}): {e}")
-                if consecutive_errors >= max_consecutive_errors:
-                    logger.error(
-                        f"Background loader stopping after {max_consecutive_errors} "
-                        "consecutive errors"
-                    )
-                    break
-                # Wait before retry
-                await asyncio.sleep(2**consecutive_errors)
-                continue
-
-            # Get documents from this batch (skip folders and already-fetched)
-            documents = [item for item in items if not item.is_folder]
-            batch_docs = documents[offset : offset + batch_size]
-
-            if not batch_docs:
-                # No more documents
-                logger.info(
-                    f"Background loader complete: {len(_registered_docs)} documents registered"
-                    + (f" (filtered to {root})" if root != "/" else "")
-                )
-                break
-
-            # Register this batch (no file_types in cloud mode - raw resources not available)
-            registered_count = 0
-            for doc in batch_docs:
+            for doc in documents[start : start + batch_size]:
                 if shutdown_event.is_set():
                     break
                 try:
-                    if _register_document(client, doc, items_by_id, file_types=None, root=root):
-                        registered_count += 1
+                    _register_document(client, doc, items_by_id, file_types=None, root=root)
                 except Exception as e:
-                    logger.debug(f"Failed to register document '{doc.VissibleName}': {e}")
+                    logger.debug(f"Failed to register document: {e}")
 
-            if registered_count > 0:
-                logger.debug(
-                    f"Registered batch of {registered_count} documents "
-                    f"(total: {len(_registered_docs)})"
-                )
+            # Yield control so tool calls and shutdown stay responsive.
+            await asyncio.sleep(0)
 
-            offset += batch_size
-
-            # Yield control - allow other async tasks to run
-            # Small delay to be gentle on the API
-            await asyncio.sleep(0.1)
+        logger.info(
+            f"Background loader complete: {len(_registered_docs)} documents registered"
+            + (f" (filtered to {root})" if root != "/" else "")
+        )
 
     except asyncio.CancelledError:
         logger.info("Background document loader cancelled")

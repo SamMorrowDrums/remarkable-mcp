@@ -4,6 +4,7 @@ reMarkable Cloud API client helpers.
 
 import json as json_module
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -22,6 +23,22 @@ REMARKABLE_USE_USB_WEB = os.environ.get("REMARKABLE_USE_USB_WEB", "").lower() in
 REMARKABLE_CONFIG_DIR = Path.home() / ".remarkable"
 REMARKABLE_TOKEN_FILE = REMARKABLE_CONFIG_DIR / "token"
 CACHE_DIR = REMARKABLE_CONFIG_DIR / "cache"
+
+# Process-level cloud client cache. The cloud client exchanges its long-lived
+# device token for a short-lived user token on first use; caching the client
+# keeps that user token in memory so we don't re-exchange it (an extra network
+# round-trip, and a rate-limit risk) on every single tool call.
+_cloud_client = None
+_cloud_client_key = None
+_cloud_client_lock = threading.Lock()
+
+
+def reset_client_cache() -> None:
+    """Clear the cached cloud client (e.g. after re-registering a token)."""
+    global _cloud_client, _cloud_client_key
+    with _cloud_client_lock:
+        _cloud_client = None
+        _cloud_client_key = None
 
 
 def get_rmapi():
@@ -50,31 +67,38 @@ def get_rmapi():
     # Cloud API mode
     from remarkable_mcp.sync import load_client_from_token
 
-    # If token is provided via environment, use it
+    # Resolve the token: env var wins, else the saved ~/.rmapi file.
     if REMARKABLE_TOKEN:
         # Also save to ~/.rmapi for compatibility
         rmapi_file = Path.home() / ".rmapi"
         rmapi_file.write_text(REMARKABLE_TOKEN)
-        return load_client_from_token(REMARKABLE_TOKEN)
+        token_json = REMARKABLE_TOKEN
+    else:
+        rmapi_file = Path.home() / ".rmapi"
+        if not rmapi_file.exists():
+            raise RuntimeError(
+                "No reMarkable token found. Register first:\n"
+                "  uvx remarkable-mcp --register <code>\n\n"
+                "Get a code from: https://my.remarkable.com/device/desktop/connect\n\n"
+                "Or use USB web interface (no dev mode required):\n"
+                "  uvx remarkable-mcp --usb-web\n\n"
+                "Or use SSH mode (requires USB connection + developer mode):\n"
+                "  uvx remarkable-mcp --ssh"
+            )
+        try:
+            token_json = rmapi_file.read_text()
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize reMarkable client: {e}")
 
-    # Load from file
-    rmapi_file = Path.home() / ".rmapi"
-    if not rmapi_file.exists():
-        raise RuntimeError(
-            "No reMarkable token found. Register first:\n"
-            "  uvx remarkable-mcp --register <code>\n\n"
-            "Get a code from: https://my.remarkable.com/device/desktop/connect\n\n"
-            "Or use USB web interface (no dev mode required):\n"
-            "  uvx remarkable-mcp --usb-web\n\n"
-            "Or use SSH mode (requires USB connection + developer mode):\n"
-            "  uvx remarkable-mcp --ssh"
-        )
-
-    try:
-        token_json = rmapi_file.read_text()
-        return load_client_from_token(token_json)
-    except Exception as e:
-        raise RuntimeError(f"Failed to initialize reMarkable client: {e}")
+    # Reuse one client per process so the renewed user token is cached in
+    # memory. The cache is keyed on the token string, so re-registering a new
+    # token transparently rebuilds the client.
+    global _cloud_client, _cloud_client_key
+    with _cloud_client_lock:
+        if _cloud_client is None or _cloud_client_key != token_json:
+            _cloud_client = load_client_from_token(token_json)
+            _cloud_client_key = token_json
+        return _cloud_client
 
 
 def ensure_config_dir():
@@ -98,6 +122,9 @@ def register_and_get_token(one_time_code: str) -> str:
         rmapi_file = Path.home() / ".rmapi"
         token_json = json_module.dumps(token_data)
         rmapi_file.write_text(token_json)
+
+        # A new token invalidates any cached cloud client.
+        reset_client_cache()
 
         return token_json
     except Exception as e:
