@@ -2350,6 +2350,70 @@ class TestRetryBackoff:
         assert result.status_code == 503
         assert mock_request.call_count == 3
 
+    def test_parse_retry_after_seconds(self):
+        """Numeric (delay-seconds) Retry-After is parsed as seconds."""
+        from remarkable_mcp.sync import _parse_retry_after
+
+        resp = Mock()
+        resp.headers = {"Retry-After": "7"}
+        assert _parse_retry_after(resp) == 7.0
+
+    def test_parse_retry_after_http_date_future_capped(self):
+        """HTTP-date Retry-After in the future is honoured and capped at MAX."""
+        from datetime import datetime, timedelta, timezone
+        from email.utils import format_datetime
+
+        from remarkable_mcp.sync import MAX_RETRY_DELAY, _parse_retry_after
+
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        resp = Mock()
+        resp.headers = {"Retry-After": format_datetime(future)}
+        # An hour out is well beyond MAX_RETRY_DELAY, so it clamps to the cap.
+        assert _parse_retry_after(resp) == MAX_RETRY_DELAY
+
+    def test_parse_retry_after_http_date_past_returns_none(self):
+        """An HTTP-date already in the past yields None (fall back to backoff)."""
+        from remarkable_mcp.sync import _parse_retry_after
+
+        resp = Mock()
+        resp.headers = {"Retry-After": "Wed, 21 Oct 2020 07:28:00 GMT"}
+        assert _parse_retry_after(resp) is None
+
+    def test_parse_retry_after_invalid_and_missing_return_none(self):
+        """Garbage or missing Retry-After yields None."""
+        from remarkable_mcp.sync import _parse_retry_after
+
+        garbage = Mock()
+        garbage.headers = {"Retry-After": "soon-ish"}
+        assert _parse_retry_after(garbage) is None
+
+        missing = Mock()
+        missing.headers = {}
+        assert _parse_retry_after(missing) is None
+
+    @patch("remarkable_mcp.sync.time.sleep")
+    @patch("remarkable_mcp.sync._issue_request")
+    def test_retry_after_http_date_honoured_through_wrapper(self, mock_request, mock_sleep):
+        """A 429 with an HTTP-date Retry-After drives the backoff sleep."""
+        from datetime import datetime, timedelta, timezone
+        from email.utils import format_datetime
+
+        from remarkable_mcp.sync import MAX_RETRY_DELAY, _http_request_with_retry
+
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        rate_limited = Mock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": format_datetime(future)}
+
+        ok_response = Mock()
+        ok_response.status_code = 200
+
+        mock_request.side_effect = [rate_limited, ok_response]
+
+        result = _http_request_with_retry("GET", "https://example.com/api")
+        assert result.status_code == 200
+        mock_sleep.assert_called_once_with(MAX_RETRY_DELAY)
+
 
 # =============================================================================
 # Test Write Tools
