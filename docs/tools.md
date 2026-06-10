@@ -51,7 +51,7 @@ With this configuration:
 ### Content Types
 
 - **`"text"`** — Full extracted text: raw document content plus annotations, highlights, and typed text (default)
-- **`"raw"`** — Only the original PDF/EPUB text, no annotations. SSH mode only.
+- **`"raw"`** — Only the original PDF/EPUB text, no annotations. Works in all modes when the source file is present (very large PDFs/EPUBs may not be synced to the cloud).
 - **`"annotations"`** — Only annotations: highlights, typed text from notebooks, and OCR content
 
 ### Examples
@@ -300,9 +300,12 @@ remarkable_status()
 | Field | Description |
 |-------|-------------|
 | `authenticated` | Whether authentication succeeded |
-| `transport` | `"ssh"` or `"cloud"` |
+| `transport` | `"cloud"`, `"ssh"`, or `"usb-web"` |
 | `connection` | Connection details |
 | `document_count` | Total documents in library (filtered by root if configured) |
+| `write_enabled` | Whether write tools are enabled (the `--write` flag) |
+| `capabilities` | Effective capabilities for the active transport (read/render/upload/mkdir/move/rename/delete) |
+| `capabilities_by_transport` | The full per-transport capability matrix |
 | `root_path` | Configured root path filter (only present if set) |
 | `ocr_backend` | Which OCR backend is configured |
 

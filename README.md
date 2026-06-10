@@ -12,7 +12,7 @@ Your reMarkable tablet is a powerful tool for thinking, note-taking, and researc
 - **Typed text extraction** — Native support for Type Folio and typed annotations
 - **Handwriting OCR** — Convert handwritten notes to searchable text
 - **PDF & EPUB support** — Extract text from documents, plus your annotations
-- **Robust page rendering** — Renders pages locally and, in USB/SSH mode, automatically falls back to the tablet's own PDF export, so images work across firmware versions and even without system graphics libraries installed
+- **Robust page rendering** — Renders pages locally and automatically falls back to a source PDF when the local stroke renderer can't (USB/SSH use the tablet's own PDF export; cloud uses the original source PDF), so images work across firmware versions and even without system graphics libraries installed
 - **Smart search** — Find content across your entire library
 - **Second brain integration** — Use with Obsidian, note-taking apps, or any AI workflow
 
@@ -180,17 +180,19 @@ AI assistants use the tools to read documents, search content, and more:
 
 ## Connection Modes
 
-All three modes expose the same read tools, so pick based on how your tablet is connected — not on capability. Here's each option and when to reach for it:
+All three modes share the same read, render, and upload tools. **Cloud and SSH additionally support full library management** — create folders, move, rename, and delete (with `--write`) — so capability is near-identical and you can genuinely pick whichever matches how your tablet is connected:
 
-- **🔌 USB Web Interface** — *the recommended default.* Plug in over USB and enable the web interface in Storage Settings. No subscription, no developer mode, fast, and supports raw PDF export and write tools. Use this whenever your tablet is in front of you.
-- **☁️ Cloud** — *recommended when the device isn't connected.* Reads your library straight from reMarkable's cloud, so it works wirelessly from anywhere with a Connect subscription — no cable, no developer mode. Parallel fetching plus an on-disk blob cache make it fast after the first sync. Choose this for remote/headless setups or when you simply don't want to plug in.
-- **⚡ SSH** — *for power users who need filesystem-level access.* Requires developer mode over USB. Adds folder create/move/rename/delete on top of the read and upload tools. Pick this only if you specifically need those filesystem operations.
+- **☁️ Cloud** — *device-free, works from anywhere.* Reads your library straight from reMarkable's cloud over Wi‑Fi with a Connect subscription — no cable, no developer mode. Full read/render plus full write (upload, create folder, move, rename, delete → trash). Parallel fetching and an on-disk blob cache make it fast after the first sync. Best for remote/headless setups or when you don't want to plug in.
+- **🔌 USB Web Interface** — *best when the tablet is plugged in.* Enable the web interface in Storage Settings — no subscription, no developer mode. Full read/render plus upload (to your root folder). The tablet's USB web firmware exposes no folder/move/rename/delete endpoints, so for those over a cable use SSH.
+- **⚡ SSH** — *for power users who want filesystem-level access.* Requires developer mode over USB. Full read/render plus full write including folder create/move/rename/delete, straight from the tablet filesystem.
 
-| Mode | Setup | Subscription | Offline | Raw files | Write tools |
-|------|-------|--------------|---------|-----------|-------------|
-| **🔌 USB Web** | Enable in Settings | Not required | ✅ | ✅ PDF | ✅ upload |
-| **☁️ Cloud** | One-time code | Connect | ❌ | ❌ | ❌ |
-| **⚡ SSH** | Developer mode | Not required | ✅ | ✅ PDF/EPUB | ✅ upload + mkdir/move/rename/delete |
+| Mode | Setup | Subscription | Offline | Read + render | Raw PDF/EPUB | Upload | Folder ops¹ |
+|------|-------|--------------|---------|---------------|--------------|--------|-------------|
+| **☁️ Cloud** | One-time code | Connect | ❌ | ✅ | ✅ PDF/EPUB | ✅ | ✅ |
+| **🔌 USB Web** | Enable in Settings | Not required | ✅ | ✅ | ✅ PDF | ✅ (to root) | ❌ |
+| **⚡ SSH** | Developer mode | Not required | ✅ | ✅ | ✅ PDF/EPUB | ✅ | ✅ |
+
+¹ Folder ops = create folder / move / rename / delete. Upload and folder ops require the `--write` flag (off by default). Deletes move items to the trash and can prompt for confirmation when your client supports elicitation.
 
 **📖 Detailed Setup Guides:**
 - [USB Web Interface Setup](docs/usb-web-setup.md) — **recommended** — simple setup, full feature support
@@ -232,10 +234,10 @@ Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remark
 | `remarkable_browse` | Navigate folders, search by document name, or filter by tags |
 | `remarkable_search` | Search content across multiple documents (with tag filtering) |
 | `remarkable_recent` | Get recently modified documents |
-| `remarkable_status` | Check connection status |
+| `remarkable_status` | Check connection status and the per-transport capability matrix |
 | `remarkable_image` | Get PNG/SVG images of pages (supports OCR via sampling) |
 
-All tools are **read-only** and return structured JSON with hints for next actions.
+These six tools are **read-only** and return structured JSON with hints for next actions. Opt-in **write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`) are also available with the `--write` flag — see [Write Tools](#write-tools-cloud-ssh--usb-web).
 
 📖 **[Full Tools Documentation](docs/tools.md)**
 
@@ -292,10 +294,11 @@ remarkable_image("Logo Sketch", background="#00000000")
 remarkable_image("Diagram", compatibility=True)
 ```
 
-> **Note:** In USB and SSH modes, PNG rendering automatically falls back to the
-> tablet's native PDF export when the local stroke renderer can't produce an
-> image (empty pages, newer `.rm` formats, or a machine without `libcairo`).
-> This keeps `remarkable_image` working across firmware versions and platforms.
+> **Note:** PNG rendering automatically falls back to a source PDF when the
+> local stroke renderer can't produce an image (empty pages, newer `.rm`
+> formats, or a machine without `libcairo`). USB and SSH modes use the tablet's
+> native PDF export; cloud mode uses the document's original source PDF. This
+> keeps `remarkable_image` working across firmware versions and platforms.
 > Cloud mode has no native export, so it relies on the local renderer.
 
 ---
@@ -406,31 +409,43 @@ When `REMARKABLE_OCR_BACKEND=auto` (default):
 | Speed | ⚡ 10-100x faster | ⚡ Fast | ⚡ Fast (parallel + cached) |
 | Offline | ✅ Yes | ✅ Yes | ❌ No |
 | Subscription | ✅ Not required | ✅ Not required | ❌ Connect required |
-| Raw files | ✅ PDFs, EPUBs | ✅ PDFs | ❌ Not available |
-| Upload | ✅ With `--write` | ✅ With `--write` | ❌ Not available |
-| mkdir/move/rename/delete | ✅ With `--write` | ❌ | ❌ |
+| Raw files | ✅ PDFs, EPUBs | ✅ PDFs | ✅ PDFs, EPUBs |
+| Upload | ✅ With `--write` | ✅ With `--write` | ✅ With `--write` |
+| mkdir/move/rename/delete | ✅ With `--write` | ❌ | ✅ With `--write` |
 | Setup | Developer mode | Enable in Settings | One-time code |
 
 📖 **[SSH Setup Guide](docs/ssh-setup.md)**
 
 ---
 
-## Write Tools (SSH & USB Web)
+## Write Tools (Cloud, SSH & USB Web)
 
-Opt-in write tools let you upload, organize, and manage documents directly on your reMarkable tablet. **Disabled by default** for safety.
+Opt-in write tools let you upload, organize, and manage documents on your reMarkable. **Disabled by default** for safety. Cloud and SSH modes support the full set; USB web supports upload only (its firmware exposes no folder operations).
 
-| Feature | SSH Mode | USB Web Mode | Cloud Mode |
-|---------|:--------:|:------------:|:----------:|
-| Upload | ✅ | ✅ | ❌ |
-| Mkdir | ✅ | ❌ | ❌ |
-| Move | ✅ | ❌ | ❌ |
-| Rename | ✅ | ❌ | ❌ |
-| Delete | ✅ | ❌ | ❌ |
+| Feature | Cloud Mode | SSH Mode | USB Web Mode |
+|---------|:----------:|:--------:|:------------:|
+| Upload | ✅ | ✅ | ✅ (to root) |
+| Mkdir | ✅ | ✅ | ❌ |
+| Move | ✅ | ✅ | ❌ |
+| Rename | ✅ | ✅ | ❌ |
+| Delete | ✅ (→ trash) | ✅ | ❌ |
 
 ### Enabling Write Tools
 
-Add the `--write` flag when running in SSH or USB web mode:
+Add the `--write` flag. It works in any mode (cloud is the default — no flag needed to select it):
 
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--write"]
+    }
+  }
+}
+```
+
+For SSH or USB web, combine `--write` with the transport flag:
 ```json
 {
   "servers": {
@@ -442,7 +457,7 @@ Add the `--write` flag when running in SSH or USB web mode:
 }
 ```
 
-Or with USB web mode (upload only):
+USB web mode (upload only):
 ```json
 {
   "servers": {
@@ -467,35 +482,35 @@ Or set the environment variable:
 
 | Tool | Description |
 |------|-------------|
-| `remarkable_upload(file_path, parent_folder, document_name)` | Upload a PDF or EPUB file |
-| `remarkable_mkdir(folder_name, parent)` | Create a new folder (SSH only) |
-| `remarkable_move(document, dest_folder)` | Move a document or folder (SSH only) |
-| `remarkable_rename(document, new_name)` | Rename a document or folder (SSH only) |
-| `remarkable_delete(document)` | Delete a document or folder — destructive (SSH only) |
+| `remarkable_upload(file_path, parent_folder, document_name)` | Upload a PDF or EPUB file (all modes; USB web ignores folder/name and uploads to root) |
+| `remarkable_mkdir(folder_name, parent)` | Create a new folder (cloud and SSH) |
+| `remarkable_move(document, dest_folder)` | Move a document or folder (cloud and SSH) |
+| `remarkable_rename(document, new_name)` | Rename a document or folder (cloud and SSH) |
+| `remarkable_delete(document)` | Delete a document or folder — destructive (cloud and SSH) |
 
 ### Safety
 
-- **Upload registers in SSH and USB web mode** — cloud mode returns a clear error
-- **mkdir, move, rename, delete are only registered in SSH mode** — they are not exposed at all on USB web or cloud, keeping the tool list scoped to what the active transport actually supports
-- **Delete is destructive and immediate** — the MCP client is responsible for confirming with the user before invoking. All write tools carry `ToolAnnotations(readOnlyHint=False)` (and `destructiveHint=True` for delete) so an agent harness can gate writes at the MCP layer.
-- After each write operation (SSH), the tablet UI restarts automatically to reflect changes
+- **Upload registers in all modes** — cloud, SSH, and USB web.
+- **mkdir, move, rename, delete register in cloud and SSH modes only** — they are not exposed on USB web (the tablet's USB web firmware has no folder/move/rename/delete endpoints), keeping the tool list scoped to what the active transport actually supports.
+- **Delete prompts for confirmation when possible** — if the client supports MCP elicitation, `remarkable_delete` asks the user to confirm before deleting; otherwise it relies on the host to gate the call. In cloud mode delete moves the item to the trash (recoverable from your device); set `REMARKABLE_SKIP_CONFIRM=1` to bypass the prompt in automated setups. All write tools carry `ToolAnnotations(readOnlyHint=False)` (and `destructiveHint=True` for delete) so an agent harness can gate writes at the MCP layer.
+- After each write operation in SSH mode, the tablet UI restarts automatically to reflect changes.
 
 ### Examples
 
 ```python
 # Upload a PDF
-remarkable_upload("/tmp/paper.pdf", parent_folder="/Research")
+remarkable_upload("paper.pdf", parent_folder="/Research")
 
-# Create a folder (SSH only)
+# Create a folder
 remarkable_mkdir("2024 Archive", parent="/Archive")
 
-# Move a document (SSH only)
+# Move a document
 remarkable_move("Meeting Notes", "/Archive/2024 Archive")
 
-# Rename a document (SSH only)
+# Rename a document
 remarkable_rename("Untitled", "Q4 Planning Notes")
 
-# Delete (destructive — confirm with user first) (SSH only)
+# Delete (destructive — confirms via elicitation when supported)
 remarkable_delete("Old Draft")
 ```
 
