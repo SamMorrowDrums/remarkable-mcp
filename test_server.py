@@ -1018,7 +1018,7 @@ class TestRegistration:
     """Test registration functionality."""
 
     @patch("remarkable_mcp.sync.time.sleep")
-    @patch("remarkable_mcp.sync.requests.request")
+    @patch("remarkable_mcp.sync._issue_request")
     @patch("pathlib.Path.write_text")
     def test_register_and_get_token(self, mock_write_text, mock_request, mock_sleep):
         """Test registration process."""
@@ -1043,7 +1043,7 @@ class TestRegistration:
         assert "webapp-prod.cloud.remarkable.engineering" in call_args[0][1]
 
     @patch("remarkable_mcp.sync.time.sleep")
-    @patch("remarkable_mcp.sync.requests.request")
+    @patch("remarkable_mcp.sync._issue_request")
     def test_register_invalid_code(self, mock_request, mock_sleep):
         """Test registration with invalid/expired code."""
         # Mock 400 response (invalid code)
@@ -2184,7 +2184,7 @@ class TestRetryBackoff:
         monkeypatch.delenv("REMARKABLE_RETRY_DELAY", raising=False)
 
     @patch("remarkable_mcp.sync.time.sleep")
-    @patch("remarkable_mcp.sync.requests.request")
+    @patch("remarkable_mcp.sync._issue_request")
     def test_retry_succeeds_after_transient_503(self, mock_request, mock_sleep):
         """Retry succeeds when a transient 503 clears on the second attempt."""
         from remarkable_mcp.sync import _http_request_with_retry
@@ -2204,7 +2204,7 @@ class TestRetryBackoff:
         mock_sleep.assert_called_once()
 
     @patch("remarkable_mcp.sync.time.sleep")
-    @patch("remarkable_mcp.sync.requests.request")
+    @patch("remarkable_mcp.sync._issue_request")
     def test_retry_exhaustion_raises_last_exception(self, mock_request, mock_sleep):
         """After exhausting retries on connection errors, the last exception is raised."""
         from remarkable_mcp.sync import _http_request_with_retry
@@ -2217,7 +2217,7 @@ class TestRetryBackoff:
         assert mock_request.call_count == 3  # DEFAULT_RETRY_ATTEMPTS
 
     @patch("remarkable_mcp.sync.time.sleep")
-    @patch("remarkable_mcp.sync.requests.request")
+    @patch("remarkable_mcp.sync._issue_request")
     def test_no_retry_on_401(self, mock_request, mock_sleep):
         """401 is not retried - it is handled by the caller's token renewal."""
         from remarkable_mcp.sync import _http_request_with_retry
@@ -2233,7 +2233,7 @@ class TestRetryBackoff:
         mock_sleep.assert_not_called()
 
     @patch("remarkable_mcp.sync.time.sleep")
-    @patch("remarkable_mcp.sync.requests.request")
+    @patch("remarkable_mcp.sync._issue_request")
     def test_no_retry_on_400(self, mock_request, mock_sleep):
         """400 is not retried - client errors are not transient."""
         from remarkable_mcp.sync import _http_request_with_retry
@@ -2249,7 +2249,7 @@ class TestRetryBackoff:
         mock_sleep.assert_not_called()
 
     @patch("remarkable_mcp.sync.time.sleep")
-    @patch("remarkable_mcp.sync.requests.request")
+    @patch("remarkable_mcp.sync._issue_request")
     def test_retry_after_header_honoured(self, mock_request, mock_sleep):
         """Retry-After header value is used as the sleep duration."""
         from remarkable_mcp.sync import _http_request_with_retry
@@ -2268,7 +2268,7 @@ class TestRetryBackoff:
         mock_sleep.assert_called_once_with(5.0)
 
     @patch("remarkable_mcp.sync.time.sleep")
-    @patch("remarkable_mcp.sync.requests.request")
+    @patch("remarkable_mcp.sync._issue_request")
     def test_retry_after_header_capped_at_max(self, mock_request, mock_sleep):
         """Retry-After values above MAX_RETRY_DELAY are capped."""
         from remarkable_mcp.sync import MAX_RETRY_DELAY, _http_request_with_retry
@@ -2296,7 +2296,7 @@ class TestRetryBackoff:
                 assert 0 <= val <= MAX_RETRY_DELAY
 
     @patch("remarkable_mcp.sync.time.sleep")
-    @patch("remarkable_mcp.sync.requests.request")
+    @patch("remarkable_mcp.sync._issue_request")
     def test_retry_exhaustion_returns_last_response(self, mock_request, mock_sleep):
         """When all retries return retryable status, the last response is returned."""
         from remarkable_mcp.sync import _http_request_with_retry
@@ -2658,3 +2658,221 @@ class TestConcurrentToolDispatch:
             f"Concurrent tool calls appear serialized: elapsed={elapsed:.2f}s "
             f"vs single-call delay={call_delay}s"
         )
+
+
+class TestCloudBlobCache:
+    """Tests for the content-addressed blob cache in the cloud client."""
+
+    def _response(self, *, content=b"", status=200):
+        response = Mock()
+        response.status_code = status
+        response.content = content
+        response.headers = {}
+        response.raise_for_status = Mock()
+        return response
+
+    @patch("remarkable_mcp.sync._http_request_with_retry")
+    def test_get_file_caches_by_hash(self, mock_request):
+        """A second fetch of the same hash is served from cache (no new request)."""
+        from remarkable_mcp.sync import RemarkableClient
+
+        mock_request.return_value = self._response(content=b"blob-bytes")
+        client = RemarkableClient(user_token="user-token")
+
+        first = client._get_file("hash-a", "a.docSchema")
+        second = client._get_file("hash-a", "a.docSchema")
+
+        assert first == b"blob-bytes"
+        assert second == b"blob-bytes"
+        assert mock_request.call_count == 1
+
+    @patch("remarkable_mcp.sync._http_request_with_retry")
+    def test_different_hash_is_refetched(self, mock_request):
+        """A changed document yields a new hash, which is fetched fresh.
+
+        This is what makes the cache invalidation-safe: blobs are keyed by their
+        content hash, so a modified document always produces a different key.
+        """
+        from remarkable_mcp.sync import RemarkableClient
+
+        mock_request.side_effect = [
+            self._response(content=b"old-content"),
+            self._response(content=b"new-content"),
+        ]
+        client = RemarkableClient(user_token="user-token")
+
+        assert client._get_file("hash-old", "doc.content") == b"old-content"
+        assert client._get_file("hash-new", "doc.content") == b"new-content"
+        assert mock_request.call_count == 2
+
+    @patch("remarkable_mcp.sync._http_request_with_retry")
+    def test_cache_can_be_disabled(self, mock_request, monkeypatch):
+        """REMARKABLE_DISABLE_CACHE forces every fetch to hit the network."""
+        from remarkable_mcp.sync import RemarkableClient
+
+        monkeypatch.setenv("REMARKABLE_DISABLE_CACHE", "1")
+        mock_request.side_effect = [
+            self._response(content=b"v1"),
+            self._response(content=b"v1"),
+        ]
+        client = RemarkableClient(user_token="user-token")
+
+        client._get_file("hash-a", "a.docSchema")
+        client._get_file("hash-a", "a.docSchema")
+        assert mock_request.call_count == 2
+
+    @patch("remarkable_mcp.sync._http_request_with_retry")
+    def test_large_blobs_are_not_cached(self, mock_request, monkeypatch):
+        """Blobs above the size threshold are streamed through, not cached."""
+        from remarkable_mcp.sync import RemarkableClient
+
+        monkeypatch.setenv("REMARKABLE_CACHE_MAX_BLOB", "8")
+        big = b"x" * 64
+        mock_request.side_effect = [
+            self._response(content=big),
+            self._response(content=big),
+        ]
+        client = RemarkableClient(user_token="user-token")
+
+        client._get_file("hash-big", "big.bin")
+        client._get_file("hash-big", "big.bin")
+        assert mock_request.call_count == 2
+
+
+class TestSessionPooling:
+    """Tests for the thread-local pooled HTTP session seam."""
+
+    def test_get_session_is_thread_local_and_reused(self):
+        """The same thread reuses one pooled session across calls."""
+        from remarkable_mcp import sync
+
+        sync._thread_local.__dict__.pop("session", None)
+        try:
+            session_a = sync._get_session()
+            session_b = sync._get_session()
+            assert session_a is session_b
+            assert session_a.adapters  # adapters mounted
+        finally:
+            sync._thread_local.__dict__.pop("session", None)
+
+    def test_issue_request_uses_pooled_session(self):
+        """_issue_request dispatches through the thread-local session."""
+        from remarkable_mcp import sync
+
+        fake_session = Mock()
+        fake_session.request.return_value = "resp"
+        with patch("remarkable_mcp.sync._get_session", return_value=fake_session):
+            result = sync._issue_request("GET", "https://example.com", timeout=5)
+        assert result == "resp"
+        fake_session.request.assert_called_once_with("GET", "https://example.com", timeout=5)
+
+
+class TestParallelDownload:
+    """Tests for parallelized, order-stable cloud document downloads."""
+
+    def _response(self, *, content=b""):
+        response = Mock()
+        response.status_code = 200
+        response.content = content
+        response.headers = {}
+        response.raise_for_status = Mock()
+        return response
+
+    @patch("remarkable_mcp.sync._http_request_with_retry")
+    def test_download_preserves_blob_order(self, mock_request):
+        """Parallel fetches still assemble the zip in original blob order."""
+        import io
+
+        from remarkable_mcp.sync import Document, RemarkableClient
+
+        doc_id = "doc-1"
+        index = "3\n" + "".join(f"hash-{i}:0:{doc_id}/page-{i}.rm:0:5\n" for i in range(10))
+
+        # Key responses by hash (the real client fetches FILES_URL/<hash>), so
+        # the test is deterministic regardless of the order parallel workers run.
+        def fake_request(method, url, **kwargs):
+            blob_hash = url.rsplit("/", 1)[-1]
+            if blob_hash == "doc-hash":
+                return self._response(content=index.encode("utf-8"))
+            idx = int(blob_hash.split("-")[1])
+            return self._response(content=f"page-{idx}".encode("utf-8"))
+
+        mock_request.side_effect = fake_request
+
+        client = RemarkableClient(user_token="user-token")
+        doc = Document(id=doc_id, hash="doc-hash", name="N", doc_type="DocumentType")
+        payload = client.download(doc)
+
+        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+            names = zf.namelist()
+            assert names == [f"{doc_id}/page-{i}.rm" for i in range(10)]
+            for i in range(10):
+                assert zf.read(f"{doc_id}/page-{i}.rm") == f"page-{i}".encode("utf-8")
+
+
+class TestBackgroundLoaderSingleFetch:
+    """Regression: the background loader must fetch the library exactly once."""
+
+    @pytest.mark.asyncio
+    async def test_loader_fetches_once_without_limit(self, monkeypatch):
+        import asyncio
+
+        import remarkable_mcp.resources as resources
+
+        fake_client = Mock()
+        fake_client.get_meta_items.return_value = [
+            Mock(is_folder=False),
+            Mock(is_folder=False),
+            Mock(is_folder=True),
+        ]
+
+        monkeypatch.setattr("remarkable_mcp.api.get_rmapi", lambda: fake_client)
+        monkeypatch.setattr("remarkable_mcp.api.get_items_by_id", lambda items: {})
+
+        registered = []
+        monkeypatch.setattr(
+            resources,
+            "_register_document",
+            lambda client, doc, items_by_id, file_types=None, root="/": registered.append(doc),
+        )
+
+        await resources._load_documents_background(asyncio.Event())
+
+        # Exactly one unbounded fetch (no growing per-batch limit -> no O(n^2)).
+        fake_client.get_meta_items.assert_called_once_with()
+        # Only the two non-folder documents are registered.
+        assert len(registered) == 2
+
+
+class TestCloudClientCache:
+    """The cloud client must be cached per process (one token renewal)."""
+
+    def test_cloud_client_cached_and_resettable(self, monkeypatch, tmp_path):
+        import remarkable_mcp.api as api
+
+        # Force cloud mode and redirect HOME so we never touch the real ~/.rmapi.
+        monkeypatch.setattr(api.Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(api, "REMARKABLE_USE_USB_WEB", False)
+        monkeypatch.setattr(api, "REMARKABLE_USE_SSH", False)
+        monkeypatch.setattr(api, "REMARKABLE_TOKEN", '{"devicetoken": "d", "usertoken": "u"}')
+
+        created = []
+
+        def fake_loader(token_json):
+            client = Mock(name=f"client-{len(created)}")
+            created.append(client)
+            return client
+
+        monkeypatch.setattr("remarkable_mcp.sync.load_client_from_token", fake_loader)
+
+        api.reset_client_cache()
+        first = api.get_rmapi()
+        second = api.get_rmapi()
+        assert first is second
+        assert len(created) == 1  # built only once
+
+        # Resetting forces a rebuild (e.g. after re-registering a token).
+        api.reset_client_cache()
+        third = api.get_rmapi()
+        assert third is not first
+        assert len(created) == 2
