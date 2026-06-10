@@ -268,13 +268,14 @@ from remarkable_mcp import (  # noqa: E402
     tools,  # noqa: F401
 )
 
-# Conditionally register write tools when enabled
+# Conditionally register write tools when enabled.
+# Write works in all three transports: cloud (default), SSH, and USB web.
+# Cloud and SSH support the full set (upload/mkdir/move/rename/delete); the USB
+# web interface only supports upload, so only that tool registers in USB mode
+# (see the per-tool gating in write_tools.register_write_tools).
 from remarkable_mcp import write_tools as _write_tools  # noqa: E402
 
-if _write_tools.write_enabled() and (
-    os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
-    or os.environ.get("REMARKABLE_USE_USB_WEB", "").lower() in ("1", "true", "yes")
-):
+if _write_tools.write_enabled():
     _write_tools.register_write_tools()
 
 

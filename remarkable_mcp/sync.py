@@ -7,6 +7,7 @@ rmapy is abandoned and uses deprecated endpoints that return 500 errors.
 Based on the protocol used by ddvk/rmapi.
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -14,6 +15,7 @@ import os
 import random
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -82,8 +84,16 @@ DEVICE_TOKEN_URL = f"{AUTH_HOST}/token/json/2/device/new"
 USER_TOKEN_URL = f"{AUTH_HOST}/token/json/2/user/new"
 
 SYNC_HOST = "https://internal.cloud.remarkable.com"
-ROOT_URL = f"{SYNC_HOST}/sync/v4/root"
+ROOT_URL = f"{SYNC_HOST}/sync/v4/root"  # GET current root (hash + generation)
+ROOT_PUT_URL = f"{SYNC_HOST}/sync/v3/root"  # PUT to commit a new root (generation-gated)
 FILES_URL = f"{SYNC_HOST}/sync/v3/files"
+
+# Index serialization constants (reMarkable sync15 content-addressed store).
+_SCHEMA_DOC = "3"  # document blob indexes are emitted as schema 3
+_SCHEMA_ROOT = "4"  # root indexes must be emitted as schema 4 for writes
+_TYPE_FILE = "0"  # entry type for a file inside a document index
+# Max attempts to win the generation race when committing a new root.
+_ROOT_COMMIT_ATTEMPTS = 5
 
 
 def _get_retry_attempts() -> int:
@@ -210,6 +220,85 @@ def _http_request_with_retry(method: str, url: str, **kwargs) -> requests.Respon
     raise last_exception  # noqa: TRY302  # exhausted retries, re-raise last connection error
 
 
+def _hash_entries(files: List[Dict[str, Any]]) -> str:
+    """Compute a document/root index hash from its entries.
+
+    Mirrors ddvk/rmapi ``HashEntries``: sort entries by id, then SHA-256 over the
+    concatenation of each entry's raw (hex-decoded) blob hash. Used for document
+    index hashes (the hash a document is stored under in the root index).
+    """
+    hasher = hashlib.sha256()
+    for entry in sorted(files, key=lambda e: e["id"]):
+        hasher.update(bytes.fromhex(entry["hash"]))
+    return hasher.hexdigest()
+
+
+def _serialize_doc_index(files: List[Dict[str, Any]]) -> bytes:
+    """Serialize a document's blob index (schema 3).
+
+    Line 0 is the schema version; each subsequent line is
+    ``hash:0:filename:0:size`` for one file blob.
+    """
+    lines = [_SCHEMA_DOC]
+    for f in sorted(files, key=lambda e: e["id"]):
+        lines.append(f"{f['hash']}:{_TYPE_FILE}:{f['id']}:0:{f['size']}")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _serialize_root_index(entries: List[Dict[str, Any]]) -> bytes:
+    """Serialize the root index (schema 4).
+
+    Current servers reject new schema-3 root uploads, so writes always emit
+    schema 4: line 0 is ``4``; line 1 is ``0:.:<numDocs>:<totalSize>``; each
+    document line is ``hash:0:docId:<numFiles>:<size>``. The resulting root hash
+    is ``sha256`` of this serialized body (not ``HashEntries``).
+    """
+    ordered = sorted(entries, key=lambda e: e["id"])
+    total = sum(int(e["size"]) for e in ordered)
+    lines = [_SCHEMA_ROOT, f"0:.:{len(ordered)}:{total}"]
+    for e in ordered:
+        lines.append(f"{e['hash']}:{_TYPE_FILE}:{e['id']}:{int(e['subfiles'])}:{int(e['size'])}")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+class CloudWriteError(RuntimeError):
+    """Raised when a cloud write cannot be completed."""
+
+
+# CRC32C (Castagnoli) table for the GCS ``x-goog-hash`` upload integrity header.
+# reMarkable's blob store sits behind Google Cloud Storage, which rejects PUTs
+# without a matching ``crc32c`` checksum. stdlib ``zlib.crc32`` is IEEE, not
+# Castagnoli, so we compute CRC32C ourselves (preferring the fast C extension).
+_CRC32C_POLY = 0x82F63B78
+_CRC32C_TABLE = []
+for _i in range(256):
+    _crc = _i
+    for _ in range(8):
+        _crc = (_crc >> 1) ^ (_CRC32C_POLY & -(_crc & 1))
+    _CRC32C_TABLE.append(_crc & 0xFFFFFFFF)
+
+
+def _crc32c_value(data: bytes) -> int:
+    try:
+        import google_crc32c
+
+        return int.from_bytes(google_crc32c.Checksum(data).digest(), "big")
+    except Exception:
+        crc = 0xFFFFFFFF
+        for byte in data:
+            crc = (crc >> 8) ^ _CRC32C_TABLE[(crc ^ byte) & 0xFF]
+        return crc ^ 0xFFFFFFFF
+
+
+def _crc32c_header(data: bytes) -> str:
+    """Return the ``x-goog-hash`` value (``crc32c=<base64>``) for ``data``."""
+    import base64
+    import struct
+
+    digest = struct.pack(">I", _crc32c_value(data))
+    return "crc32c=" + base64.b64encode(digest).decode("ascii")
+
+
 @dataclass
 class Document:
     """Represents a document or folder in the reMarkable cloud."""
@@ -270,6 +359,7 @@ class RemarkableClient:
         self.user_token = user_token
         self._documents: List[Document] = []
         self._documents_by_id: Dict[str, Document] = {}
+        self._file_type_cache: Dict[str, Optional[str]] = {}
 
     def renew_token(self) -> str:
         """Exchange device token for a fresh user token."""
@@ -293,16 +383,26 @@ class RemarkableClient:
         )
 
     def _request(
-        self, url: str, method: str = "GET", headers: Optional[Dict[str, str]] = None
+        self,
+        url: str,
+        method: str = "GET",
+        headers: Optional[Dict[str, str]] = None,
+        **kwargs: Any,
     ) -> requests.Response:
-        """Make an authenticated request."""
+        """Make an authenticated request.
+
+        Extra keyword arguments (e.g. ``data`` or ``json``) are forwarded to the
+        underlying HTTP call, so the same auth/renew path serves writes too.
+        """
         if not self.user_token:
             self.renew_token()
 
         request_headers = {"Authorization": f"Bearer {self.user_token}"}
         if headers:
             request_headers.update(headers)
-        response = _http_request_with_retry(method, url, headers=request_headers, timeout=60)
+        response = _http_request_with_retry(
+            method, url, headers=request_headers, timeout=60, **kwargs
+        )
 
         if response.status_code == 401:
             # Token expired, try to renew
@@ -310,7 +410,9 @@ class RemarkableClient:
             request_headers = {"Authorization": f"Bearer {self.user_token}"}
             if headers:
                 request_headers.update(headers)
-            response = _http_request_with_retry(method, url, headers=request_headers, timeout=60)
+            response = _http_request_with_retry(
+                method, url, headers=request_headers, timeout=60, **kwargs
+            )
 
         return response
 
@@ -551,6 +653,438 @@ class RemarkableClient:
 
         zip_buffer.seek(0)
         return zip_buffer.read()
+
+    def _ensure_files(self, doc: Document) -> List[Dict[str, Any]]:
+        """Return the document's blob index entries, fetching them if needed.
+
+        Documents loaded via ``get_meta_items`` already carry ``files``; this is
+        a defensive fallback for documents constructed without them.
+        """
+        if doc.files:
+            return doc.files
+        try:
+            blob_content = self._get_file(doc.hash, f"{doc.id}.docSchema")
+            doc.files = self._parse_index(blob_content)
+        except Exception as e:
+            logger.debug(f"Could not load blob index for {doc.id}: {e}")
+            doc.files = []
+        return doc.files
+
+    def get_file_type(self, doc: Document) -> Optional[str]:
+        """Return the document's source file type ('pdf', 'epub', or 'notebook').
+
+        The cloud store keeps every blob of a document, including the original
+        ``{id}.pdf`` / ``{id}.epub`` when present, so the type can be derived
+        from the (already fetched) blob index without extra network calls. As a
+        fallback the ``.content`` blob's ``fileType`` field is consulted.
+        """
+        if doc.id in self._file_type_cache:
+            return self._file_type_cache[doc.id]
+
+        file_type: Optional[str] = None
+        content_hash: Optional[str] = None
+        for entry in self._ensure_files(doc):
+            entry_id = entry.get("id", "")
+            if entry_id.endswith(".pdf"):
+                file_type = "pdf"
+                break
+            if entry_id.endswith(".epub"):
+                file_type = "epub"
+                break
+            if entry_id.endswith(".content"):
+                content_hash = entry.get("hash")
+
+        if file_type is None and content_hash:
+            try:
+                content = self._get_file(content_hash, f"{doc.id}.content")
+                data = json.loads(content.decode("utf-8"))
+                ft = data.get("fileType")
+                if ft:
+                    file_type = ft
+            except Exception as e:
+                logger.debug(f"Could not read .content fileType for {doc.id}: {e}")
+
+        if file_type is None:
+            file_type = "notebook"
+
+        self._file_type_cache[doc.id] = file_type
+        return file_type
+
+    def download_raw_file(self, doc: Document, extension: str) -> Optional[bytes]:
+        """Download the original source file (PDF or EPUB) for a document.
+
+        Returns the raw bytes, or ``None`` if the document has no such source
+        blob. The blob is content-addressed, so it is served from the local
+        cache on warm reads.
+        """
+        ext = extension.lower().lstrip(".")
+        suffix = f".{ext}"
+        for entry in self._ensure_files(doc):
+            if entry.get("id", "").endswith(suffix):
+                try:
+                    return self._get_file(entry["hash"], entry["id"])
+                except Exception as e:
+                    logger.debug(f"Failed to download {entry['id']} for {doc.id}: {e}")
+                    return None
+        return None
+
+    def get_all_file_types(self) -> Dict[str, Optional[str]]:
+        """Return a ``{doc_id: file_type}`` map for every loaded document.
+
+        Types of PDF/EPUB documents are derived from each document's blob index
+        with no extra network calls; the remaining documents (notebooks) consult
+        their ``.content`` blob, so those reads are issued in parallel.
+        """
+        if not self._documents_by_id:
+            self.get_meta_items()
+
+        docs = list(self._documents_by_id.values())
+        workers = _get_sync_workers()
+        if workers > 1 and len(docs) > 1:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                list(executor.map(self.get_file_type, docs))
+        return {doc.id: self.get_file_type(doc) for doc in docs}
+
+    def check_connection(self) -> bool:
+        """Return True if the cloud API is reachable and the token is valid."""
+        try:
+            response = self._request(ROOT_URL)
+            return response.ok
+        except Exception as e:
+            logger.debug(f"Cloud connection check failed: {e}")
+            return False
+
+    # ------------------------------------------------------------------
+    # Cloud write support
+    #
+    # The store is a content-addressed Merkle tree:
+    #   * file blob  -> stored under sha256(content)
+    #   * doc index  -> stored under HashEntries(files) (schema 3 body)
+    #   * root index -> stored under sha256(body) (schema 4 body)
+    # A write uploads any new blobs, re-serializes the root index, uploads it,
+    # then commits it with the current generation (optimistic concurrency).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _now_ms() -> str:
+        return str(int(time.time() * 1000))
+
+    def _put_blob(
+        self,
+        content: bytes,
+        blob_hash: str,
+        filename: str,
+        content_type: str = "application/octet-stream",
+    ) -> None:
+        """Upload a blob's bytes, stored under ``blob_hash``.
+
+        The store sits behind Google Cloud Storage, which requires a matching
+        ``x-goog-hash`` (CRC32C) header on every upload.
+        """
+        headers = {
+            "rm-filename": filename,
+            "x-goog-hash": _crc32c_header(content),
+            "content-type": content_type,
+        }
+        response = self._request(
+            f"{FILES_URL}/{blob_hash}", method="PUT", headers=headers, data=content
+        )
+        response.raise_for_status()
+        # The bytes are immutable under this hash, so prime the read cache.
+        self._cache_write(blob_hash, content)
+
+    def _upload_file_blob(self, content: bytes, filename: str) -> Dict[str, Any]:
+        """Upload a file blob (hashed by content) and return its index entry."""
+        blob_hash = hashlib.sha256(content).hexdigest()
+        self._put_blob(content, blob_hash, filename)
+        return {
+            "hash": blob_hash,
+            "type": _TYPE_FILE,
+            "id": filename,
+            "subfiles": 0,
+            "size": len(content),
+        }
+
+    def _upload_doc_index(self, doc_id: str, files: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Upload a document blob index and return its root entry."""
+        body = _serialize_doc_index(files)
+        doc_hash = _hash_entries(files)
+        self._put_blob(body, doc_hash, f"{doc_id}.docSchema")
+        return {
+            "hash": doc_hash,
+            "type": _TYPE_FILE,
+            "id": doc_id,
+            "subfiles": len(files),
+            "size": sum(int(f["size"]) for f in files),
+        }
+
+    def get_root(self) -> tuple:
+        """Return the current ``(root_hash, generation)`` from the cloud."""
+        response = self._request(ROOT_URL)
+        response.raise_for_status()
+        data = response.json()
+        return data["hash"], data.get("generation", 0)
+
+    def _read_root_entries(self) -> tuple:
+        """Return ``(entries, generation)`` for the current root index."""
+        root_hash, generation = self.get_root()
+        root_index = self._get_file(root_hash, "root.docSchema")
+        return self._parse_index(root_index), generation
+
+    def _commit_root(self, root_hash: str, generation: int, broadcast: bool = True) -> int:
+        """Commit a new root hash, gated on ``generation``.
+
+        Returns the new generation. Raises ``CloudWriteError`` with ``conflict``
+        set when the generation no longer matches (someone else wrote first).
+        """
+        body = {"broadcast": broadcast, "hash": root_hash, "generation": generation}
+        response = self._request(
+            ROOT_PUT_URL,
+            method="PUT",
+            headers={"rm-filename": "roothash"},
+            json=body,
+        )
+        # 409/412/428 mean another client committed first (generation race) and
+        # the write should be retried against the fresh root.
+        if response.status_code in (409, 412, 428):
+            err = CloudWriteError(
+                f"Root generation conflict (HTTP {response.status_code}); will retry."
+            )
+            err.conflict = True
+            raise err
+        if not response.ok:
+            raise CloudWriteError(
+                f"Root commit failed (HTTP {response.status_code}): {response.text[:200]}"
+            )
+        data = response.json()
+        if data.get("hash") != root_hash:
+            raise CloudWriteError("Root commit returned a mismatched hash.")
+        return data.get("generation", generation)
+
+    def _sync_root(self, mutate) -> None:
+        """Apply ``mutate(entries) -> new_entries`` and commit a new root.
+
+        ``mutate`` may upload blobs as a side effect; it is re-invoked on a
+        generation conflict after re-reading the remote root, so it must be
+        idempotent with respect to blob uploads (content-addressed uploads are).
+        On success all in-memory document caches are invalidated.
+        """
+        last_error: Optional[Exception] = None
+        for attempt in range(_ROOT_COMMIT_ATTEMPTS):
+            entries, generation = self._read_root_entries()
+            new_entries = mutate(list(entries))
+            root_body = _serialize_root_index(new_entries)
+            root_hash = hashlib.sha256(root_body).hexdigest()
+            self._put_blob(root_body, root_hash, "root.docSchema", "text/plain; charset=UTF-8")
+            try:
+                self._commit_root(root_hash, generation)
+                self._invalidate_caches()
+                return
+            except CloudWriteError as e:
+                if getattr(e, "conflict", False) and attempt < _ROOT_COMMIT_ATTEMPTS - 1:
+                    last_error = e
+                    time.sleep(_compute_sleep(_get_retry_delay(), attempt))
+                    continue
+                raise
+        raise CloudWriteError(
+            f"Could not commit root after {_ROOT_COMMIT_ATTEMPTS} attempts: {last_error}"
+        )
+
+    def _invalidate_caches(self) -> None:
+        """Drop in-memory document/file-type caches after a mutation."""
+        self._documents = []
+        self._documents_by_id = {}
+        self._file_type_cache = {}
+
+    def _mutate_doc_metadata(self, entry: Dict[str, Any], apply: "Any") -> Dict[str, Any]:
+        """Rewrite one document's ``.metadata`` blob and return its new root entry.
+
+        ``apply(metadata: dict)`` mutates the metadata in place. The version is
+        bumped and ``lastModified`` refreshed so the device picks up the change.
+        """
+        doc_id = entry["id"]
+        files = self._parse_index(self._get_file(entry["hash"], f"{doc_id}.docSchema"))
+        meta_entry = next((f for f in files if f["id"].endswith(".metadata")), None)
+        if meta_entry is None:
+            raise CloudWriteError(f"Document {doc_id} has no metadata blob.")
+
+        metadata = json.loads(self._get_file(meta_entry["hash"], meta_entry["id"]).decode("utf-8"))
+        apply(metadata)
+        try:
+            metadata["version"] = int(metadata.get("version", 1)) + 1
+        except (TypeError, ValueError):
+            metadata["version"] = 1
+        metadata["lastModified"] = self._now_ms()
+        metadata["metadatamodified"] = True
+
+        new_meta = json.dumps(metadata, sort_keys=True).encode("utf-8")
+        new_entry = self._upload_file_blob(new_meta, meta_entry["id"])
+        files = [new_entry if f["id"] == meta_entry["id"] else f for f in files]
+        return self._upload_doc_index(doc_id, files)
+
+    def _replace_root_entry(self, entries, new_entry):
+        """Return ``entries`` with the entry matching ``new_entry['id']`` replaced."""
+        return [new_entry if e["id"] == new_entry["id"] else e for e in entries]
+
+    def _require_entry(self, entries, doc_id):
+        entry = next((e for e in entries if e["id"] == doc_id), None)
+        if entry is None:
+            raise CloudWriteError(f"Document {doc_id} not found in cloud root.")
+        return entry
+
+    def create_folder(self, name: str, parent_id: str = "") -> Document:
+        """Create a folder (CollectionType) in the cloud and return it."""
+        doc_id = str(uuid.uuid4())
+        now = self._now_ms()
+        metadata = {
+            "createdTime": now,
+            "lastModified": now,
+            "new": False,
+            "parent": parent_id or "",
+            "pinned": False,
+            "source": "",
+            "type": "CollectionType",
+            "visibleName": name,
+        }
+        meta_bytes = json.dumps(metadata, sort_keys=True).encode("utf-8")
+        files = [self._upload_file_blob(meta_bytes, f"{doc_id}.metadata")]
+        new_entry = self._upload_doc_index(doc_id, files)
+        self._sync_root(lambda entries: entries + [new_entry])
+        return Document(
+            id=doc_id,
+            hash=new_entry["hash"],
+            name=name,
+            doc_type="CollectionType",
+            parent=parent_id or "",
+        )
+
+    def rename(self, doc_id: str, new_name: str) -> None:
+        """Rename a document or folder in the cloud."""
+
+        def apply(meta):
+            meta["visibleName"] = new_name
+
+        def mutate(entries):
+            entry = self._require_entry(entries, doc_id)
+            return self._replace_root_entry(entries, self._mutate_doc_metadata(entry, apply))
+
+        self._sync_root(mutate)
+
+    def move(self, doc_id: str, new_parent_id: str) -> None:
+        """Move a document or folder under a new parent ("" = root)."""
+
+        def apply(meta):
+            meta["parent"] = new_parent_id or ""
+
+        def mutate(entries):
+            entry = self._require_entry(entries, doc_id)
+            return self._replace_root_entry(entries, self._mutate_doc_metadata(entry, apply))
+
+        self._sync_root(mutate)
+
+    def delete(self, doc_id: str) -> None:
+        """Move a document or folder to the trash (recoverable via ``restore``)."""
+        self.move(doc_id, "trash")
+
+    def restore(self, doc_id: str, parent_id: str = "") -> None:
+        """Restore a trashed document or folder back to ``parent_id`` ("" = root)."""
+        self.move(doc_id, parent_id or "")
+
+    def upload_document(
+        self,
+        content: bytes,
+        name: str,
+        file_type: str,
+        parent_id: str = "",
+    ) -> Document:
+        """Upload a PDF or EPUB document to the cloud and return it.
+
+        Builds the four blobs a reMarkable document needs (``.content``,
+        ``.metadata``, ``.pagedata`` and the source ``.pdf``/``.epub``), then
+        adds the document to the root index.
+        """
+        ext = file_type.lower().lstrip(".")
+        if ext not in ("pdf", "epub"):
+            raise CloudWriteError(f"Unsupported upload type '{ext}'; use pdf or epub.")
+
+        doc_id = str(uuid.uuid4())
+        now = self._now_ms()
+
+        page_count, page_uuids = self._page_layout(content, ext)
+        content_json = {
+            "coverPageNumber": -1,
+            "documentMetadata": {},
+            "dummyDocument": False,
+            "extraMetadata": {},
+            "fileType": ext,
+            "fontName": "",
+            "formatVersion": 1,
+            "lineHeight": -1,
+            "margins": 100,
+            "orientation": "portrait",
+            "pageCount": page_count,
+            "pageTags": [],
+            "pages": page_uuids,
+            "tags": [],
+            "textScale": 1,
+        }
+        metadata = {
+            "createdTime": now,
+            "deleted": False,
+            "lastModified": now,
+            "lastOpened": now,
+            "lastOpenedPage": 0,
+            "metadatamodified": False,
+            "modified": False,
+            "new": False,
+            "parent": parent_id or "",
+            "pinned": False,
+            "source": "",
+            "synced": False,
+            "type": "DocumentType",
+            "version": 1,
+            "visibleName": name,
+        }
+        pagedata = ("Blank\n" * page_count) if page_count else "\n"
+
+        files = [
+            self._upload_file_blob(
+                json.dumps(content_json, sort_keys=True).encode("utf-8"), f"{doc_id}.content"
+            ),
+            self._upload_file_blob(
+                json.dumps(metadata, sort_keys=True).encode("utf-8"), f"{doc_id}.metadata"
+            ),
+            self._upload_file_blob(pagedata.encode("utf-8"), f"{doc_id}.pagedata"),
+            self._upload_file_blob(content, f"{doc_id}.{ext}"),
+        ]
+        new_entry = self._upload_doc_index(doc_id, files)
+        self._sync_root(lambda entries: entries + [new_entry])
+        return Document(
+            id=doc_id,
+            hash=new_entry["hash"],
+            name=name,
+            doc_type="DocumentType",
+            parent=parent_id or "",
+        )
+
+    @staticmethod
+    def _page_layout(content: bytes, ext: str) -> tuple:
+        """Return ``(page_count, page_uuids)`` for a source file.
+
+        PDFs are measured with PyMuPDF so the device shows the right page count;
+        EPUBs reflow on-device, so they start with no fixed pages.
+        """
+        if ext != "pdf":
+            return 0, []
+        try:
+            import fitz
+
+            with fitz.open(stream=content, filetype="pdf") as pdf:
+                count = pdf.page_count
+            return count, [str(uuid.uuid4()) for _ in range(count)]
+        except Exception as e:  # pragma: no cover - defensive; upload still proceeds
+            logger.debug(f"Could not count PDF pages: {e}")
+            return 0, []
 
 
 def register_device(one_time_code: str) -> Dict[str, str]:

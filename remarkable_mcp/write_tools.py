@@ -1,16 +1,19 @@
 """
-Write tools for reMarkable tablet via SSH or USB web interface.
+Write tools for reMarkable tablet via cloud, SSH, or USB web interface.
 
 These tools are opt-in — disabled by default. Enable via:
-- CLI flag: remarkable-mcp --ssh --write  (or --usb --write)
+- CLI flag: remarkable-mcp --write  (works in the default cloud mode)
+            remarkable-mcp --ssh --write  (or --usb --write)
 - Environment variable: REMARKABLE_ENABLE_WRITE=1
 
-Available in SSH mode and USB web mode. Cloud mode returns a clear error.
-- SSH mode: full write support (upload, mkdir, move, rename, delete)
+Write support by transport:
+- Cloud mode: upload, mkdir, move, rename, delete (-> trash)
+- SSH mode:   upload, mkdir, move, rename, delete
 - USB web mode: upload only (via POST /upload endpoint)
 
-Inspired by PR #70 from @McSchnizzle. Implemented purely via SSH filesystem
-operations and USB web HTTP endpoints — no external Go binary required.
+Inspired by PR #70 from @McSchnizzle. SSH operations use the tablet filesystem,
+USB uses the web upload endpoint, and cloud uses the sync v3/v4 blob protocol —
+no external Go binary required.
 """
 
 import asyncio
@@ -21,13 +24,16 @@ import time
 import uuid
 from typing import Optional
 
+from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
+from pydantic import BaseModel, Field
 
 from remarkable_mcp.api import (
     get_item_path,
     get_items_by_id,
     get_rmapi,
 )
+from remarkable_mcp.capabilities import client_supports_elicitation
 from remarkable_mcp.responses import make_error, make_response
 from remarkable_mcp.server import mcp
 from remarkable_mcp.ssh import XOCHITL_PATH, SSHClient
@@ -53,49 +59,19 @@ def write_enabled() -> bool:
 
 
 def _require_write_transport() -> Optional[str]:
-    """Return an error string if not in a write-capable mode, or None if OK."""
-    ssh_enabled = os.environ.get("REMARKABLE_USE_SSH", "").lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-    usb_web_enabled = os.environ.get("REMARKABLE_USE_USB_WEB", "").lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-    if not ssh_enabled and not usb_web_enabled:
-        return make_error(
-            error_type="write_transport_required",
-            message="Write operations require SSH or USB web mode",
-            suggestion=(
-                "Write tools work with SSH or USB web access to your tablet. "
-                "Run with: remarkable-mcp --ssh --write  (or --usb --write)\n"
-                "See: https://github.com/SamMorrowDrums/remarkable-mcp/blob/main/docs/ssh-setup.md"
-            ),
-        )
-    return None
+    """Return an error string if writes are disabled, else None.
 
-
-def _require_ssh_mode() -> Optional[str]:
-    """Return an error string if not in SSH mode, or None if OK.
-
-    Used for operations that only work via SSH (mkdir, move, rename, delete).
+    Upload works in all three transports (cloud, SSH, USB web). Write tools are
+    only registered when REMARKABLE_ENABLE_WRITE is set, so this is mostly a
+    defensive check that returns a clear error if writes are somehow disabled.
     """
-    ssh_enabled = os.environ.get("REMARKABLE_USE_SSH", "").lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-    if not ssh_enabled:
+    if not write_enabled():
         return make_error(
-            error_type="ssh_required",
-            message="This operation requires SSH mode",
+            error_type="write_disabled",
+            message="Write operations are disabled",
             suggestion=(
-                "mkdir, move, rename, and delete only work with SSH access. "
-                "Upload works with both SSH and USB web mode.\n"
-                "Run with: remarkable-mcp --ssh --write\n"
-                "See: https://github.com/SamMorrowDrums/remarkable-mcp/blob/main/docs/ssh-setup.md"
+                "Enable write tools with the --write flag or REMARKABLE_ENABLE_WRITE=1.\n"
+                "Run with: remarkable-mcp --write  (cloud)  or  --ssh --write / --usb --write"
             ),
         )
     return None
@@ -116,6 +92,30 @@ def _is_usb_web_mode() -> bool:
         "1",
         "true",
         "yes",
+    )
+
+
+def _is_cloud_mode() -> bool:
+    """Check if cloud transport is active (the default when SSH/USB are off)."""
+    return not _is_ssh_mode() and not _is_usb_web_mode()
+
+
+def _require_managed_write_mode() -> Optional[str]:
+    """Return an error string unless in a mode that supports folder operations.
+
+    mkdir, move, rename and delete work in cloud and SSH modes. USB web
+    mode only supports uploads, so it is rejected here with guidance.
+    """
+    if _is_cloud_mode() or _is_ssh_mode():
+        return None
+    return make_error(
+        error_type="unsupported_in_usb_web",
+        message="This operation isn't available in USB web mode",
+        suggestion=(
+            "mkdir, move, rename and delete work in cloud mode (the "
+            "default) and SSH mode. Upload works in all three modes.\n"
+            "Run with: remarkable-mcp --write  (cloud)  or  --ssh --write"
+        ),
     )
 
 
@@ -275,6 +275,197 @@ def _resolve_document(
     return None
 
 
+def _invalidate_client_cache(client) -> None:
+    """Drop the in-memory document cache so the next read reflects the write."""
+    client._documents = []
+    client._documents_by_id = {}
+
+
+def _cloud_mkdir(folder_name: str, parent: str) -> str:
+    """Create a folder in the reMarkable cloud."""
+    client = get_rmapi()
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    parent_id = _resolve_parent_id(parent, items_by_id, collection)
+    if parent_id is None:
+        return make_error(
+            error_type="folder_not_found",
+            message=f"Parent folder not found: '{parent}'",
+            suggestion="Use remarkable_browse('/') to see available folders.",
+        )
+    doc = client.create_folder(folder_name, parent_id)
+    _invalidate_client_cache(client)
+    return make_response(
+        {
+            "created": True,
+            "folder_name": folder_name,
+            "uuid": doc.id,
+            "parent": parent,
+            "transport": "cloud",
+        },
+        "Folder created in the reMarkable cloud. Use remarkable_browse() to verify.",
+    )
+
+
+def _cloud_move(document: str, dest_folder: str) -> str:
+    """Move a document or folder to another folder in the cloud."""
+    client = get_rmapi()
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+
+    target = _resolve_document(document, collection, items_by_id)
+    if not target:
+        from remarkable_mcp.extract import find_similar_documents
+
+        similar = find_similar_documents(document, collection)
+        return make_error(
+            error_type="document_not_found",
+            message=f"Document not found: '{document}'",
+            suggestion="Use remarkable_browse() to find the correct name.",
+            did_you_mean=similar if similar else None,
+        )
+
+    dest_id = _resolve_parent_id(dest_folder, items_by_id, collection)
+    if dest_id is None:
+        return make_error(
+            error_type="folder_not_found",
+            message=f"Destination folder not found: '{dest_folder}'",
+            suggestion="Use remarkable_browse('/') to see available folders.",
+        )
+
+    # Prevent moving a folder into itself or one of its descendants
+    if target.is_folder:
+        if dest_id == target.ID:
+            return make_error(
+                error_type="invalid_move",
+                message="Cannot move a folder into itself",
+                suggestion="Choose a different destination folder.",
+            )
+        check_id = dest_id
+        while check_id and check_id in items_by_id:
+            if check_id == target.ID:
+                return make_error(
+                    error_type="invalid_move",
+                    message="Cannot move a folder into one of its subfolders",
+                    suggestion="Choose a destination that is not inside the folder being moved.",
+                )
+            check_id = getattr(items_by_id[check_id], "Parent", "")
+
+    old_path = get_item_path(target, items_by_id)
+    client.move(target.ID, dest_id)
+    _invalidate_client_cache(client)
+    return make_response(
+        {
+            "moved": True,
+            "name": target.VissibleName,
+            "from": old_path,
+            "to": dest_folder,
+            "transport": "cloud",
+        },
+        "Document moved in the reMarkable cloud. Use remarkable_browse() to verify.",
+    )
+
+
+def _cloud_rename(document: str, new_name: str) -> str:
+    """Rename a document or folder in the cloud."""
+    client = get_rmapi()
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+
+    target = _resolve_document(document, collection, items_by_id)
+    if not target:
+        from remarkable_mcp.extract import find_similar_documents
+
+        similar = find_similar_documents(document, collection)
+        return make_error(
+            error_type="document_not_found",
+            message=f"Document not found: '{document}'",
+            suggestion="Use remarkable_browse() to find the correct name.",
+            did_you_mean=similar if similar else None,
+        )
+
+    old_name = target.VissibleName
+    client.rename(target.ID, new_name)
+    _invalidate_client_cache(client)
+    return make_response(
+        {
+            "renamed": True,
+            "old_name": old_name,
+            "new_name": new_name,
+            "transport": "cloud",
+        },
+        "Document renamed in the reMarkable cloud. Use remarkable_browse() to verify.",
+    )
+
+
+def _cloud_delete(document: str) -> str:
+    """Move a document or folder to the cloud trash (recoverable on-device)."""
+    client = get_rmapi()
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+
+    target = _resolve_document(document, collection, items_by_id)
+    if not target:
+        from remarkable_mcp.extract import find_similar_documents
+
+        similar = find_similar_documents(document, collection)
+        return make_error(
+            error_type="document_not_found",
+            message=f"Document not found: '{document}'",
+            suggestion="Use remarkable_browse() to find the correct name.",
+            did_you_mean=similar if similar else None,
+        )
+
+    doc_path = get_item_path(target, items_by_id)
+    client.delete(target.ID)
+    _invalidate_client_cache(client)
+    return make_response(
+        {
+            "deleted": True,
+            "name": target.VissibleName,
+            "path": doc_path,
+            "type": "folder" if target.is_folder else "document",
+            "transport": "cloud",
+        },
+        "Moved to the trash on your reMarkable (recoverable from the device's Trash).",
+    )
+
+
+class _DeleteConfirmation(BaseModel):
+    """Schema for confirming a destructive delete via elicitation."""
+
+    confirm: bool = Field(
+        default=False,
+        description="Set to true to permanently move this item to the trash.",
+    )
+
+
+async def _confirm_delete(ctx: Optional[Context], document: str) -> Optional[str]:
+    """Ask the user to confirm a delete when the client supports elicitation.
+
+    Returns None to proceed, or a response string (cancellation) to abort.
+    Skips the prompt when elicitation isn't supported or REMARKABLE_SKIP_CONFIRM=1.
+    """
+    if os.environ.get("REMARKABLE_SKIP_CONFIRM", "").lower() in ("1", "true", "yes"):
+        return None
+    if ctx is None or not client_supports_elicitation(ctx):
+        return None
+    try:
+        result = await ctx.elicit(
+            message=f"Delete '{document}' from your reMarkable? This moves it to the trash.",
+            schema=_DeleteConfirmation,
+        )
+    except Exception as e:  # elicitation unsupported at runtime — proceed
+        logger.debug(f"Elicitation failed, proceeding without confirmation: {e}")
+        return None
+    if result.action != "accept" or not getattr(result.data, "confirm", False):
+        return make_response(
+            {"deleted": False, "cancelled": True, "document": document},
+            "Delete cancelled — nothing was changed.",
+        )
+    return None
+
+
 def register_write_tools():
     """Register all write tools with the MCP server."""
 
@@ -288,20 +479,20 @@ def register_write_tools():
         <usecase>Upload a PDF or EPUB file to the reMarkable tablet.</usecase>
         <instructions>
         Uploads a local file to the tablet. Only PDF and EPUB formats
-        are supported.
-
-        Works in both SSH and USB web mode:
-        - SSH: file is transferred via SSH, metadata is created, xochitl restarts
-        - USB web: file is uploaded via POST /upload HTTP endpoint
+        are supported. Works in all three transports:
+        - Cloud: uploaded via the sync protocol; supports parent_folder + document_name
+        - SSH: transferred over SSH, metadata created; supports parent_folder + document_name
+        - USB web: uploaded via POST /upload; lands at the root (the firmware's
+          upload endpoint has no folder or rename field)
 
         Requires --write flag.
         </instructions>
         <parameters>
         - file_path: Absolute path to the local PDF or EPUB file
         - parent_folder: Destination folder path on tablet (default: root "/").
-          Note: parent_folder is only supported in SSH mode.
+          Honored in cloud and SSH modes; ignored by the USB web interface.
         - document_name: Display name on tablet (default: filename without
-          extension). Note: document_name is only supported in SSH mode.
+          extension). Honored in cloud and SSH modes; ignored by the USB web interface.
         </parameters>
         <examples>
         - remarkable_upload("/tmp/paper.pdf")
@@ -330,6 +521,38 @@ def register_write_tools():
                         error_type="unsupported_format",
                         message=f"Unsupported file format: '.{ext}'",
                         suggestion="Only PDF and EPUB files can be uploaded to reMarkable.",
+                    )
+
+                # Cloud mode: upload via the sync v3/v4 blob protocol
+                if _is_cloud_mode():
+                    client = get_rmapi()
+                    collection = client.get_meta_items()
+                    items_by_id = get_items_by_id(collection)
+                    parent_id = _resolve_parent_id(parent_folder, items_by_id, collection)
+                    if parent_id is None:
+                        folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
+                        return make_error(
+                            error_type="folder_not_found",
+                            message=f"Folder not found: '{parent_folder}'",
+                            suggestion="Use remarkable_browse('/') to see available folders.",
+                            did_you_mean=folders[:5] if folders else None,
+                        )
+
+                    name = document_name or os.path.splitext(os.path.basename(file_path))[0]
+                    with open(file_path, "rb") as f:
+                        data = f.read()
+                    doc = client.upload_document(data, name, ext, parent_id)
+                    return make_response(
+                        {
+                            "uploaded": True,
+                            "name": name,
+                            "uuid": doc.id,
+                            "format": ext,
+                            "parent_folder": parent_folder,
+                            "transport": "cloud",
+                        },
+                        "Document uploaded to the reMarkable cloud. "
+                        "Use remarkable_browse() to verify it appears.",
                     )
 
                 # USB web mode: simple HTTP upload
@@ -439,7 +662,7 @@ def register_write_tools():
 
         return await asyncio.to_thread(_impl)
 
-    if _is_ssh_mode():
+    if _is_ssh_mode() or _is_cloud_mode():
 
         @mcp.tool(annotations=MKDIR_ANNOTATIONS)
         async def remarkable_mkdir(
@@ -449,10 +672,12 @@ def register_write_tools():
             """
             <usecase>Create a new folder on the reMarkable tablet.</usecase>
             <instructions>
-            Creates a folder in the tablet's document hierarchy. The folder appears
-            in the tablet UI after xochitl restarts.
+            Creates a folder in the tablet's document hierarchy. In SSH mode the
+            folder appears after xochitl restarts; in cloud mode it syncs to all
+            your devices.
 
-            Requires SSH mode and --write flag. Not available in USB web mode.
+            Works in cloud and SSH modes (requires --write). Not available over the
+            USB web interface (the firmware exposes no folder-create endpoint).
             </instructions>
             <parameters>
             - folder_name: Name of the new folder
@@ -465,9 +690,12 @@ def register_write_tools():
             """
 
             def _impl() -> str:
-                error = _require_ssh_mode()
+                error = _require_managed_write_mode()
                 if error:
                     return error
+
+                if _is_cloud_mode():
+                    return _cloud_mkdir(folder_name, parent)
 
                 try:
                     ssh_client = _get_ssh_client()
@@ -539,7 +767,8 @@ def register_write_tools():
             Moves a document or folder by updating its parent reference in the metadata.
             Find the document name with remarkable_browse() first.
 
-            Requires SSH mode and --write flag. Not available in USB web mode.
+            Works in cloud and SSH modes (requires --write). Not available over the
+            USB web interface.
             </instructions>
             <parameters>
             - document: Name or path of the document/folder to move
@@ -552,9 +781,12 @@ def register_write_tools():
             """
 
             def _impl() -> str:
-                error = _require_ssh_mode()
+                error = _require_managed_write_mode()
                 if error:
                     return error
+
+                if _is_cloud_mode():
+                    return _cloud_move(document, dest_folder)
 
                 try:
                     ssh_client = _get_ssh_client()
@@ -655,7 +887,8 @@ def register_write_tools():
             Changes the display name of a document or folder by updating its metadata.
             Find the document name with remarkable_browse() first.
 
-            Requires SSH mode and --write flag. Not available in USB web mode.
+            Works in cloud and SSH modes (requires --write). Not available over the
+            USB web interface.
             </instructions>
             <parameters>
             - document: Current name or path of the document/folder
@@ -668,9 +901,12 @@ def register_write_tools():
             """
 
             def _impl() -> str:
-                error = _require_ssh_mode()
+                error = _require_managed_write_mode()
                 if error:
                     return error
+
+                if _is_cloud_mode():
+                    return _cloud_rename(document, new_name)
 
                 try:
                     ssh_client = _get_ssh_client()
@@ -728,16 +964,20 @@ def register_write_tools():
             return await asyncio.to_thread(_impl)
 
         @mcp.tool(annotations=DELETE_ANNOTATIONS)
-        async def remarkable_delete(document: str) -> str:
+        async def remarkable_delete(document: str, ctx: Optional[Context] = None) -> str:
             """
             <usecase>Delete a document or folder on the reMarkable tablet.</usecase>
             <instructions>
-            DESTRUCTIVE operation — marks a document as deleted in its metadata.
-            The document won't appear in the tablet UI after restart.
+            DESTRUCTIVE operation. In cloud mode the item is moved to the trash
+            (recoverable from the device's Trash). In SSH mode it is marked deleted
+            in its metadata and disappears from the tablet UI after restart.
 
-            Requires SSH mode and --write flag. Not available in USB web mode.
-            The MCP client is responsible for any user confirmation; this tool
-            performs the delete immediately.
+            Works in cloud and SSH modes (requires --write). Not available over the
+            USB web interface.
+
+            If the client supports elicitation, this tool asks the user to confirm
+            before deleting. Set REMARKABLE_SKIP_CONFIRM=1 to skip the prompt for
+            automation.
             </instructions>
             <parameters>
             - document: Name or path of the document/folder to delete
@@ -747,12 +987,18 @@ def register_write_tools():
             - remarkable_delete("/Books/Archive/Old Draft")
             </examples>
             """
+            error = _require_managed_write_mode()
+            if error:
+                return error
+
+            cancelled = await _confirm_delete(ctx, document)
+            if cancelled:
+                return cancelled
+
+            if _is_cloud_mode():
+                return await asyncio.to_thread(_cloud_delete, document)
 
             def _impl() -> str:
-                error = _require_ssh_mode()
-                if error:
-                    return error
-
                 try:
                     ssh_client = _get_ssh_client()
                     collection = ssh_client.get_meta_items()

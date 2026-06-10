@@ -77,7 +77,10 @@ Security Note:
     parser.add_argument(
         "--write",
         action="store_true",
-        help="Enable write tools (upload, mkdir, move, rename, delete). SSH and USB web mode.",
+        help=(
+            "Enable write tools (upload, mkdir, move, rename, delete). "
+            "Cloud and SSH support all of them; USB web supports upload only."
+        ),
     )
 
     args = parser.parse_args()
@@ -130,12 +133,9 @@ Security Note:
 
         run()
     else:
-        # MCP server mode - only now import the full server
+        # Cloud mode (default) - now write-capable via the sync protocol
         if args.write:
-            print(
-                "⚠️  --write flag ignored: write tools require SSH or USB web mode.",
-                file=sys.stderr,
-            )
+            os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
         from remarkable_mcp.server import run
 
         run()

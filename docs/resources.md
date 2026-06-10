@@ -6,10 +6,10 @@ Documents in your reMarkable library are automatically registered as MCP resourc
 
 | URI Scheme | Description | Mode |
 |------------|-------------|------|
-| `remarkable:///` | Your annotations, typed text, and handwriting | Both |
-| `remarkableraw:///` | Original PDF/EPUB text | SSH only |
-| `remarkableimg:///` | PNG page images (notebooks) | Both |
-| `remarkablesvg:///` | SVG page images (notebooks) | Both |
+| `remarkable:///` | Your annotations, typed text, and handwriting | All modes |
+| `remarkableraw:///` | Original PDF/EPUB text | All modes (USB web: PDF) |
+| `remarkableimg:///` | PNG page images (notebooks) | All modes |
+| `remarkablesvg:///` | SVG page images (notebooks) | All modes |
 
 ## Text Resources (`remarkable:///`)
 
@@ -86,10 +86,14 @@ This paper explores the relationship between...
 
 | Mode | Text Resources | Raw Resources |
 |------|----------------|---------------|
-| SSH | ✅ Yes | ✅ Yes |
-| Cloud | ✅ Yes | ❌ No |
+| Cloud | ✅ Yes | ✅ Yes (PDF/EPUB) |
+| SSH | ✅ Yes | ✅ Yes (PDF/EPUB) |
+| USB Web | ✅ Yes | ✅ Yes (PDF) |
 
-The Cloud API doesn't provide access to original source files, so raw resources are only available when using SSH mode.
+All modes can access the original source files. Cloud stores the source blob
+alongside the notebook data, so PDFs/EPUBs are available wirelessly — though
+very large files that the device hasn't synced to the cloud may be missing.
+USB web exposes the tablet's PDF export.
 
 ## Image Resources (`remarkableimg:///` and `remarkablesvg:///`)
 
