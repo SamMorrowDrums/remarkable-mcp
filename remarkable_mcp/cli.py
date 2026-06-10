@@ -97,6 +97,16 @@ Security Note:
             "Cloud and SSH support all of them; USB web supports upload only."
         ),
     )
+    parser.add_argument(
+        "--no-cloud-fallback",
+        action="store_true",
+        help=(
+            "Disable the automatic cloud fallback. By default, if --usb/--ssh is "
+            "selected but the tablet is unreachable at startup and a cloud token "
+            "is configured, the server falls back to cloud mode so the same "
+            "configuration works with or without the device connected."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -136,6 +146,8 @@ Security Note:
         os.environ["REMARKABLE_USE_USB_WEB"] = "1"
         if args.write:
             os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
+        if args.no_cloud_fallback:
+            os.environ["REMARKABLE_DISABLE_CLOUD_FALLBACK"] = "1"
         from remarkable_mcp.server import run
 
         run()
@@ -146,6 +158,8 @@ Security Note:
             os.environ["REMARKABLE_SSH_KEY"] = args.ssh_key
         if args.write:
             os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
+        if args.no_cloud_fallback:
+            os.environ["REMARKABLE_DISABLE_CLOUD_FALLBACK"] = "1"
         from remarkable_mcp.server import run
 
         run()

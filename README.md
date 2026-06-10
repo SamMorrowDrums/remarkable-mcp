@@ -194,6 +194,12 @@ All three modes share the same read, render, and upload tools. **Cloud and SSH a
 
 ¹ Folder ops = create folder / move / rename / delete. Upload and folder ops require the `--write` flag (off by default). Deletes move items to the trash and can prompt for confirmation when your client supports elicitation.
 
+### Automatic cloud fallback
+
+If you select a device transport (`--usb` or `--ssh`) but the tablet isn't reachable at startup **and** a cloud token is configured (`REMARKABLE_TOKEN` or `~/.rmapi`), the server automatically falls back to cloud mode and logs a warning. This means a single configuration works whether or not the tablet is plugged in — plug in for fast local access, unplug to keep working over the cloud. `remarkable_status` reports the effective transport and a `fell_back_to_cloud` flag when this happens.
+
+Pass `--no-cloud-fallback` (or set `REMARKABLE_DISABLE_CLOUD_FALLBACK=1`) to disable this and fail instead when the device is unreachable.
+
 **📖 Detailed Setup Guides:**
 - [USB Web Interface Setup](docs/usb-web-setup.md) — **recommended** — simple setup, full feature support
 - [SSH Setup Guide](docs/ssh-setup.md) — for advanced users who need filesystem access
