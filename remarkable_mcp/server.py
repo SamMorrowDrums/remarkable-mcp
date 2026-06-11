@@ -278,6 +278,14 @@ from remarkable_mcp import write_tools as _write_tools  # noqa: E402
 if _write_tools.write_enabled():
     _write_tools.register_write_tools()
 
+# Conditionally register the interactive MCP App canvas (opt-in via --app /
+# REMARKABLE_ENABLE_APP). App-capable clients open an interactive viewer;
+# others still get the rendered page as an embedded image.
+from remarkable_mcp import app_canvas as _app_canvas  # noqa: E402
+
+if _app_canvas.app_enabled():
+    _app_canvas.register_app_tools()
+
 
 def run():
     """Run the MCP server."""

@@ -20,7 +20,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.27.0",
     "rmscene>=0.8.0",
     "pytesseract>=0.3.10",
     "Pillow>=10.0.0",
