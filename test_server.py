@@ -3488,6 +3488,18 @@ class TestCanvasResource:
         assert "remarkable_canvas" in _CANVAS_HTML
         assert "png_data_uri" in _CANVAS_HTML
 
+    def test_canvas_bridge_is_spec_compliant(self):
+        from remarkable_mcp.app_canvas import _CANVAS_HTML
+
+        # ui/initialize must carry a protocol version + client info per spec.
+        assert "protocolVersion" in _CANVAS_HTML
+        assert "2026-01-26" in _CANVAS_HTML
+        assert "clientInfo" in _CANVAS_HTML
+        # Input/result asymmetry: tool-input params are wrapped as {arguments},
+        # tool-result params are a bare CallToolResult.
+        assert "ui/notifications/tool-input" in _CANVAS_HTML
+        assert ".arguments" in _CANVAS_HTML
+
     def test_canvas_resource_uses_app_mime(self):
         from remarkable_mcp.app_canvas import CANVAS_RESOURCE_URI
         from remarkable_mcp.capabilities import APP_UI_MIME
@@ -3605,31 +3617,42 @@ class TestRenderCanvasPage:
 
 
 class TestRegisterAppTools:
-    """Test that enabling the app registers the canvas tool + resource."""
+    """Test that registering the app adds the canvas tool + resource."""
 
     @pytest.mark.asyncio
-    async def test_register_app_tools_adds_canvas(self):
+    async def test_register_app_tools_adds_canvas(self, monkeypatch):
         from mcp.server.fastmcp import FastMCP
 
         import remarkable_mcp.app_canvas as app_canvas
+        import remarkable_mcp.server as server_mod
 
-        # Register onto a throwaway server to avoid mutating the global one.
+        # register_app_tools imports mcp from server at call time, so redirect
+        # that global to a throwaway server to avoid mutating the real one.
         local = FastMCP("test-app")
-        original = app_canvas.mcp
-        app_canvas.mcp = local
-        try:
-            app_canvas.register_app_tools()
-            tools = await local.list_tools()
-            names = [t.name for t in tools]
-            assert "remarkable_canvas" in names
-            canvas = next(t for t in tools if t.name == "remarkable_canvas")
-            assert canvas.meta["ui"]["resourceUri"] == "ui://remarkable/canvas"
-            # No output schema so we can return either CallToolResult or an error string.
-            assert canvas.outputSchema is None
-            resources = await local.list_resources()
-            assert any(str(r.uri) == "ui://remarkable/canvas" for r in resources)
-        finally:
-            app_canvas.mcp = original
+        monkeypatch.setattr(server_mod, "mcp", local)
+
+        app_canvas.register_app_tools()
+        tools = await local.list_tools()
+        names = [t.name for t in tools]
+        assert "remarkable_canvas" in names
+        canvas = next(t for t in tools if t.name == "remarkable_canvas")
+        assert canvas.meta["ui"]["resourceUri"] == "ui://remarkable/canvas"
+        # No output schema so we can return either CallToolResult or an error string.
+        assert canvas.outputSchema is None
+        resources = await local.list_resources()
+        assert any(str(r.uri) == "ui://remarkable/canvas" for r in resources)
+
+    def test_app_canvas_importable_standalone(self):
+        """Importing app_canvas before server must not hit a circular import."""
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-c", "import remarkable_mcp.app_canvas"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
 
 
 class TestCanvasRegisteredByDefault:
