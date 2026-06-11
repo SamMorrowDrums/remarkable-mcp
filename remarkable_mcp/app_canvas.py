@@ -124,6 +124,7 @@ _CANVAS_HTML = """<!doctype html>
   var pending = {}, rpcId = 1;
   var state = { document: null, page: 1, total: 1, busy: false,
                 displayMode: "inline", displayModes: [],
+                appReady: false, fullscreenUnsupported: false,
                 writable: false, drawing: false, cache: {}, cur: null,
                 img: null, canvas: null };
 
@@ -222,13 +223,12 @@ _CANVAS_HTML = """<!doctype html>
     notify("ui/notifications/size-changed", { width: w, height: h });
   }
   function updateDisplayModeButton() {
-    // Per the MCP Apps spec, the View must only request a display mode the host
-    // advertises in hostContext.availableDisplayModes. Hide the control entirely
-    // when the host does not support fullscreen, rather than showing a button
-    // whose request the host silently declines.
+    // Offer the control in any app host once the handshake completes. We attempt
+    // the request optimistically (some hosts honor fullscreen without advertising
+    // it in availableDisplayModes) and self-correct: a declined request sets
+    // fullscreenUnsupported, hiding the button so we never leave a dead control.
     var btn = document.getElementById("full");
-    var canFull = state.displayModes.indexOf("fullscreen") !== -1;
-    btn.hidden = !canFull;
+    btn.hidden = !(state.appReady && !state.fullscreenUnsupported);
     btn.textContent = state.displayMode === "fullscreen" ? "Exit fullscreen" : "Fullscreen";
   }
   function applyHostContext(hc) {
@@ -373,8 +373,11 @@ _CANVAS_HTML = """<!doctype html>
   function refreshControls() {
     var w = !!state.writable;
     var dirty = totalCached() > 0;
-    document.getElementById("prev").disabled = state.busy || state.page <= 1;
-    document.getElementById("next").disabled = state.busy || state.page >= state.total;
+    // Lock page navigation while drawing so strokes can't be stranded on a page
+    // the user has navigated away from. They click "Done drawing" to move pages.
+    var navLock = state.busy || state.drawing;
+    document.getElementById("prev").disabled = navLock || state.page <= 1;
+    document.getElementById("next").disabled = navLock || state.page >= state.total;
     var drawBtn = document.getElementById("draw");
     drawBtn.hidden = !w;
     drawBtn.textContent = state.drawing ? "Done drawing" : "Draw";
@@ -421,12 +424,23 @@ _CANVAS_HTML = """<!doctype html>
   document.getElementById("cancel").onclick = cancelEdits;
   document.getElementById("full").onclick = function () {
     var want = state.displayMode === "fullscreen" ? "inline" : "fullscreen";
-    if (want === "fullscreen" && state.displayModes.indexOf("fullscreen") === -1) return;
     rpc("ui/request-display-mode", { mode: want }).then(function (res) {
       // Host returns the mode actually set (may differ from the request).
       if (res && res.mode) state.displayMode = res.mode;
+      if (want === "fullscreen" && state.displayMode !== "fullscreen") {
+        // Host accepted the call but didn't switch -> treat as unsupported.
+        state.fullscreenUnsupported = true;
+        document.getElementById("footer").textContent =
+          "This client does not support fullscreen.";
+      }
       updateDisplayModeButton();
-    }).catch(function () {});
+      sizeOverlay(); redrawOverlay(); notifySize();
+    }).catch(function () {
+      state.fullscreenUnsupported = true;
+      document.getElementById("footer").textContent =
+        "This client does not support fullscreen.";
+      updateDisplayModeButton();
+    });
   };
 
   window.addEventListener("message", function (event) {
@@ -481,15 +495,19 @@ _CANVAS_HTML = """<!doctype html>
     clientInfo: { name: "remarkable-canvas", version: "1" },
     appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
   }).then(function (res) {
+    state.appReady = true;
     notify("ui/notifications/initialized", {});
     // Capture host context (theme, supported display modes, dimensions) so the
     // fullscreen control is only offered when the host actually supports it.
     if (res && res.hostContext) applyHostContext(res.hostContext);
+    updateDisplayModeButton();
     var d = digOut(res);
     if (d) render(d);
   }).catch(function () {
     // Some hosts push tool-input/result without a handshake reply; that's fine.
+    state.appReady = true;
     notify("ui/notifications/initialized", {});
+    updateDisplayModeButton();
   });
 })();
 </script>
