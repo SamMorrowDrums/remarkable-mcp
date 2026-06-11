@@ -68,6 +68,17 @@ if TYPE_CHECKING:
     from mcp.types import ClientCapabilities
 
 
+# MCP Apps (SEP-1865) UI extension. Clients that can render interactive HTML
+# app surfaces advertise this extension during the initialize handshake:
+#   capabilities.extensions["io.modelcontextprotocol/ui"] = {
+#       "mimeTypes": ["text/html;profile=mcp-app"]
+#   }
+# The MCP SDK (as of 1.27) has no typed field for this, but ClientCapabilities
+# allows extra fields, so we read it from model_extra.
+APP_UI_EXTENSION_ID = "io.modelcontextprotocol/ui"
+APP_UI_MIME = "text/html;profile=mcp-app"
+
+
 def get_client_capabilities(ctx: "Context") -> Optional["ClientCapabilities"]:
     """Get the client's declared capabilities from the MCP context.
 
@@ -199,3 +210,58 @@ def get_protocol_version(ctx: "Context") -> Optional[str]:
     except (ValueError, AttributeError):
         pass
     return None
+
+
+def get_client_extensions(ctx: "Context") -> dict:
+    """Get the client's declared protocol extensions (SEP-1724).
+
+    Extensions are not a typed field on ClientCapabilities in the current MCP
+    SDK, but the model permits extra fields, so they are read from model_extra.
+
+    Args:
+        ctx: The FastMCP Context object
+
+    Returns:
+        The extensions mapping (extension id -> config dict), or {} if none.
+    """
+    caps = get_client_capabilities(ctx)
+    if caps is None:
+        return {}
+    extra = getattr(caps, "model_extra", None) or {}
+    extensions = extra.get("extensions")
+    return extensions if isinstance(extensions, dict) else {}
+
+
+def client_supports_apps(ctx: "Context") -> bool:
+    """Check if the client can render MCP Apps interactive UI surfaces.
+
+    MCP Apps (SEP-1865) lets a server return an HTML app, rendered by the client
+    in a sandboxed iframe, that talks back to the server over a postMessage
+    bridge. Clients advertise support via the "io.modelcontextprotocol/ui"
+    extension during the initialize handshake.
+
+    A client counts as app-capable when it declares the UI extension and either
+    lists no specific mime types or includes a text/html-based mime type (the
+    app profile is ``text/html;profile=mcp-app``). When the client is not
+    app-capable, app tools should still return a useful text/image fallback.
+
+    Args:
+        ctx: The FastMCP Context object
+
+    Returns:
+        True if the client advertises the MCP Apps UI extension, else False.
+    """
+    extensions = get_client_extensions(ctx)
+    ui = extensions.get(APP_UI_EXTENSION_ID)
+    if not isinstance(ui, dict):
+        return False
+    mime_types = ui.get("mimeTypes")
+    if mime_types is None:
+        # Extension present without a mime-type list: treat as supported.
+        return True
+    if not isinstance(mime_types, list):
+        return False
+    for mime in mime_types:
+        if isinstance(mime, str) and mime.split(";")[0].strip().lower() == "text/html":
+            return True
+    return False

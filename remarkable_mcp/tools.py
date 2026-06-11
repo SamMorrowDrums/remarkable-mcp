@@ -1310,6 +1310,7 @@ async def remarkable_status() -> str:
         REMARKABLE_USE_USB_WEB,
         get_active_transport,
     )
+    from remarkable_mcp.app_canvas import app_enabled
     from remarkable_mcp.write_tools import write_enabled
 
     # Determine the *selected* transport from configuration (pre-fallback).
@@ -1409,6 +1410,7 @@ async def remarkable_status() -> str:
             "status": "connected",
             "document_count": doc_count,
             "write_enabled": writes_on,
+            "app_enabled": app_enabled(),
             "capabilities": effective_caps,
             "capabilities_by_transport": capability_matrix,
         }
@@ -1440,6 +1442,11 @@ async def remarkable_status() -> str:
                 )
         else:
             hint_parts.append("Read-only. Add the --write flag to enable write tools.")
+        if app_enabled():
+            hint_parts.append(
+                "Interactive canvas app is enabled (remarkable_canvas): "
+                "MCP Apps-capable clients open a page viewer."
+            )
         hint_parts.append(
             "Use remarkable_browse() to see your files, "
             "or remarkable_recent() for recent documents."

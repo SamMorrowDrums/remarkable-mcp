@@ -3415,3 +3415,257 @@ class TestSSHKeyAuth:
         from remarkable_mcp.ssh import SSHClient
 
         assert SSHClient().key_path is None
+
+
+# =============================================================================
+# MCP Apps interactive canvas
+# =============================================================================
+
+
+def _ctx_with_extensions(extensions):
+    """Build a mock Context whose client advertises the given extensions."""
+    from mcp.types import ClientCapabilities
+
+    caps = ClientCapabilities.model_validate(
+        {"extensions": extensions} if extensions is not None else {}
+    )
+    ctx = Mock()
+    ctx.session = Mock()
+    ctx.session.client_params = Mock()
+    ctx.session.client_params.capabilities = caps
+    return ctx
+
+
+class TestAppEnabled:
+    """Test the --app / REMARKABLE_ENABLE_APP gate."""
+
+    def test_app_disabled_by_default(self, monkeypatch):
+        from remarkable_mcp.app_canvas import app_enabled
+
+        monkeypatch.delenv("REMARKABLE_ENABLE_APP", raising=False)
+        assert app_enabled() is False
+
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "Yes"])
+    def test_app_enabled_truthy(self, monkeypatch, value):
+        from remarkable_mcp.app_canvas import app_enabled
+
+        monkeypatch.setenv("REMARKABLE_ENABLE_APP", value)
+        assert app_enabled() is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", ""])
+    def test_app_enabled_falsy(self, monkeypatch, value):
+        from remarkable_mcp.app_canvas import app_enabled
+
+        monkeypatch.setenv("REMARKABLE_ENABLE_APP", value)
+        assert app_enabled() is False
+
+
+class TestClientSupportsApps:
+    """Test MCP Apps UI capability negotiation."""
+
+    def test_supports_when_app_mime_advertised(self):
+        from remarkable_mcp.capabilities import APP_UI_EXTENSION_ID, client_supports_apps
+
+        ctx = _ctx_with_extensions(
+            {APP_UI_EXTENSION_ID: {"mimeTypes": ["text/html;profile=mcp-app"]}}
+        )
+        assert client_supports_apps(ctx) is True
+
+    def test_supports_when_extension_has_no_mimetypes(self):
+        from remarkable_mcp.capabilities import APP_UI_EXTENSION_ID, client_supports_apps
+
+        ctx = _ctx_with_extensions({APP_UI_EXTENSION_ID: {}})
+        assert client_supports_apps(ctx) is True
+
+    def test_not_supported_without_extension(self):
+        from remarkable_mcp.capabilities import client_supports_apps
+
+        ctx = _ctx_with_extensions({})
+        assert client_supports_apps(ctx) is False
+
+    def test_not_supported_with_wrong_mimetype(self):
+        from remarkable_mcp.capabilities import APP_UI_EXTENSION_ID, client_supports_apps
+
+        ctx = _ctx_with_extensions({APP_UI_EXTENSION_ID: {"mimeTypes": ["application/json"]}})
+        assert client_supports_apps(ctx) is False
+
+    def test_not_supported_when_no_capabilities(self):
+        from remarkable_mcp.capabilities import client_supports_apps
+
+        ctx = Mock()
+        ctx.session = None
+        assert client_supports_apps(ctx) is False
+
+
+class TestCanvasResource:
+    """Test the canvas app HTML resource."""
+
+    def test_canvas_html_is_self_contained_bridge(self):
+        from remarkable_mcp.app_canvas import _CANVAS_HTML
+
+        # Self-contained HTML with the MCP Apps postMessage bridge wiring.
+        assert "<!doctype html>" in _CANVAS_HTML.lower()
+        assert "ui/initialize" in _CANVAS_HTML
+        assert "ui/notifications/tool-result" in _CANVAS_HTML
+        assert "tools/call" in _CANVAS_HTML
+        assert "remarkable_canvas" in _CANVAS_HTML
+        assert "png_data_uri" in _CANVAS_HTML
+
+    def test_canvas_resource_uses_app_mime(self):
+        from remarkable_mcp.app_canvas import CANVAS_RESOURCE_URI
+        from remarkable_mcp.capabilities import APP_UI_MIME
+
+        assert CANVAS_RESOURCE_URI == "ui://remarkable/canvas"
+        assert APP_UI_MIME == "text/html;profile=mcp-app"
+
+
+class TestRenderCanvasPage:
+    """Test the read-only canvas page renderer."""
+
+    def _png_bytes(self):
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (12, 16), "white").save(buf, "PNG")
+        return buf.getvalue()
+
+    def _patch_common(self, monkeypatch, *, page_count=3, png=None, doc_name="Notes"):
+        import remarkable_mcp.api as api
+        import remarkable_mcp.extract as extract
+        import remarkable_mcp.tools as tools
+
+        doc = Mock(VissibleName=doc_name, is_folder=False)
+        client = Mock()
+        client.get_meta_items.return_value = [doc]
+        client.download.return_value = b"PK\x03\x04zip"
+
+        monkeypatch.setattr(api, "get_rmapi", lambda: client)
+        monkeypatch.setattr(api, "get_items_by_id", lambda c: {})
+        monkeypatch.setattr(api, "get_item_path", lambda d, i: "/" + d.VissibleName)
+        monkeypatch.setattr(api, "get_active_transport", lambda: "cloud")
+        monkeypatch.setattr(api, "download_raw_file", lambda c, d, ext: None)
+        monkeypatch.setattr(extract, "get_background_color", lambda: "#FBFBFB")
+        monkeypatch.setattr(extract, "get_document_page_count", lambda p: page_count)
+        monkeypatch.setattr(extract, "render_page_from_document_zip", lambda p, pg, **k: png)
+        monkeypatch.setattr(extract, "find_similar_documents", lambda q, docs: [])
+        monkeypatch.setattr(tools, "_get_root_path", lambda: "/")
+        monkeypatch.setattr(tools, "_is_within_root", lambda path, root: True)
+        monkeypatch.setattr(tools, "_resolve_root_path", lambda p: p)
+        monkeypatch.setattr(tools, "_apply_root_filter", lambda p: p)
+        return doc
+
+    @pytest.mark.asyncio
+    async def test_render_returns_structured_content(self, monkeypatch):
+        from mcp import types
+
+        from remarkable_mcp.app_canvas import _render_canvas_page
+
+        self._patch_common(monkeypatch, page_count=3, png=self._png_bytes())
+        result = await _render_canvas_page("Notes", 2, None)
+
+        assert isinstance(result, types.CallToolResult)
+        sc = result.structuredContent
+        assert sc["page"] == 2
+        assert sc["total_pages"] == 3
+        assert sc["document_name"] == "Notes"
+        assert sc["png_data_uri"].startswith("data:image/png;base64,")
+        assert sc["writable"] is False
+        assert sc["page_width_px"] == 12
+        assert sc["page_height_px"] == 16
+        # Embedded PNG is included for non-app clients.
+        assert any(isinstance(c, types.EmbeddedResource) for c in result.content)
+
+    @pytest.mark.asyncio
+    async def test_render_document_not_found(self, monkeypatch):
+        from remarkable_mcp.app_canvas import _render_canvas_page
+
+        self._patch_common(monkeypatch, page_count=3, png=self._png_bytes())
+        result = await _render_canvas_page("Nonexistent", 1, None)
+
+        assert isinstance(result, str)
+        data = json.loads(result)
+        assert data["_error"]["type"] == "document_not_found"
+
+    @pytest.mark.asyncio
+    async def test_render_page_out_of_range(self, monkeypatch):
+        from remarkable_mcp.app_canvas import _render_canvas_page
+
+        self._patch_common(monkeypatch, page_count=2, png=self._png_bytes())
+        result = await _render_canvas_page("Notes", 99, None)
+
+        assert isinstance(result, str)
+        data = json.loads(result)
+        assert data["_error"]["type"] == "page_out_of_range"
+
+    @pytest.mark.asyncio
+    async def test_render_failed_when_no_png(self, monkeypatch):
+        from remarkable_mcp.app_canvas import _render_canvas_page
+
+        # render returns None and there's no PDF fallback -> render_failed
+        self._patch_common(monkeypatch, page_count=2, png=None)
+        result = await _render_canvas_page("Notes", 1, None)
+
+        assert isinstance(result, str)
+        data = json.loads(result)
+        assert data["_error"]["type"] == "render_failed"
+
+    @pytest.mark.asyncio
+    async def test_render_wraps_transport_errors(self, monkeypatch):
+        import remarkable_mcp.api as api
+        from remarkable_mcp.app_canvas import _render_canvas_page
+
+        def _boom():
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(api, "get_rmapi", _boom)
+        result = await _render_canvas_page("Notes", 1, None)
+
+        assert isinstance(result, str)
+        data = json.loads(result)
+        assert data["_error"]["type"] == "canvas_failed"
+
+
+class TestRegisterAppTools:
+    """Test that enabling the app registers the canvas tool + resource."""
+
+    @pytest.mark.asyncio
+    async def test_register_app_tools_adds_canvas(self):
+        from mcp.server.fastmcp import FastMCP
+
+        import remarkable_mcp.app_canvas as app_canvas
+
+        # Register onto a throwaway server to avoid mutating the global one.
+        local = FastMCP("test-app")
+        original = app_canvas.mcp
+        app_canvas.mcp = local
+        try:
+            app_canvas.register_app_tools()
+            tools = await local.list_tools()
+            names = [t.name for t in tools]
+            assert "remarkable_canvas" in names
+            canvas = next(t for t in tools if t.name == "remarkable_canvas")
+            assert canvas.meta["ui"]["resourceUri"] == "ui://remarkable/canvas"
+            # No output schema so we can return either CallToolResult or an error string.
+            assert canvas.outputSchema is None
+            resources = await local.list_resources()
+            assert any(str(r.uri) == "ui://remarkable/canvas" for r in resources)
+        finally:
+            app_canvas.mcp = original
+
+
+class TestStatusReportsApp:
+    """remarkable_status reports whether the app is enabled."""
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_status_includes_app_enabled(self, mock_get_rmapi, monkeypatch):
+        monkeypatch.setenv("REMARKABLE_ENABLE_APP", "1")
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_client.get_meta_items.return_value = []
+
+        result = await mcp.call_tool("remarkable_status", {})
+        data = json.loads(result[0][0].text)
+        assert data["app_enabled"] is True

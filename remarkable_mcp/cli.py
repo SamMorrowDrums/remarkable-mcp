@@ -107,6 +107,15 @@ Security Note:
             "configuration works with or without the device connected."
         ),
     )
+    parser.add_argument(
+        "--app",
+        action="store_true",
+        help=(
+            "Enable the interactive MCP App canvas (remarkable_canvas). Clients "
+            "that support MCP Apps open an interactive page viewer; others still "
+            "get the rendered page as an image. Works in any transport."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -148,6 +157,8 @@ Security Note:
             os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
         if args.no_cloud_fallback:
             os.environ["REMARKABLE_DISABLE_CLOUD_FALLBACK"] = "1"
+        if args.app:
+            os.environ["REMARKABLE_ENABLE_APP"] = "1"
         from remarkable_mcp.server import run
 
         run()
@@ -160,6 +171,8 @@ Security Note:
             os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
         if args.no_cloud_fallback:
             os.environ["REMARKABLE_DISABLE_CLOUD_FALLBACK"] = "1"
+        if args.app:
+            os.environ["REMARKABLE_ENABLE_APP"] = "1"
         from remarkable_mcp.server import run
 
         run()
@@ -167,6 +180,8 @@ Security Note:
         # Cloud mode (default) - now write-capable via the sync protocol
         if args.write:
             os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
+        if args.app:
+            os.environ["REMARKABLE_ENABLE_APP"] = "1"
         from remarkable_mcp.server import run
 
         run()

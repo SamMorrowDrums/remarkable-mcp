@@ -243,7 +243,7 @@ Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remark
 | `remarkable_status` | Check connection status and the per-transport capability matrix |
 | `remarkable_image` | Get PNG/SVG images of pages (supports OCR via sampling) |
 
-These six tools are **read-only** and return structured JSON with hints for next actions. Opt-in **write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`) are also available with the `--write` flag — see [Write Tools](#write-tools-cloud-ssh--usb-web).
+These six tools are **read-only** and return structured JSON with hints for next actions. Opt-in **write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`) are also available with the `--write` flag — see [Write Tools](#write-tools-cloud-ssh--usb-web). An optional interactive **canvas app** (`remarkable_canvas`) is available with the `--app` flag — see [Interactive Canvas App](#interactive-canvas-app-mcp-apps).
 
 📖 **[Full Tools Documentation](docs/tools.md)**
 
@@ -519,6 +519,41 @@ remarkable_rename("Untitled", "Q4 Planning Notes")
 # Delete (destructive — confirms via elicitation when supported)
 remarkable_delete("Old Draft")
 ```
+
+---
+
+## Interactive Canvas App (MCP Apps)
+
+An optional interactive page viewer built on the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) extension (SEP-1865). When enabled, clients that support MCP Apps (such as ChatGPT, Claude, VS Code, and the MCP Inspector) render a canvas in a side panel where you can view a document page and navigate through it. It is **opt-in** and off by default.
+
+Enable it with the `--app` flag (works in any transport):
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--app"]
+    }
+  }
+}
+```
+
+This registers one tool:
+
+| Tool | Description |
+|------|-------------|
+| `remarkable_canvas(document, page)` | Open a page in the interactive canvas viewer |
+
+How it behaves:
+
+- **App-capable clients** open the canvas (declared at `ui://remarkable/canvas`, MIME `text/html;profile=mcp-app`) and can page through the document via the MCP Apps postMessage bridge — the server delivers each rendered page in the tool result's `structuredContent`.
+- **Other clients** still get the rendered page back as an embedded PNG image, so the tool is useful everywhere; it just won't open the interactive panel. The capability is negotiated automatically — there is no separate feature gate beyond `--app`.
+
+> **Note:** This phase is a **read-only** viewer (render + page navigation). Pen
+> capture, local undo, and an explicit Save button that writes annotations back
+> to the device are planned as later, device-validated phases. The iframe bridge
+> follows the MCP Apps spec but is best validated against your specific client.
 
 ---
 
