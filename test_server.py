@@ -2653,7 +2653,10 @@ class TestWriteTools:
                 patch("remarkable_mcp.write_tools.get_rmapi") as mock_get_rmapi,
                 patch("remarkable_mcp.write_tools._write_metadata") as mock_write_meta,
                 patch("remarkable_mcp.write_tools._restart_xochitl"),
-                patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+                patch.dict(
+                    os.environ,
+                    {"REMARKABLE_USE_SSH": "1", "REMARKABLE_SKIP_CONFIRM": "1"},
+                ),
             ):
                 import importlib
 
@@ -2946,7 +2949,8 @@ class TestCloudWriteDispatch:
     async def test_cloud_delete_dispatch(self):
         from remarkable_mcp.write_tools import register_write_tools
 
-        with patch.dict(os.environ, self._cloud_env(), clear=True):
+        env = {**self._cloud_env(), "REMARKABLE_SKIP_CONFIRM": "1"}
+        with patch.dict(os.environ, env, clear=True):
             register_write_tools()
             try:
                 target = self._make_item("doc-1", "Old Notes")
@@ -2957,6 +2961,59 @@ class TestCloudWriteDispatch:
                 data = json.loads(result[0][0].text)
                 assert data["deleted"] is True
                 assert data["transport"] == "cloud"
+                client.delete.assert_called_once_with("doc-1")
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_delete_refused_without_elicitation(self):
+        """Default-on writes: a client that can't confirm must NOT delete silently."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        # No REMARKABLE_SKIP_CONFIRM, and the client does not support elicitation.
+        env = {k: v for k, v in self._cloud_env().items() if k != "REMARKABLE_SKIP_CONFIRM"}
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            try:
+                target = self._make_item("doc-1", "Old Notes")
+                client = Mock(spec=["get_meta_items", "delete"])
+                client.get_meta_items.return_value = [target]
+                with (
+                    patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+                    patch(
+                        "remarkable_mcp.write_tools.client_supports_elicitation",
+                        return_value=False,
+                    ),
+                ):
+                    result = await mcp.call_tool("remarkable_delete", {"document": "Old Notes"})
+                data = json.loads(result[0][0].text)
+                assert data["_error"]["type"] == "confirmation_unavailable"
+                client.delete.assert_not_called()
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_delete_skip_confirm_bypasses_elicitation(self):
+        """REMARKABLE_SKIP_CONFIRM=1 allows deletes without a prompt (automation)."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        env = {**self._cloud_env(), "REMARKABLE_SKIP_CONFIRM": "1"}
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            try:
+                target = self._make_item("doc-1", "Old Notes")
+                client = Mock(spec=["get_meta_items", "delete"])
+                client.get_meta_items.return_value = [target]
+                with (
+                    patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+                    patch(
+                        "remarkable_mcp.write_tools.client_supports_elicitation",
+                        return_value=False,
+                    ),
+                ):
+                    result = await mcp.call_tool("remarkable_delete", {"document": "Old Notes"})
+                data = json.loads(result[0][0].text)
+                assert data["deleted"] is True
                 client.delete.assert_called_once_with("doc-1")
             finally:
                 self._cleanup()
