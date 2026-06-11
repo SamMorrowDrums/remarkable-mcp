@@ -2588,7 +2588,7 @@ class TestWriteTools:
         tool_names = [tool.name for tool in tools]
 
         write_tool_names = [
-            "remarkable_canvas_write",
+            "remarkable_author",
             "remarkable_upload",
             "remarkable_mkdir",
             "remarkable_move",
@@ -3585,6 +3585,18 @@ class TestCanvasResource:
         assert "remarkable_canvas" in _CANVAS_HTML
         assert "png_data_uri" in _CANVAS_HTML
 
+    def test_canvas_has_add_page_flow(self):
+        from remarkable_mcp.app_canvas import _CANVAS_HTML
+
+        # The +Page control queues a local blank page and Save materializes it
+        # via remarkable_author(method="add_page") before drawing cached strokes.
+        assert 'id="addpage"' in _CANVAS_HTML
+        assert "pendingPages" in _CANVAS_HTML
+        assert '"add_page"' in _CANVAS_HTML
+        assert "renderPending" in _CANVAS_HTML
+        # +Page is gated to native notebooks (PDFs/EPUBs have fixed pages).
+        assert 'state.fileType === "notebook"' in _CANVAS_HTML
+
     def test_canvas_bridge_is_spec_compliant(self):
         from remarkable_mcp.app_canvas import _CANVAS_HTML
 
@@ -3704,7 +3716,9 @@ class TestRenderCanvasPage:
         Image.new("RGB", (12, 16), "white").save(buf, "PNG")
         return buf.getvalue()
 
-    def _patch_common(self, monkeypatch, *, page_count=3, png=None, doc_name="Notes"):
+    def _patch_common(
+        self, monkeypatch, *, page_count=3, png=None, doc_name="Notes", file_type="notebook"
+    ):
         import remarkable_mcp.api as api
         import remarkable_mcp.extract as extract
         import remarkable_mcp.tools as tools
@@ -3721,6 +3735,7 @@ class TestRenderCanvasPage:
         monkeypatch.setattr(api, "download_raw_file", lambda c, d, ext: None)
         monkeypatch.setattr(extract, "get_background_color", lambda: "#FBFBFB")
         monkeypatch.setattr(extract, "get_document_page_count", lambda p: page_count)
+        monkeypatch.setattr(extract, "get_document_file_type", lambda p: file_type)
         monkeypatch.setattr(
             extract,
             "render_page_full_page_from_document_zip",
@@ -3752,6 +3767,7 @@ class TestRenderCanvasPage:
         assert sc["page_width_px"] == 12
         assert sc["page_height_px"] == 16
         assert sc["paper_size"] == [820, 1458]
+        assert sc["file_type"] == "notebook"
         # Embedded PNG is included for non-app clients.
         assert any(isinstance(c, types.EmbeddedResource) for c in result.content)
 
@@ -3925,7 +3941,7 @@ class TestCLIFlags:
 
 
 class TestCanvasWrite:
-    """Test the remarkable_canvas_write stroke write-back tool (SSH-first)."""
+    """Test the remarkable_author tool (method="draw" stroke write-back, SSH-first)."""
 
     def _mock_doc(self):
         doc = Mock()
@@ -3939,12 +3955,13 @@ class TestCanvasWrite:
     @pytest.mark.asyncio
     async def test_requires_ssh_transport(self):
         """In cloud/USB mode the tool returns an educational unsupported_transport error."""
-        # Neither SSH nor USB env set -> cloud; canvas_write needs SSH.
+        # Neither SSH nor USB env set -> cloud; draw needs SSH.
         old = os.environ.pop("REMARKABLE_USE_SSH", None)
         try:
             result = await mcp.call_tool(
-                "remarkable_canvas_write",
+                "remarkable_author",
                 {
+                    "method": "draw",
                     "document": "Sketchbook",
                     "page": 1,
                     "strokes": [{"points": [[0.1, 0.2], [0.8, 0.2]], "tool": "fineliner"}],
@@ -3960,15 +3977,24 @@ class TestCanvasWrite:
     async def test_empty_strokes_rejected(self):
         with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
             result = await mcp.call_tool(
-                "remarkable_canvas_write",
-                {"document": "Sketchbook", "page": 1, "strokes": []},
+                "remarkable_author",
+                {"method": "draw", "document": "Sketchbook", "page": 1, "strokes": []},
             )
             data = json.loads(result[0][0].text)
             assert data["_error"]["type"] == "no_strokes"
 
     @pytest.mark.asyncio
-    async def test_missing_page_layer_is_educational(self):
-        """A page with no existing .rm overlay returns a clear no_page_layer error."""
+    async def test_unknown_method_is_educational(self):
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            result = await mcp.call_tool("remarkable_author", {"method": "frobnicate"})
+            data = json.loads(result[0][0].text)
+            assert data["_error"]["type"] == "unknown_method"
+            assert "draw" in data["_error"]["did_you_mean"]
+
+    @pytest.mark.asyncio
+    async def test_missing_layer_autocreates_overlay(self):
+        """A page with no .rm overlay gets a blank drawable layer created automatically."""
+        import remarkable_mcp.strokes as strokes_mod
         import remarkable_mcp.write_tools as wt
 
         doc = self._mock_doc()
@@ -3983,20 +4009,44 @@ class TestCanvasWrite:
         client.get_meta_items.return_value = [doc]
         client._scp_download.side_effect = fake_scp
 
+        writes = {}
+
         with (
             patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
             patch.object(wt, "get_rmapi", lambda: client),
+            patch.object(wt, "_write_remote_bytes", lambda ssh, p, d: writes.__setitem__(p, d)),
+            patch.object(wt, "_restart_xochitl") as mock_restart,
+            patch.object(
+                strokes_mod,
+                "page_geometry",
+                lambda b: {
+                    "paper_width": 1404,
+                    "paper_height": 1872,
+                    "has_scene_info": False,
+                    "has_layer": True,
+                },
+            ),
+            patch.object(
+                strokes_mod, "append_strokes", lambda original, strokes: original + b"NEW"
+            ),
         ):
             result = await mcp.call_tool(
-                "remarkable_canvas_write",
+                "remarkable_author",
                 {
+                    "method": "draw",
                     "document": "Sketchbook",
                     "page": 1,
                     "strokes": [{"points": [[0.1, 0.2], [0.8, 0.2]], "tool": "fineliner"}],
                 },
             )
             data = json.loads(result[0][0].text)
-            assert data["_error"]["type"] == "no_page_layer"
+            assert data["written"] is True
+            assert data["created_overlay"] is True
+            rm = f"{wt.XOCHITL_PATH}/doc-abc/page-1.rm"
+            # The overlay was written; nothing pre-existed, so no .bak.
+            assert rm in writes
+            assert (rm + ".bak") not in writes
+            mock_restart.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_happy_path_appends_and_backs_up(self):
@@ -4046,8 +4096,9 @@ class TestCanvasWrite:
             ),
         ):
             result = await mcp.call_tool(
-                "remarkable_canvas_write",
+                "remarkable_author",
                 {
+                    "method": "draw",
                     "document": "Sketchbook",
                     "page": 1,
                     "strokes": [
@@ -4067,6 +4118,7 @@ class TestCanvasWrite:
             assert data["strokes_added"] == 1
             assert data["paper_size"] == [1404, 1872]
             assert data["ui_submitted"] is True
+            assert data["created_overlay"] is False
             mock_restart.assert_called_once()
             # Pristine original backed up, then the appended bytes written.
             bak = f"{wt.XOCHITL_PATH}/doc-abc/page-1.rm.bak"
@@ -4115,8 +4167,9 @@ class TestCanvasWrite:
             ),
         ):
             result = await mcp.call_tool(
-                "remarkable_canvas_write",
+                "remarkable_author",
                 {
+                    "method": "draw",
                     "document": "Sketchbook",
                     "page": 1,
                     "strokes": [{"points": [[0.1, 0.2], [0.8, 0.2]], "tool": "highlighter"}],
@@ -4125,3 +4178,280 @@ class TestCanvasWrite:
             data = json.loads(result[0][0].text)
             assert data["written"] is True
             assert "caveat" in data and "EPUB" in data["caveat"]
+
+    @pytest.mark.asyncio
+    async def test_add_page_appends_blank_page(self):
+        """method="add_page" uploads a blank .rm and grows the notebook's .content."""
+        import remarkable_mcp.write_tools as wt
+
+        doc = self._mock_doc()
+        content = json.dumps(
+            {
+                "cPages": {
+                    "pages": [{"id": "p1", "idx": {"timestamp": "1:2", "value": "ba"}}],
+                    "uuids": [{"first": "4ceffb02-db05-55dc-bf8b-c2aeb505a8e6", "second": 1}],
+                },
+                "fileType": "notebook",
+                "pageCount": 1,
+            }
+        )
+
+        def fake_scp(path):
+            if path.endswith(".content"):
+                return content.encode()
+            return None
+
+        client = Mock(spec=["get_meta_items", "_scp_download", "_ssh_command"])
+        client.get_meta_items.return_value = [doc]
+        client._scp_download.side_effect = fake_scp
+
+        writes = {}
+        contents = {}
+
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch.object(wt, "get_rmapi", lambda: client),
+            patch.object(wt, "_write_remote_bytes", lambda ssh, p, d: writes.__setitem__(p, d)),
+            patch.object(wt, "_write_content_file", lambda ssh, u, d: contents.__setitem__(u, d)),
+            patch.object(wt, "_restart_xochitl") as mock_restart,
+            patch.object(wt, "_invalidate_client_cache", lambda c: None),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_author", {"method": "add_page", "document": "Sketchbook"}
+            )
+            data = json.loads(result[0][0].text)
+            assert data["added"] is True
+            assert data["page_added"] == 2
+            assert data["total_pages"] == 2
+            mock_restart.assert_called_once()
+            assert any(p.endswith(".rm") for p in writes)
+            assert contents["doc-abc"]["pageCount"] == 2
+            pages = contents["doc-abc"]["cPages"]["pages"]
+            assert len(pages) == 2
+            assert pages[1]["idx"]["value"] == "bb"
+
+    @pytest.mark.asyncio
+    async def test_add_page_rejects_non_notebook(self):
+        """Adding a page to a PDF (flat pages list) returns an educational error."""
+        import remarkable_mcp.write_tools as wt
+
+        doc = self._mock_doc()
+        content = json.dumps({"pages": ["p1", "p2"], "fileType": "pdf"})
+
+        def fake_scp(path):
+            if path.endswith(".content"):
+                return content.encode()
+            return None
+
+        client = Mock(spec=["get_meta_items", "_scp_download", "_ssh_command"])
+        client.get_meta_items.return_value = [doc]
+        client._scp_download.side_effect = fake_scp
+
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch.object(wt, "get_rmapi", lambda: client),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_author", {"method": "add_page", "document": "Sketchbook"}
+            )
+            data = json.loads(result[0][0].text)
+            assert data["_error"]["type"] == "not_a_notebook"
+
+    @pytest.mark.asyncio
+    async def test_create_document_blank(self):
+        """method="create_document" scaffolds a notebook (.rm + .content + .metadata)."""
+        import remarkable_mcp.write_tools as wt
+
+        client = Mock(spec=["get_meta_items", "_scp_download", "_ssh_command"])
+        client.get_meta_items.return_value = []
+
+        writes = {}
+        contents = {}
+        metas = {}
+
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch.object(wt, "get_rmapi", lambda: client),
+            patch.object(wt, "_write_remote_bytes", lambda ssh, p, d: writes.__setitem__(p, d)),
+            patch.object(wt, "_write_content_file", lambda ssh, u, d: contents.__setitem__(u, d)),
+            patch.object(wt, "_write_metadata", lambda ssh, u, d: metas.__setitem__(u, d)),
+            patch.object(wt, "_restart_xochitl") as mock_restart,
+            patch.object(wt, "_invalidate_client_cache", lambda c: None),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_author", {"method": "create_document", "name": "My notes"}
+            )
+            data = json.loads(result[0][0].text)
+            assert data["created"] is True
+            assert data["document"] == "My notes"
+            assert data["total_pages"] == 1
+            assert data["has_text"] is False
+            uid = data["document_id"]
+            assert uid in contents and uid in metas
+            assert contents[uid]["fileType"] == "notebook"
+            assert contents[uid]["pageCount"] == 1
+            assert metas[uid]["visibleName"] == "My notes"
+            assert metas[uid]["type"] == "DocumentType"
+            assert any(p.endswith(".rm") for p in writes)
+            mock_restart.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_document_requires_name(self):
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            result = await mcp.call_tool("remarkable_author", {"method": "create_document"})
+            data = json.loads(result[0][0].text)
+            assert data["_error"]["type"] == "missing_parameter"
+
+
+class TestNotebookBuilders:
+    """Pure-logic tests for remarkable_mcp.notebooks (no transport)."""
+
+    def test_blank_page_is_drawable(self):
+        import io
+
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp import strokes as s
+
+        raw = nb.blank_page_rm_bytes()
+        blocks = list(s.read_blocks(io.BytesIO(raw)))
+        assert s.find_target_layer(blocks) is not None
+
+    def test_text_page_is_drawable_and_appendable(self):
+        import io
+
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp import strokes as s
+
+        raw = nb.page_rm_bytes("Hello\nWorld")
+        blocks = list(s.read_blocks(io.BytesIO(raw)))
+        assert s.find_target_layer(blocks) is not None
+        out = s.append_strokes(
+            raw, [{"points": [[0.1, 0.1], [0.5, 0.5]], "tool": "fineliner", "color": "black"}]
+        )
+        assert out.startswith(raw)
+
+    def test_next_page_idx_sequence(self):
+        from remarkable_mcp import notebooks as nb
+
+        assert nb.next_page_idx([]) == "ba"
+        vals = []
+        for _ in range(5):
+            vals.append(nb.next_page_idx(vals))
+        assert vals == ["ba", "bb", "bc", "bd", "be"]
+        assert nb.next_page_idx(["bz"]) == "bza"
+
+    def test_new_notebook_content_shape(self):
+        from remarkable_mcp import notebooks as nb
+
+        au = nb.new_uuid()
+        pid = nb.new_uuid()
+        c = nb.new_notebook_content([pid], au)
+        assert c["fileType"] == "notebook"
+        assert c["formatVersion"] == 2
+        assert c["pageCount"] == 1
+        assert c["cPages"]["pages"][0]["id"] == pid
+        assert c["cPages"]["pages"][0]["idx"]["value"] == "ba"
+        assert c["cPages"]["uuids"][0]["first"] == au
+        # serializable
+        json.dumps(c)
+
+    def test_content_author_uuid_matches_rm(self):
+        import io
+
+        from rmscene.scene_stream import AuthorIdsBlock
+
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp import strokes as s
+
+        au = nb.new_uuid()
+        raw = nb.blank_page_rm_bytes(author_uuid=au)
+        blocks = list(s.read_blocks(io.BytesIO(raw)))
+        author_block = next(b for b in blocks if isinstance(b, AuthorIdsBlock))
+        c = nb.new_notebook_content([nb.new_uuid()], au)
+        assert c["cPages"]["uuids"][0]["first"] == str(author_block.author_uuids[1])
+
+    def test_append_page_to_content_grows(self):
+        from remarkable_mcp import notebooks as nb
+
+        au = nb.new_uuid()
+        c = nb.new_notebook_content([nb.new_uuid()], au)
+        res = nb.append_page_to_content(c, nb.new_uuid())
+        assert res["page_index"] == 2
+        assert res["total_pages"] == 2
+        assert c["pageCount"] == 2
+        assert c["cPages"]["pages"][1]["idx"]["value"] == "bb"
+
+    def test_append_page_rejects_non_notebook(self):
+        from remarkable_mcp import notebooks as nb
+
+        with pytest.raises(ValueError):
+            nb.append_page_to_content({"pages": ["a", "b"], "fileType": "pdf"}, "x")
+
+    def test_metadata_shape(self):
+        from remarkable_mcp import notebooks as nb
+
+        m = nb.new_document_metadata("Hello", parent="folder-uuid")
+        assert m["visibleName"] == "Hello"
+        assert m["type"] == "DocumentType"
+        assert m["parent"] == "folder-uuid"
+        assert m["deleted"] is False
+        assert m["metadatamodified"] is True
+        json.dumps(m)
+
+
+class TestGetDocumentFileType:
+    """Pure-logic tests for extract.get_document_file_type (zip .content reader)."""
+
+    def _zip_with_content(self, content):
+        import json as _json
+        import tempfile
+        import zipfile as _zip
+        from pathlib import Path
+
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as ztmp:
+            zpath = Path(ztmp.name)
+        with _zip.ZipFile(zpath, "w") as zf:
+            if content is not None:
+                zf.writestr("doc.content", _json.dumps(content))
+        return zpath
+
+    def test_reads_notebook_file_type(self):
+        from remarkable_mcp.extract import get_document_file_type
+
+        zpath = self._zip_with_content({"fileType": "notebook", "formatVersion": 2})
+        try:
+            assert get_document_file_type(zpath) == "notebook"
+        finally:
+            zpath.unlink(missing_ok=True)
+
+    def test_reads_pdf_file_type(self):
+        from remarkable_mcp.extract import get_document_file_type
+
+        zpath = self._zip_with_content({"fileType": "pdf"})
+        try:
+            assert get_document_file_type(zpath) == "pdf"
+        finally:
+            zpath.unlink(missing_ok=True)
+
+    def test_missing_content_returns_empty(self):
+        from remarkable_mcp.extract import get_document_file_type
+
+        zpath = self._zip_with_content(None)  # no .content entry
+        try:
+            assert get_document_file_type(zpath) == ""
+        finally:
+            zpath.unlink(missing_ok=True)
+
+    def test_bad_zip_returns_empty(self):
+        import tempfile
+        from pathlib import Path
+
+        from remarkable_mcp.extract import get_document_file_type
+
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as ztmp:
+            ztmp.write(b"not a zip")
+            zpath = Path(ztmp.name)
+        try:
+            assert get_document_file_type(zpath) == ""
+        finally:
+            zpath.unlink(missing_ok=True)

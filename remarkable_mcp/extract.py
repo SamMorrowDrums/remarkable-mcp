@@ -1426,6 +1426,28 @@ def get_document_page_count(zip_path: Path) -> int:
         return len(list(tmpdir_path.glob("**/*.rm")))
 
 
+def get_document_file_type(zip_path: Path) -> str:
+    """
+    Read the ``fileType`` from a document zip's ``.content`` file.
+
+    Returns one of "notebook", "pdf", "epub", or "" when it cannot be
+    determined. Reads only the ``.content`` entry from the zip (no full
+    extraction) so it is cheap to call alongside get_document_page_count.
+    """
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for name in zf.namelist():
+                if name.endswith(".content"):
+                    try:
+                        data = json.loads(zf.read(name).decode("utf-8"))
+                    except Exception:
+                        return ""
+                    return str(data.get("fileType", "") or "")
+    except Exception:
+        pass
+    return ""
+
+
 def extract_text_from_document_zip(
     zip_path: Path, include_ocr: bool = False, doc_id: Optional[str] = None
 ) -> Dict[str, Any]:

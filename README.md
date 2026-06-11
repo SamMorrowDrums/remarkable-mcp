@@ -243,7 +243,7 @@ Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remark
 | `remarkable_status` | Check connection status and the per-transport capability matrix |
 | `remarkable_image` | Get PNG/SVG images of pages (supports OCR via sampling) |
 
-These six tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`) are enabled by default — pass `--read-only` to disable them — see [Write Tools](#write-tools-cloud-ssh--usb-web). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
+These six tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`, and `remarkable_author` for native ink/notebooks) are enabled by default — pass `--read-only` to disable them — see [Write Tools](#write-tools-cloud-ssh--usb-web). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
 
 📖 **[Full Tools Documentation](docs/tools.md)**
 
@@ -483,6 +483,7 @@ Or set the environment variable:
 | `remarkable_move(document, dest_folder)` | Move a document or folder (cloud and SSH) |
 | `remarkable_rename(document, new_name)` | Rename a document or folder (cloud and SSH) |
 | `remarkable_delete(document)` | Delete a document or folder — destructive (cloud and SSH) |
+| `remarkable_author(method, ...)` | Author native ink and notebooks — `draw` (append strokes), `add_page` (append a blank notebook page), `create_document` (new notebook) — **SSH only** |
 
 ### Safety
 
@@ -508,6 +509,20 @@ remarkable_rename("Untitled", "Q4 Planning Notes")
 
 # Delete (destructive — confirms via elicitation when supported)
 remarkable_delete("Old Draft")
+
+# Author native ink and notebooks (SSH only)
+# Append pen/highlighter strokes to a page (coordinates normalized [0,1] from
+# the page's top-left). The interactive canvas Save button calls this too.
+remarkable_author(
+    method="draw", document="Ideas", page=1,
+    strokes=[{"points": [[0.1, 0.2], [0.8, 0.2]], "tool": "highlighter", "color": "yellow"}],
+)
+
+# Append a blank, drawable page to the end of a notebook
+remarkable_author(method="add_page", document="Ideas")
+
+# Create a new notebook, optionally seeding the first page with typed text
+remarkable_author(method="create_document", name="Meeting notes", text="Agenda\nFollow-ups")
 ```
 
 ---
@@ -529,12 +544,15 @@ How it behaves:
 - **App-capable clients** open the canvas (declared at `ui://remarkable/canvas`, MIME `text/html;profile=mcp-app`) and can page through the document via the MCP Apps postMessage bridge — the server delivers each rendered page in the tool result's `structuredContent`.
 - **Other clients** still get the rendered page back as an embedded PNG image, so the tool is useful everywhere; it just won't open the interactive panel. The `_meta.ui` / `ui://` metadata is inert to clients that don't advertise the MCP Apps UI extension.
 
-> **Note:** This phase is a **read-only** viewer (render + page navigation). Pen
-> capture, local undo, and an explicit Save button that writes annotations back
-> to the device are planned as later, device-validated phases; write-back will
-> ride the existing write gate (on by default, `--read-only` to disable) rather
-> than adding a new flag. The iframe bridge follows the MCP Apps spec but is best
-> validated against your specific client.
+### Drawing and authoring from the canvas
+
+When write mode is on (the default) **and** the active transport is SSH, the canvas becomes a write surface:
+
+- **Draw** — pick a pen or highlighter and colour, draw over the page, and **Save** writes the strokes back to the device as native `.rm` ink. Strokes are buffered locally per page (with **Undo** and **Cancel**) and only touch the device on Save.
+- **＋ Page** (native notebooks only) — queues a new blank page locally that you can navigate to and draw on immediately. **Save** materializes the queued page(s) on the device first, then writes any cached strokes.
+- One source of truth: the canvas calls the **same** `remarkable_author` tool a model would call (`method="draw"` on Save, `method="add_page"` for ＋Page), so the human path and the model path produce byte-identical results.
+
+The Save / Draw / ＋Page controls are hidden when the page isn't writable (read-only mode, or a non-SSH transport), and the canvas falls back to a plain image viewer. The iframe bridge follows the MCP Apps spec but is best validated against your specific client.
 
 ---
 

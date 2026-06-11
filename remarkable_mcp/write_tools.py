@@ -550,54 +550,339 @@ async def _confirm_delete(ctx: Optional[Context], document: str) -> Optional[str
     return None
 
 
+def _author_draw(document: str, page: int, strokes: list, ui_submitted: bool) -> str:
+    """Append strokes to a page, auto-creating a blank drawable layer if absent."""
+    if not document or page is None:
+        return make_error(
+            error_type="missing_parameter",
+            message="draw requires 'document' and 'page'.",
+            suggestion=(
+                'Call remarkable_author(method="draw", document=..., page=1, strokes=[...]).'
+            ),
+        )
+    if not strokes:
+        return make_error(
+            error_type="no_strokes",
+            message="No strokes provided to write.",
+            suggestion=(
+                "Pass a non-empty list of stroke dicts, e.g. "
+                '[{"points": [[0.1,0.2],[0.8,0.2]], "tool": "fineliner", "color": "black"}].'
+            ),
+        )
+
+    from remarkable_mcp import notebooks as nb
+    from remarkable_mcp import strokes as strokes_mod
+
+    ssh_client = _get_ssh_client()
+    collection = ssh_client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    target = _resolve_document(document, collection, items_by_id)
+    if not target:
+        from remarkable_mcp.extract import find_similar_documents
+
+        similar = find_similar_documents(document, collection)
+        return make_error(
+            error_type="document_not_found",
+            message=f"Document not found: '{document}'",
+            suggestion="Use remarkable_browse() to find the correct name.",
+            did_you_mean=similar or None,
+        )
+
+    doc_uuid = target.ID
+    content_raw = _read_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}.content")
+    try:
+        content_data = json.loads(content_raw) if content_raw else {}
+    except (ValueError, TypeError):
+        content_data = {}
+    page_ids = _page_ids_from_content(content_data)
+    if not page_ids:
+        return make_error(
+            error_type="no_pages",
+            message=f"Could not read the page list for '{target.VissibleName}'.",
+            suggestion="The document may have no pages, or an unexpected .content format.",
+        )
+    if page < 1 or page > len(page_ids):
+        return make_error(
+            error_type="page_out_of_range",
+            message=f"Page {page} does not exist. Document has {len(page_ids)} page(s).",
+            suggestion=f"Use page=1 to {len(page_ids)}.",
+        )
+
+    page_id = page_ids[page - 1]
+    file_type = str(content_data.get("fileType", "") or "")
+    rm_path = f"{XOCHITL_PATH}/{doc_uuid}/{page_id}.rm"
+    original = _read_remote_bytes(ssh_client, rm_path)
+    # A native notebook page that has never been drawn on (or a PDF/EPUB page
+    # with no annotation overlay yet) has no .rm file. Seed a blank drawable
+    # layer so the strokes have somewhere to land.
+    page_existed = original is not None
+    if not page_existed:
+        original = nb.blank_page_rm_bytes()
+
+    try:
+        geom = strokes_mod.page_geometry(original)
+        new_bytes = strokes_mod.append_strokes(original, strokes)
+    except strokes_mod.StrokeError as e:
+        return make_error(
+            error_type="stroke_write_failed",
+            message=str(e),
+            suggestion=(
+                "Check the stroke format (points normalized [0,1]) and that "
+                "the page has a drawable layer."
+            ),
+        )
+    except Exception as e:  # noqa: BLE001 - surface as structured guidance
+        return make_error(
+            error_type="stroke_write_failed",
+            message=f"Failed to build strokes for page {page}: {e}",
+            suggestion="Verify the stroke payload and retry.",
+        )
+
+    # Preserve the pristine original once (only if the page pre-existed), then
+    # write the appended bytes.
+    if page_existed:
+        bak_path = rm_path + ".bak"
+        if not _remote_file_exists(ssh_client, bak_path):
+            _write_remote_bytes(ssh_client, bak_path, original)
+    _write_remote_bytes(ssh_client, rm_path, new_bytes)
+    _restart_xochitl(ssh_client)
+
+    result = {
+        "written": True,
+        "document": target.VissibleName,
+        "page": page,
+        "total_pages": len(page_ids),
+        "strokes_added": len(strokes),
+        "paper_size": [geom["paper_width"], geom["paper_height"]],
+        "file_type": file_type or "notebook",
+        "created_overlay": not page_existed,
+        "writable": True,
+        "transport": "ssh",
+        "ui_submitted": bool(ui_submitted),
+    }
+    if file_type.lower() == "epub":
+        result["caveat"] = (
+            "This is a reflowable EPUB; annotations are anchored to the "
+            "current layout and may shift if the font size or layout changes."
+        )
+    hint = (
+        f"Appended {len(strokes)} stroke(s) to page {page} of "
+        f"'{target.VissibleName}'. Call remarkable_canvas(document, page) to "
+        "view the updated page."
+    )
+    return make_response(result, hint)
+
+
+def _author_add_page(document: str) -> str:
+    """Append a blank, drawable page to the end of a native notebook."""
+    if not document:
+        return make_error(
+            error_type="missing_parameter",
+            message="add_page requires 'document'.",
+            suggestion='Call remarkable_author(method="add_page", document=...).',
+        )
+
+    from remarkable_mcp import notebooks as nb
+
+    ssh_client = _get_ssh_client()
+    collection = ssh_client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    target = _resolve_document(document, collection, items_by_id)
+    if not target:
+        from remarkable_mcp.extract import find_similar_documents
+
+        similar = find_similar_documents(document, collection)
+        return make_error(
+            error_type="document_not_found",
+            message=f"Document not found: '{document}'",
+            suggestion="Use remarkable_browse() to find the correct name.",
+            did_you_mean=similar or None,
+        )
+
+    doc_uuid = target.ID
+    content_raw = _read_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}.content")
+    try:
+        content_data = json.loads(content_raw) if content_raw else {}
+    except (ValueError, TypeError):
+        content_data = {}
+    if not content_data:
+        return make_error(
+            error_type="no_content",
+            message=f"Could not read the .content file for '{target.VissibleName}'.",
+            suggestion="The document may be missing or have an unexpected format.",
+        )
+
+    # Reuse the notebook's existing author uuid so CRDT author ids stay aligned.
+    author_uuid = None
+    uuids = content_data.get("cPages", {}).get("uuids")
+    if isinstance(uuids, list) and uuids and isinstance(uuids[0], dict):
+        author_uuid = uuids[0].get("first")
+
+    new_page_id = nb.new_uuid()
+    try:
+        updated = nb.append_page_to_content(content_data, new_page_id)
+    except ValueError as e:
+        return make_error(
+            error_type="not_a_notebook",
+            message=str(e),
+            suggestion=(
+                "Pages can only be added to native notebooks. PDF/EPUB pages "
+                "already exist — open the page and draw on it directly."
+            ),
+        )
+
+    try:
+        page_bytes = nb.blank_page_rm_bytes(author_uuid=author_uuid)
+    except (ValueError, TypeError):
+        page_bytes = nb.blank_page_rm_bytes()
+
+    _write_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}/{new_page_id}.rm", page_bytes)
+    _write_content_file(ssh_client, doc_uuid, updated["content"])
+    _restart_xochitl(ssh_client)
+    _invalidate_client_cache(ssh_client)
+
+    result = {
+        "added": True,
+        "document": target.VissibleName,
+        "page_added": updated["page_index"],
+        "total_pages": updated["total_pages"],
+        "paper_size": list(nb.DEFAULT_PAPER),
+        "transport": "ssh",
+    }
+    hint = (
+        f"Added a blank page (now page {updated['page_index']} of "
+        f"{updated['total_pages']}). Call remarkable_canvas('{target.VissibleName}', "
+        f"{updated['page_index']}) to draw on it."
+    )
+    return make_response(result, hint)
+
+
+def _author_create_document(name: str, text: Optional[str], folder: Optional[str]) -> str:
+    """Create a new native notebook (blank, or seeded with typed text)."""
+    if not name:
+        return make_error(
+            error_type="missing_parameter",
+            message="create_document requires 'name'.",
+            suggestion='Call remarkable_author(method="create_document", name="My notes").',
+        )
+
+    from remarkable_mcp import notebooks as nb
+
+    ssh_client = _get_ssh_client()
+    collection = ssh_client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    parent_id = _resolve_parent_id(folder or "/", items_by_id, collection)
+    if parent_id is None:
+        folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
+        return make_error(
+            error_type="folder_not_found",
+            message=f"Folder not found: '{folder}'",
+            suggestion="Use remarkable_browse('/') to see available folders.",
+            did_you_mean=folders[:5] if folders else None,
+        )
+
+    doc_uuid = nb.new_uuid()
+    page_id = nb.new_uuid()
+    author_uuid = nb.new_uuid()
+    page_bytes = nb.page_rm_bytes(text or "", author_uuid=author_uuid)
+    content_data = nb.new_notebook_content([page_id], author_uuid)
+    metadata = nb.new_document_metadata(name, parent=parent_id)
+
+    ssh_client._ssh_command(f"mkdir -p '{XOCHITL_PATH}/{doc_uuid}'")
+    _write_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}/{page_id}.rm", page_bytes)
+    _write_content_file(ssh_client, doc_uuid, content_data)
+    _write_metadata(ssh_client, doc_uuid, metadata)
+    _restart_xochitl(ssh_client)
+    _invalidate_client_cache(ssh_client)
+
+    result = {
+        "created": True,
+        "document": name,
+        "document_id": doc_uuid,
+        "page_id": page_id,
+        "total_pages": 1,
+        "paper_size": list(nb.DEFAULT_PAPER),
+        "has_text": bool(text),
+        "folder": folder or "/",
+        "transport": "ssh",
+    }
+    hint = f"Created notebook '{name}'. Call remarkable_canvas('{name}', 1) to view or draw on it."
+    return make_response(result, hint)
+
+
 def register_write_tools():
     """Register all write tools with the MCP server."""
 
     @mcp.tool(annotations=WRITE_ANNOTATIONS)
-    async def remarkable_canvas_write(
-        document: str,
-        page: int,
-        strokes: list,
+    async def remarkable_author(
+        method: str,
+        document: Optional[str] = None,
+        page: Optional[int] = None,
+        strokes: Optional[list] = None,
+        name: Optional[str] = None,
+        text: Optional[str] = None,
+        folder: Optional[str] = None,
         ui_submitted: bool = False,
         ctx: Context = None,
     ) -> str:
         """
-        <usecase>Append pen/highlighter strokes to an existing page of a reMarkable
-        document as native .rm ink. This is the single, composable write primitive
-        behind the interactive canvas Save button AND model-driven markup
+        <usecase>Author native reMarkable ink and notebooks. ONE compound write
+        primitive with three methods: "draw" appends pen/highlighter strokes to a
+        page, "add_page" appends a blank drawable page to a notebook, and
+        "create_document" creates a new notebook (optionally seeded with typed
+        text). This is the single tool behind the interactive canvas (Save → draw,
+        ＋Page → add_page, new notebook → create_document) AND model-driven markup
         (highlighting, underlining, marking) — the model composes the strokes.</usecase>
         <instructions>
-        Strokes are APPENDED to the page's existing ink (non-destructive; the
-        original page is backed up to {pageId}.rm.bak on the device the first time).
-        Each stroke is a dict with normalized [0,1] top-left coordinates so the same
-        payload works on any device — the tool maps them to the page's own paper_size.
+        Requires SSH mode (the default tablet-filesystem transport for write-back)
+        and write mode (the default; disabled with --read-only). All methods are
+        non-destructive (draw appends to existing ink and backs the page up to
+        {pageId}.rm.bak the first time), so no confirmation prompt is required.
 
-        Requires SSH mode (the default tablet-filesystem transport for write-back).
-        Requires write mode (the default; disabled with --read-only).
+        Pick the method, then pass only that method's parameters:
 
-        The interactive canvas calls this exact tool via the MCP Apps bridge, passing
-        ui_submitted=true (the human already chose Save in the app). A model calling
-        it directly should omit ui_submitted. Appending ink is non-destructive, so no
-        confirmation prompt is required either way.
+        - method="draw": requires `document` + `page` + `strokes`. Strokes are
+          APPENDED to the page's ink. If the page has no ink layer yet (a fresh
+          notebook page, or a PDF/EPUB page never annotated), a blank drawable
+          layer is created automatically. Coordinates: each point is [nx, ny] or
+          [nx, ny, pressure] with nx, ny in [0,1] from the page's TOP-LEFT; the
+          tool maps them to the page's own paper_size so the same payload works on
+          any device. (PDF-backed pages currently use the same map; precise PDF
+          overlay placement is a follow-up.)
 
-        Coordinates: points are [nx, ny] or [nx, ny, pressure] with nx, ny in [0,1]
-        measured from the TOP-LEFT of the page. Native notebook pages map exactly via
-        paper_size. (PDF-backed pages currently use the same map; precise PDF overlay
-        placement is a follow-up.)
+        - method="add_page": requires `document`. Appends one blank page to the END
+          of a native notebook and returns its 1-based page number. Only native
+          notebooks support this (PDF/EPUB pages already exist).
+
+        - method="create_document": requires `name`. Creates a new native notebook
+          in `folder` (default root). Pass `text` to seed the first page with typed
+          paragraphs (split on newlines); omit it for a blank page. Returns the new
+          document id and first-page geometry.
+
+        The interactive canvas calls this exact tool via the MCP Apps bridge,
+        passing ui_submitted=true for draw (the human already chose Save). A model
+        calling it directly should omit ui_submitted.
         </instructions>
         <parameters>
-        - document: Name or path of the target document (id or visibleName).
-        - page: 1-based page number to append to.
-        - strokes: List of stroke dicts. Each:
+        - method: "draw" | "add_page" | "create_document".
+        - document: Target document name/path/id (draw, add_page).
+        - page: 1-based page number (draw).
+        - strokes: List of stroke dicts (draw). Each:
             {"points": [[nx, ny], [nx, ny, pressure], ...],
              "tool": "fineliner" | "highlighter" | int,
              "color": "black" | "yellow" | ...,
              "width": <optional float>, "thickness_scale": <optional float>}
+        - name: Title of the new notebook (create_document).
+        - text: Optional text to seed the first page with (create_document).
+        - folder: Destination folder path (create_document; default "/").
         - ui_submitted: Set by the canvas app when the user clicked Save. Models omit it.
         </parameters>
         <examples>
-        - remarkable_canvas_write("Ideas", 1,
-            [{"points": [[0.1,0.2],[0.8,0.2]], "tool": "highlighter", "color": "yellow"}])
+        - remarkable_author(method="draw", document="Ideas", page=1,
+            strokes=[{"points": [[0.1,0.2],[0.8,0.2]], "tool": "highlighter", "color": "yellow"}])
+        - remarkable_author(method="add_page", document="Ideas")
+        - remarkable_author(method="create_document", name="Meeting notes",
+            text="Agenda\nFollow-ups")
         </examples>
         """
 
@@ -608,126 +893,26 @@ def register_write_tools():
             if not _is_ssh_mode():
                 return make_error(
                     error_type="unsupported_transport",
-                    message="Writing strokes back currently requires SSH mode.",
+                    message="Authoring native ink/notebooks currently requires SSH mode.",
                     suggestion=(
                         "Run with: remarkable-mcp --ssh (USB cable + SSH enabled). "
-                        "Stroke write-back over cloud/USB-web is not supported yet — "
+                        "Native write-back over cloud/USB-web is not supported yet — "
                         "for those, render and re-upload a flattened PDF instead."
                     ),
                 )
-            if not strokes:
-                return make_error(
-                    error_type="no_strokes",
-                    message="No strokes provided to write.",
-                    suggestion=(
-                        "Pass a non-empty list of stroke dicts, e.g. "
-                        '[{"points": [[0.1,0.2],[0.8,0.2]], "tool": "fineliner", '
-                        '"color": "black"}].'
-                    ),
-                )
 
-            from remarkable_mcp import strokes as strokes_mod
-
-            ssh_client = _get_ssh_client()
-            collection = ssh_client.get_meta_items()
-            items_by_id = get_items_by_id(collection)
-            target = _resolve_document(document, collection, items_by_id)
-            if not target:
-                from remarkable_mcp.extract import find_similar_documents
-
-                similar = find_similar_documents(document, collection)
-                return make_error(
-                    error_type="document_not_found",
-                    message=f"Document not found: '{document}'",
-                    suggestion="Use remarkable_browse() to find the correct name.",
-                    did_you_mean=similar or None,
-                )
-
-            doc_uuid = target.ID
-            content_raw = _read_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}.content")
-            try:
-                content_data = json.loads(content_raw) if content_raw else {}
-            except (ValueError, TypeError):
-                content_data = {}
-            page_ids = _page_ids_from_content(content_data)
-            if not page_ids:
-                return make_error(
-                    error_type="no_pages",
-                    message=f"Could not read the page list for '{target.VissibleName}'.",
-                    suggestion="The document may have no pages, or an unexpected .content format.",
-                )
-            if page < 1 or page > len(page_ids):
-                return make_error(
-                    error_type="page_out_of_range",
-                    message=f"Page {page} does not exist. Document has {len(page_ids)} page(s).",
-                    suggestion=f"Use page=1 to {len(page_ids)}.",
-                )
-
-            page_id = page_ids[page - 1]
-            file_type = str(content_data.get("fileType", "") or "")
-            rm_path = f"{XOCHITL_PATH}/{doc_uuid}/{page_id}.rm"
-            original = _read_remote_bytes(ssh_client, rm_path)
-            if original is None:
-                return make_error(
-                    error_type="no_page_layer",
-                    message=f"Page {page} has no existing ink layer (.rm) to append to.",
-                    suggestion=(
-                        "v1 appends to pages that already contain a drawable layer "
-                        "(native notebook pages, or PDF/EPUB pages that have been "
-                        "annotated at least once). Open the page and make one mark on "
-                        "the tablet first, or use remarkable_add_page to add a blank page."
-                    ),
-                )
-
-            try:
-                geom = strokes_mod.page_geometry(original)
-                new_bytes = strokes_mod.append_strokes(original, strokes)
-            except strokes_mod.StrokeError as e:
-                return make_error(
-                    error_type="stroke_write_failed",
-                    message=str(e),
-                    suggestion=(
-                        "Check the stroke format (points normalized [0,1]) and that "
-                        "the page has a drawable layer."
-                    ),
-                )
-            except Exception as e:  # noqa: BLE001 - surface as structured guidance
-                return make_error(
-                    error_type="stroke_write_failed",
-                    message=f"Failed to build strokes for page {page}: {e}",
-                    suggestion="Verify the stroke payload and retry.",
-                )
-
-            # Preserve the pristine original once, then write the appended bytes.
-            bak_path = rm_path + ".bak"
-            if not _remote_file_exists(ssh_client, bak_path):
-                _write_remote_bytes(ssh_client, bak_path, original)
-            _write_remote_bytes(ssh_client, rm_path, new_bytes)
-            _restart_xochitl(ssh_client)
-
-            result = {
-                "written": True,
-                "document": target.VissibleName,
-                "page": page,
-                "total_pages": len(page_ids),
-                "strokes_added": len(strokes),
-                "paper_size": [geom["paper_width"], geom["paper_height"]],
-                "file_type": file_type or "notebook",
-                "writable": True,
-                "transport": "ssh",
-                "ui_submitted": bool(ui_submitted),
-            }
-            if file_type.lower() == "epub":
-                result["caveat"] = (
-                    "This is a reflowable EPUB; annotations are anchored to the "
-                    "current layout and may shift if the font size or layout changes."
-                )
-            hint = (
-                f"Appended {len(strokes)} stroke(s) to page {page} of "
-                f"'{target.VissibleName}'. Call remarkable_canvas(document, page) to "
-                "view the updated page."
+            if method == "draw":
+                return _author_draw(document, page, strokes, ui_submitted)
+            if method == "add_page":
+                return _author_add_page(document)
+            if method == "create_document":
+                return _author_create_document(name, text, folder)
+            return make_error(
+                error_type="unknown_method",
+                message=f"Unknown method: '{method}'.",
+                suggestion='Use method="draw", "add_page", or "create_document".',
+                did_you_mean=["draw", "add_page", "create_document"],
             )
-            return make_response(result, hint)
 
         return await asyncio.to_thread(_impl)
 
