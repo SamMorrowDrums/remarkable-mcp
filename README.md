@@ -192,7 +192,7 @@ All three modes share the same read, render, and upload tools. **Cloud and SSH a
 | **🔌 USB Web** | Enable in Settings | Not required | ✅ | ✅ | ✅ PDF | ✅ (to root) | ❌ |
 | **⚡ SSH** | Developer mode | Not required | ✅ | ✅ | ✅ PDF/EPUB | ✅ | ✅ |
 
-¹ Folder ops = create folder / move / rename / delete. Upload and folder ops are enabled by default; pass `--read-only` to expose a read-only server. Deletes move items to the trash and can prompt for confirmation when your client supports elicitation.
+¹ Folder ops = create folder / move / rename / delete. Upload and folder ops are enabled by default; pass `--read-only` to expose a read-only server. Deletes move items to the trash and prompt for confirmation when your client supports elicitation, and are refused without it unless `REMARKABLE_SKIP_CONFIRM=1` is set.
 
 ### Automatic cloud fallback
 
@@ -488,7 +488,7 @@ Or set the environment variable:
 
 - **Upload registers in all modes** — cloud, SSH, and USB web.
 - **mkdir, move, rename, delete register in cloud and SSH modes only** — they are not exposed on USB web (the tablet's USB web firmware has no folder/move/rename/delete endpoints), keeping the tool list scoped to what the active transport actually supports.
-- **Delete prompts for confirmation when possible** — if the client supports MCP elicitation, `remarkable_delete` asks the user to confirm before deleting; otherwise it relies on the host to gate the call. In cloud mode delete moves the item to the trash (recoverable from your device); set `REMARKABLE_SKIP_CONFIRM=1` to bypass the prompt in automated setups. All write tools carry `ToolAnnotations(readOnlyHint=False)` (and `destructiveHint=True` for delete) so an agent harness can gate writes at the MCP layer.
+- **Delete prompts for confirmation when possible** — if the client supports MCP elicitation, `remarkable_delete` asks the user to confirm before deleting. If the client can't show a prompt, the delete is **refused** (not performed) unless `REMARKABLE_SKIP_CONFIRM=1` is set — so write-on-by-default can't silently delete from clients that lack elicitation. In cloud mode delete moves the item to the trash (recoverable from your device); set `REMARKABLE_SKIP_CONFIRM=1` to allow deletes without a prompt in automated setups. All write tools carry `ToolAnnotations(readOnlyHint=False)` (and `destructiveHint=True` for delete) so an agent harness can gate writes at the MCP layer.
 - After each write operation in SSH mode, the tablet UI restarts automatically to reflect changes.
 
 ### Examples

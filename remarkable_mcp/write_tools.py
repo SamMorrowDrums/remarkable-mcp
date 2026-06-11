@@ -450,23 +450,53 @@ class _DeleteConfirmation(BaseModel):
 
 
 async def _confirm_delete(ctx: Optional[Context], document: str) -> Optional[str]:
-    """Ask the user to confirm a delete when the client supports elicitation.
+    """Confirm a destructive delete before it runs.
 
-    Returns None to proceed, or a response string (cancellation) to abort.
-    Skips the prompt when elicitation isn't supported or REMARKABLE_SKIP_CONFIRM=1.
+    Returns None to proceed with the delete, or a response string (a
+    cancellation or a refusal) to abort.
+
+    Delete is destructive, so confirmation is required. It is bypassed only when
+    REMARKABLE_SKIP_CONFIRM=1 (for headless automation). When the client cannot
+    show a confirmation prompt — no elicitation support, or elicitation fails at
+    runtime — the delete is REFUSED rather than performed silently, so a client
+    that can't prompt the user cannot delete documents unattended. Write tools
+    are on by default, and most MCP clients don't support elicitation yet, so
+    this refusal path is the common case for unattended setups.
     """
     if os.environ.get("REMARKABLE_SKIP_CONFIRM", "").lower() in ("1", "true", "yes"):
         return None
     if ctx is None or not client_supports_elicitation(ctx):
-        return None
+        return make_error(
+            "confirmation_unavailable",
+            (
+                f"Refused to delete '{document}': this client cannot show a "
+                "confirmation prompt (no MCP elicitation support) and delete is "
+                "a destructive operation."
+            ),
+            (
+                "Confirm the delete from a client that supports elicitation, or "
+                "set REMARKABLE_SKIP_CONFIRM=1 to allow deletes without a prompt "
+                "(e.g. for headless automation)."
+            ),
+        )
     try:
         result = await ctx.elicit(
             message=f"Delete '{document}' from your reMarkable? This moves it to the trash.",
             schema=_DeleteConfirmation,
         )
-    except Exception as e:  # elicitation unsupported at runtime — proceed
-        logger.debug(f"Elicitation failed, proceeding without confirmation: {e}")
-        return None
+    except Exception as e:  # elicitation advertised but failed — refuse, don't delete
+        logger.debug(f"Elicitation failed, refusing delete without confirmation: {e}")
+        return make_error(
+            "confirmation_unavailable",
+            (
+                f"Refused to delete '{document}': the confirmation prompt could "
+                "not be shown and delete is a destructive operation."
+            ),
+            (
+                "Retry from a client that can display confirmation prompts, or "
+                "set REMARKABLE_SKIP_CONFIRM=1 to allow deletes without a prompt."
+            ),
+        )
     if result.action != "accept" or not getattr(result.data, "confirm", False):
         return make_response(
             {"deleted": False, "cancelled": True, "document": document},
@@ -985,8 +1015,9 @@ def register_write_tools():
             USB web interface.
 
             If the client supports elicitation, this tool asks the user to confirm
-            before deleting. Set REMARKABLE_SKIP_CONFIRM=1 to skip the prompt for
-            automation.
+            before deleting. If the client cannot show a confirmation prompt, the
+            delete is refused unless REMARKABLE_SKIP_CONFIRM=1 is set (for headless
+            automation).
             </instructions>
             <parameters>
             - document: Name or path of the document/folder to delete
@@ -1000,9 +1031,9 @@ def register_write_tools():
             if error:
                 return error
 
-            cancelled = await _confirm_delete(ctx, document)
-            if cancelled:
-                return cancelled
+            abort = await _confirm_delete(ctx, document)
+            if abort:
+                return abort
 
             if _is_cloud_mode():
                 return await asyncio.to_thread(_cloud_delete, document)
