@@ -3597,6 +3597,16 @@ class TestCanvasResource:
         # +Page is gated to native notebooks (PDFs/EPUBs have fixed pages).
         assert 'state.fileType === "notebook"' in _CANVAS_HTML
 
+    def test_canvas_footer_distinguishes_transport_from_read_only(self):
+        from remarkable_mcp.app_canvas import _CANVAS_HTML
+
+        # When write is enabled but the transport isn't SSH, the footer mirrors
+        # the draw tool's SSH-only error instead of the generic read-only string.
+        assert "writeMode" in _CANVAS_HTML
+        assert 'state.transport !== "ssh"' in _CANVAS_HTML
+        assert "connect via SSH" in _CANVAS_HTML
+        assert "Read-only viewer" in _CANVAS_HTML
+
     def test_canvas_bridge_is_spec_compliant(self):
         from remarkable_mcp.app_canvas import _CANVAS_HTML
 
@@ -3768,6 +3778,8 @@ class TestRenderCanvasPage:
         assert sc["page_height_px"] == 16
         assert sc["paper_size"] == [820, 1458]
         assert sc["file_type"] == "notebook"
+        assert sc["transport"] == "cloud"
+        assert sc["write_mode"] is True
         # Embedded PNG is included for non-app clients.
         assert any(isinstance(c, types.EmbeddedResource) for c in result.content)
 

@@ -130,7 +130,8 @@ _CANVAS_HTML = """<!doctype html>
                 appReady: false, fullscreenUnsupported: false,
                 writable: false, drawing: false, cache: {}, cur: null,
                 img: null, canvas: null, fileType: "", pendingPages: 0,
-                stageEl: null, natW: 0, natH: 0, paperW: 1404, paperH: 1872 };
+                stageEl: null, natW: 0, natH: 0, paperW: 1404, paperH: 1872,
+                transport: "", writeMode: false };
 
   function post(msg) {
     try { window.parent.postMessage(msg, "*"); } catch (e) {}
@@ -182,6 +183,8 @@ _CANVAS_HTML = """<!doctype html>
     if (data.total_pages) state.total = data.total_pages;
     if (typeof data.writable === "boolean") state.writable = data.writable;
     if (typeof data.file_type === "string") state.fileType = data.file_type;
+    if (typeof data.transport === "string") state.transport = data.transport;
+    if (typeof data.write_mode === "boolean") state.writeMode = data.write_mode;
     if (data.paper_size && data.paper_size.length === 2) {
       state.paperW = data.paper_size[0]; state.paperH = data.paper_size[1];
     }
@@ -464,7 +467,15 @@ _CANVAS_HTML = """<!doctype html>
     cancel.disabled = state.busy || !dirty;
     var footer = document.getElementById("footer");
     if (!w) {
-      footer.textContent = "Read-only viewer";
+      // Distinguish the two reasons a page isn't writable so the canvas message
+      // matches what the draw tool would return: read-only MODE vs non-SSH
+      // TRANSPORT (write is on, but native write-back needs the SSH transport).
+      if (state.writeMode && state.transport && state.transport !== "ssh") {
+        footer.textContent =
+          "View-only over this connection — connect via SSH (USB cable + SSH enabled) to draw.";
+      } else {
+        footer.textContent = "Read-only viewer";
+      }
     } else if (dirty) {
       var parts = [];
       if (state.pendingPages > 0) parts.push(state.pendingPages + " new page(s)");
@@ -776,9 +787,13 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
     from remarkable_mcp.write_tools import write_enabled
 
     transport = get_active_transport()
+    write_mode = bool(write_enabled())
     # The canvas can write strokes back only over SSH (the filesystem transport),
-    # and only when write mode is on. Surface that so the app shows/hides Save.
-    writable = bool(write_enabled()) and transport == "ssh"
+    # and only when write mode is on. Surface both the combined `writable` flag
+    # (Save/Draw/＋Page visibility) AND its two inputs (`write_mode`, `transport`)
+    # so the app can explain WHY a page isn't writable — distinguishing read-only
+    # mode from a non-SSH transport, mirroring the draw tool's own error.
+    writable = write_mode and transport == "ssh"
 
     structured = {
         "document": doc_path,
@@ -792,6 +807,7 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
         "render_source": render_source,
         "file_type": file_type,
         "transport": transport,
+        "write_mode": write_mode,
         "writable": writable,
     }
 
