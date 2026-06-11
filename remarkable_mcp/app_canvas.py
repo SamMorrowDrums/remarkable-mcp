@@ -542,7 +542,7 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
         find_similar_documents,
         get_background_color,
         get_document_page_count,
-        render_page_from_document_zip,
+        render_page_full_page_from_document_zip,
         render_tablet_pdf_page_to_png,
     )
     from remarkable_mcp.responses import make_error
@@ -614,10 +614,20 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
                 suggestion=f"Use page=1 to {total_pages} to view different pages.",
             )
 
-        png_data = await run_blocking(
-            render_page_from_document_zip, tmp_path, page, background_color=background
+        # Full-page render addressed by cPages index (coherent with the write
+        # tool) so the overlay's normalized coordinates map exactly onto stroke
+        # space and blank pages still render. paper_size is the page's own
+        # coordinate extent, surfaced so the model can draw in-bounds.
+        paper_size = None
+        full = await run_blocking(
+            render_page_full_page_from_document_zip, tmp_path, page, background_color=background
         )
         render_source = "strokes"
+        if full is not None:
+            png_data, paper_wh = full
+            paper_size = [round(paper_wh[0]), round(paper_wh[1])]
+        else:
+            png_data = None
         if png_data is None:
             pdf_bytes = await run_blocking(download_raw_file, client, target_doc, "pdf")
             if pdf_bytes:
@@ -667,6 +677,7 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
         "png_data_uri": data_uri,
         "page_width_px": width_px,
         "page_height_px": height_px,
+        "paper_size": paper_size,
         "render_source": render_source,
         "transport": transport,
         "writable": writable,
@@ -677,14 +688,31 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
     # Audience split (MCP content annotations): the rendered page image is for the
     # USER (it's large base64 the model never needs to read), while a lean text
     # digest carries the page/doc/writable facts the model may want — keeping the
-    # model's context free of the image blob.
+    # model's context free of the image blob. When the page is writable we also
+    # give the model the drawable geometry + coordinate convention so it can
+    # compose in-bounds strokes for remarkable_canvas_write without seeing the
+    # image (it draws blind, so these bounds are how it stays on the page).
+    digest = (
+        f"Page {page}/{total_pages} of '{target_doc.VissibleName}' "
+        f"(transport={transport}, writable={'yes' if writable else 'no'})."
+    )
+    if writable and paper_size:
+        digest += (
+            f" Drawable page area is {paper_size[0]}x{paper_size[1]} in the page's own"
+            " coordinate units. To draw, call remarkable_canvas_write(document, page, strokes)"
+            " where each stroke's points are normalized [0,1] from the page's TOP-LEFT"
+            " (x rightwards, y downwards); they map onto this exact page. Pass many strokes"
+            " in one call."
+        )
+    elif writable:
+        digest += (
+            " To draw, call remarkable_canvas_write(document, page, strokes) with points"
+            " normalized [0,1] from the page's TOP-LEFT."
+        )
+    digest += " Rendered in the interactive canvas; the page image is shown to the user."
     info = types.TextContent(
         type="text",
-        text=(
-            f"Page {page}/{total_pages} of '{target_doc.VissibleName}' "
-            f"(transport={transport}, writable={'yes' if writable else 'no'}). "
-            "Rendered in the interactive canvas; the page image is shown to the user."
-        ),
+        text=digest,
         annotations=types.Annotations(audience=["assistant"]),
     )
     image = types.EmbeddedResource(

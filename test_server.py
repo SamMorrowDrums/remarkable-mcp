@@ -3605,6 +3605,93 @@ class TestCanvasResource:
         assert APP_UI_MIME == "text/html;profile=mcp-app"
 
 
+class TestFullPageRender:
+    """Full-page (uncropped) render used by the interactive canvas.
+
+    The canvas renders the WHOLE page (viewBox from the page's own
+    SceneInfo.paper_size) and addresses pages by cPages index, so the drawing
+    overlay's normalized coordinates map onto the same stroke space the write
+    tool uses, and blank pages still render.
+    """
+
+    def test_svg_full_page_viewbox_is_centered(self):
+        from remarkable_mcp.extract import _svg_full_page
+
+        svg = _svg_full_page([], 820.0, 1458.0)
+        # Center-origin X, top-origin Y: viewBox "-W/2 0 W H".
+        assert 'viewBox="-410 0 820 1458"' in svg
+        assert "<svg" in svg
+
+    def test_full_page_png_returns_paper_size_and_matching_aspect(self):
+        import io as _io
+
+        from PIL import Image
+
+        from remarkable_mcp.extract import render_rm_file_full_page_png
+
+        try:
+            data = _make_v6_rm_bytes()
+        except Exception as exc:  # pragma: no cover - guards rmscene API drift
+            pytest.skip(f"could not synthesize a v6 fixture: {exc}")
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(data)
+            rm_path = Path(rm_tmp.name)
+        try:
+            result = render_rm_file_full_page_png(rm_path, background_color="#FFFFFF")
+            assert result is not None
+            png, (w, h) = result
+            # The fixture has no SceneInfo -> fall back to the standard page extent.
+            assert (round(w), round(h)) == (1404, 1872)
+            im = Image.open(_io.BytesIO(png))
+            # PNG aspect must match the page aspect so [0,1] maps linearly.
+            assert abs(im.size[0] / im.size[1] - w / h) < 0.01
+        finally:
+            rm_path.unlink(missing_ok=True)
+
+    def test_full_page_render_is_cpages_indexed_and_renders_blank_pages(self):
+        import io as _io
+        import json as _json
+        import zipfile as _zip
+
+        from PIL import Image
+
+        from remarkable_mcp.extract import render_page_full_page_from_document_zip
+
+        try:
+            rm_bytes = _make_v6_rm_bytes()
+        except Exception as exc:  # pragma: no cover - guards rmscene API drift
+            pytest.skip(f"could not synthesize a v6 fixture: {exc}")
+
+        # Two pages in cPages, but only page 1 ("p1") has a .rm layer on disk.
+        content = {"cPages": {"pages": [{"id": "p1"}, {"id": "p2"}]}}
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as ztmp:
+            zpath = Path(ztmp.name)
+        try:
+            with _zip.ZipFile(zpath, "w") as zf:
+                zf.writestr("doc.content", _json.dumps(content))
+                zf.writestr("p1.rm", rm_bytes)  # p2.rm intentionally absent
+
+            # Page 1 has a drawable layer -> rendered from its .rm.
+            r1 = render_page_full_page_from_document_zip(zpath, 1, background_color="#FFFFFF")
+            assert r1 is not None
+            png1, size1 = r1
+            assert Image.open(_io.BytesIO(png1)).size[0] > 0
+
+            # Page 2 exists in cPages but has no .rm -> a BLANK full page is
+            # rendered (not None). If pages were addressed by filesystem .rm
+            # order this would be out of range (only one .rm file exists).
+            r2 = render_page_full_page_from_document_zip(zpath, 2, background_color="#FFFFFF")
+            assert r2 is not None
+            _png2, size2 = r2
+            assert size2 == size1  # blank page sized to the document's paper size
+
+            # Page 3 is not in cPages -> out of range.
+            assert render_page_full_page_from_document_zip(zpath, 3) is None
+        finally:
+            zpath.unlink(missing_ok=True)
+
+
 class TestRenderCanvasPage:
     """Test the read-only canvas page renderer."""
 
@@ -3634,7 +3721,11 @@ class TestRenderCanvasPage:
         monkeypatch.setattr(api, "download_raw_file", lambda c, d, ext: None)
         monkeypatch.setattr(extract, "get_background_color", lambda: "#FBFBFB")
         monkeypatch.setattr(extract, "get_document_page_count", lambda p: page_count)
-        monkeypatch.setattr(extract, "render_page_from_document_zip", lambda p, pg, **k: png)
+        monkeypatch.setattr(
+            extract,
+            "render_page_full_page_from_document_zip",
+            lambda p, pg, **k: ((png, (820.0, 1458.0)) if png is not None else None),
+        )
         monkeypatch.setattr(extract, "find_similar_documents", lambda q, docs: [])
         monkeypatch.setattr(tools, "_get_root_path", lambda: "/")
         monkeypatch.setattr(tools, "_is_within_root", lambda path, root: True)
@@ -3660,6 +3751,7 @@ class TestRenderCanvasPage:
         assert sc["writable"] is False
         assert sc["page_width_px"] == 12
         assert sc["page_height_px"] == 16
+        assert sc["paper_size"] == [820, 1458]
         # Embedded PNG is included for non-app clients.
         assert any(isinstance(c, types.EmbeddedResource) for c in result.content)
 

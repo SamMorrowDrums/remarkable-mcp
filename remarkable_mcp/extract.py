@@ -10,7 +10,7 @@ import time
 import zipfile
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,11 @@ REMARKABLE_BACKGROUND_COLOR = get_background_color()
 
 # Margin around content when using content-based bounding box (in pixels)
 CONTENT_MARGIN = 50
+
+# Target long-edge resolution (px) for a full-page canvas render. The page is
+# rasterised at this resolution preserving the page aspect; the displayed image
+# is then scaled by the host, so this only sets crispness, not layout.
+FULL_PAGE_TARGET_LONG_EDGE = 1872
 
 # Cache TTL in seconds (5 minutes)
 CACHE_TTL_SECONDS = 300
@@ -462,22 +467,48 @@ def _render_rm_v5_to_svg(rm_file_path: Path) -> Optional[str]:
         return None
 
 
-def _render_rm_v6_to_svg(rm_file_path: Path) -> Optional[str]:
-    """
-    Render a v6 .rm file to SVG using rmscene to parse the CRDT block format.
-
-    This handles newer reMarkable firmware that uses the v6 format with
-    scene tree blocks, including proper highlighter and color support.
-    """
+def _v6_blocks(rm_file_path: Path) -> Optional[list]:
+    """Read v6 .rm scene blocks, or None if the file is not v6 / unreadable."""
     try:
         from rmscene import read_blocks
     except ImportError:
         return None
+    try:
+        with open(rm_file_path, "rb") as f:
+            header = f.read(43)
+            if b"version=6" not in header:
+                return None
+            f.seek(0)
+            return list(read_blocks(f))
+    except Exception:
+        return None
 
-    # Use integer values for pen/color matching (rmscene exposes ints on blocks)
+
+def _v6_paper_size(blocks: list) -> Tuple[float, float]:
+    """Page extent (W, H) in stroke units, read from SceneInfo.paper_size.
+
+    This is the authoritative stroke-coordinate extent for the page and the
+    same value the write path (``strokes.page_geometry``) maps normalized
+    coordinates into. Building a full-page render from it therefore makes the
+    displayed image share ONE coordinate space with written strokes (so the
+    drawing overlay and the write tool land ink in the same place). Falls back
+    to the standard reMarkable page when no SceneInfo is present.
+    """
+    for b in blocks:
+        ps = getattr(b, "paper_size", None)
+        if ps and len(ps) == 2 and ps[0] and ps[1]:
+            try:
+                return float(ps[0]), float(ps[1])
+            except (TypeError, ValueError):
+                continue
+    return float(REMARKABLE_WIDTH), float(REMARKABLE_HEIGHT)
+
+
+def _v6_paths_from_blocks(blocks: list) -> Tuple[list, list]:
+    """Build SVG ``<path>`` strings + a flat coordinate list from v6 blocks."""
+    # Integer pen/color values (rmscene exposes ints on blocks).
     HIGHLIGHTER_PENS = {5, 18}  # HIGHLIGHTER_1, HIGHLIGHTER_2
     ERASER_PENS = {6, 8}  # ERASER, ERASER_AREA
-
     COLOR_MAP = {
         0: "black",  # BLACK
         1: "#808080",  # GRAY
@@ -495,63 +526,71 @@ def _render_rm_v6_to_svg(rm_file_path: Path) -> Optional[str]:
         13: "#FFD700",  # YELLOW_2
     }
 
-    try:
-        with open(rm_file_path, "rb") as f:
-            header = f.read(43)
-            if b"version=6" not in header:
-                return None
-            f.seek(0)
-            blocks = list(read_blocks(f))
+    paths: list = []
+    all_coords: list = []
+    for block in blocks:
+        if not hasattr(block, "item") or not hasattr(block.item, "value"):
+            continue
+        line = block.item.value
+        if not hasattr(line, "points") or not line.points:
+            continue
 
-        paths = []
-        all_coords = []
-        for block in blocks:
-            if not hasattr(block, "item") or not hasattr(block.item, "value"):
-                continue
-            line = block.item.value
-            if not hasattr(line, "points") or not line.points:
-                continue
+        tool = line.tool if hasattr(line, "tool") else None
+        color = line.color if hasattr(line, "color") else 0
+        # Convert enums to int if needed
+        tool = tool.value if hasattr(tool, "value") else tool
+        color = color.value if hasattr(color, "value") else color
 
-            tool = line.tool if hasattr(line, "tool") else None
-            color = line.color if hasattr(line, "color") else 0
-            # Convert enums to int if needed
-            tool = tool.value if hasattr(tool, "value") else tool
-            color = color.value if hasattr(color, "value") else color
+        if tool in ERASER_PENS:
+            continue
 
-            if tool in ERASER_PENS:
-                continue
+        is_highlighter = tool in HIGHLIGHTER_PENS
+        stroke_color = COLOR_MAP.get(color, "black")
 
-            is_highlighter = tool in HIGHLIGHTER_PENS
-            stroke_color = COLOR_MAP.get(color, "black")
-
-            if is_highlighter:
-                avg_width = (
-                    sum(p.width for p in line.points) / len(line.points)
-                    if all(hasattr(p, "width") for p in line.points)
-                    else 20.0
-                )
-                stroke_width = max(10.0, min(avg_width * 2.0, 40.0))
-                opacity = ' opacity="0.35"'
-            else:
-                avg_width = (
-                    sum(p.width for p in line.points) / len(line.points)
-                    if all(hasattr(p, "width") for p in line.points)
-                    else 2.0
-                )
-                stroke_width = max(0.5, min(avg_width * 0.8, 5.0))
-                opacity = ""
-
-            d = f"M {line.points[0].x:.1f} {line.points[0].y:.1f}"
-            d += "".join(f" L {p.x:.1f} {p.y:.1f}" for p in line.points[1:])
-            all_coords.extend((p.x, p.y) for p in line.points)
-
-            paths.append(
-                f'<path d="{d}" stroke="{stroke_color}" '
-                f'stroke-width="{stroke_width:.1f}" '
-                f'fill="none" stroke-linecap="round" '
-                f'stroke-linejoin="round"{opacity}/>'
+        if is_highlighter:
+            avg_width = (
+                sum(p.width for p in line.points) / len(line.points)
+                if all(hasattr(p, "width") for p in line.points)
+                else 20.0
             )
+            stroke_width = max(10.0, min(avg_width * 2.0, 40.0))
+            opacity = ' opacity="0.35"'
+        else:
+            avg_width = (
+                sum(p.width for p in line.points) / len(line.points)
+                if all(hasattr(p, "width") for p in line.points)
+                else 2.0
+            )
+            stroke_width = max(0.5, min(avg_width * 0.8, 5.0))
+            opacity = ""
 
+        d = f"M {line.points[0].x:.1f} {line.points[0].y:.1f}"
+        d += "".join(f" L {p.x:.1f} {p.y:.1f}" for p in line.points[1:])
+        all_coords.extend((p.x, p.y) for p in line.points)
+
+        paths.append(
+            f'<path d="{d}" stroke="{stroke_color}" '
+            f'stroke-width="{stroke_width:.1f}" '
+            f'fill="none" stroke-linecap="round" '
+            f'stroke-linejoin="round"{opacity}/>'
+        )
+    return paths, all_coords
+
+
+def _render_rm_v6_to_svg(rm_file_path: Path) -> Optional[str]:
+    """
+    Render a v6 .rm file to a content-cropped SVG (read-only viewing).
+
+    This handles newer reMarkable firmware that uses the v6 format with
+    scene tree blocks, including proper highlighter and color support. The
+    viewBox is cropped to the ink bounding box; for a full-page render that
+    shares the page's own coordinate space, see ``render_rm_file_full_page_png``.
+    """
+    blocks = _v6_blocks(rm_file_path)
+    if blocks is None:
+        return None
+    try:
+        paths, all_coords = _v6_paths_from_blocks(blocks)
         return _svg_from_paths(paths, all_coords)
     except Exception:
         return None
@@ -672,6 +711,79 @@ def render_rm_file_to_png(
             tmp_png_path.unlink(missing_ok=True)
         if tmp_raw_path:
             tmp_raw_path.unlink(missing_ok=True)
+
+
+def _svg_full_page(paths: list, paper_w: float, paper_h: float) -> str:
+    """Wrap paths in an SVG whose viewBox spans the WHOLE page in stroke units.
+
+    The page coordinate system is center-origin in X (x in [-W/2, W/2]) and
+    top-origin in Y (y in [0, H]) — the same mapping ``strokes._map_point``
+    uses (``rm_x = (nx-0.5)*W``, ``rm_y = ny*H``). So a point drawn at
+    normalized (nx, ny) over the rendered image lands at exactly the stroke
+    coordinate the write tool will use. Empty ``paths`` yields a blank page.
+    """
+    min_x = -paper_w / 2.0
+    return (
+        f'<?xml version="1.0" encoding="UTF-8"?>'
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'viewBox="{min_x:.0f} 0 {paper_w:.0f} {paper_h:.0f}" '
+        f'width="{paper_w:.0f}" height="{paper_h:.0f}">'
+        f"{''.join(paths)}</svg>"
+    )
+
+
+def _svg_string_to_png(
+    svg: str, output_width: int, output_height: int, background_color: Optional[str]
+) -> Optional[bytes]:
+    """Rasterize an in-memory SVG string to PNG bytes via cairosvg."""
+    try:
+        import cairosvg
+    except ImportError:
+        return None
+    try:
+        return cairosvg.svg2png(
+            bytestring=svg.encode("utf-8"),
+            output_width=output_width,
+            output_height=output_height,
+            background_color=background_color,
+        )
+    except Exception:
+        return None
+
+
+def render_rm_file_full_page_png(
+    rm_file_path: Path, background_color: Optional[str] = None
+) -> Optional[Tuple[bytes, Tuple[float, float]]]:
+    """Render a v6 .rm page to a FULL-PAGE PNG (not cropped to ink).
+
+    Unlike ``render_rm_file_to_png`` (which crops the viewBox to the ink
+    bounding box), this renders the whole page using a viewBox derived from the
+    page's own ``SceneInfo.paper_size``. That makes the displayed image map
+    linearly to the page's coordinate system, so the interactive drawing
+    overlay places strokes exactly where the write tool will, and blank pages
+    render as a blank page instead of returning ``None``.
+
+    Returns ``(png_bytes, (paper_w, paper_h))`` or ``None`` if the file is not
+    v6 or rendering dependencies are unavailable (callers should fall back).
+    """
+    blocks = _v6_blocks(rm_file_path)
+    if blocks is None:
+        return None
+    try:
+        paths, _ = _v6_paths_from_blocks(blocks)
+        paper_w, paper_h = _v6_paper_size(blocks)
+    except Exception:
+        return None
+
+    svg = _svg_full_page(paths, paper_w, paper_h)
+    scale = FULL_PAGE_TARGET_LONG_EDGE / max(paper_w, paper_h)
+    output_width = max(1, round(paper_w * scale))
+    output_height = max(1, round(paper_h * scale))
+
+    png = _svg_string_to_png(svg, output_width, output_height, background_color)
+    if png is None:
+        return None
+    return png, (paper_w, paper_h)
 
 
 def render_rm_file_to_svg(
@@ -878,6 +990,77 @@ def render_page_from_document_zip(
         # Render the requested page
         target_rm_file = rm_files[page - 1]
         return render_rm_file_to_png(target_rm_file, background_color=background_color)
+
+
+def _document_paper_size(rm_files: List[Path]) -> Tuple[float, float]:
+    """Best-effort page extent for a document by scanning its .rm files.
+
+    Used to render a blank page (one with no .rm of its own) at the same size
+    as the rest of the document. Falls back to the standard reMarkable page.
+    """
+    for p in rm_files:
+        blocks = _v6_blocks(p)
+        if blocks:
+            return _v6_paper_size(blocks)
+    return float(REMARKABLE_WIDTH), float(REMARKABLE_HEIGHT)
+
+
+def render_page_full_page_from_document_zip(
+    zip_path: Path, page: int = 1, background_color: Optional[str] = None
+) -> Optional[Tuple[bytes, Tuple[float, float]]]:
+    """Full-page render of a page, addressed by cPages index.
+
+    This is the render used by the interactive canvas. It differs from
+    ``render_page_from_document_zip`` in two ways that matter for write-back:
+
+    1. Pages are addressed by the ``.content`` cPages order — the SAME index
+       the write tool (``_page_ids_from_content``) uses — so "page N" means the
+       same page in the viewer and the writer even when blank pages (which may
+       have no ``.rm`` file) are present.
+    2. The page is rendered full-bleed using its own ``SceneInfo.paper_size``,
+       so the overlay's normalized coordinates map exactly onto stroke space.
+
+    Returns ``(png_bytes, (paper_w, paper_h))`` or ``None`` (caller falls back
+    to PDF rasterization or an error).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(tmpdir_path)
+
+        rm_glob = list(tmpdir_path.glob("**/*.rm"))
+
+        entries = _read_cpages_entries(tmpdir_path)
+        page_ids = [e.get("id") for e in entries if isinstance(e, dict) and e.get("id")]
+
+        if page_ids:
+            if page < 1 or page > len(page_ids):
+                return None
+            page_id = page_ids[page - 1]
+            rm_file = next((p for p in rm_glob if p.stem == page_id), None)
+        else:
+            # No cPages metadata: fall back to filesystem/page order of .rm files.
+            ordered = _get_ordered_rm_files(tmpdir_path)
+            if page < 1 or page > len(ordered):
+                return None
+            rm_file = ordered[page - 1]
+
+        if rm_file is not None and rm_file.exists():
+            return render_rm_file_full_page_png(rm_file, background_color=background_color)
+
+        # The page exists in cPages but has no .rm layer yet (a blank page):
+        # render a blank full page at the document's paper size so the viewer
+        # still shows it. (The write tool will return no_page_layer until the
+        # page has a drawable layer / has been added via remarkable_add_page.)
+        paper_w, paper_h = _document_paper_size(rm_glob)
+        svg = _svg_full_page([], paper_w, paper_h)
+        scale = FULL_PAGE_TARGET_LONG_EDGE / max(paper_w, paper_h)
+        png = _svg_string_to_png(
+            svg, max(1, round(paper_w * scale)), max(1, round(paper_h * scale)), background_color
+        )
+        if png is None:
+            return None
+        return png, (paper_w, paper_h)
 
 
 def document_zip_has_pdf_underlay(zip_path: Path) -> bool:
