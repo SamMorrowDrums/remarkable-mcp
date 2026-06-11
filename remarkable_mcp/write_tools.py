@@ -807,10 +807,6 @@ def _author_create_document(name: str, text: Optional[str], folder: Optional[str
         "transport": "ssh",
     }
     hint = f"Created notebook '{name}'. Call remarkable_canvas('{name}', 1) to view or draw on it."
-    if text:
-        hint += (
-            " Note: the typed text shows on the device but not in the strokes-only canvas preview."
-        )
     return make_response(result, hint)
 
 
@@ -862,8 +858,7 @@ def register_write_tools():
           in `folder` (default root). Leave `text` EMPTY for a blank notebook —
           that is the default and the correct choice. Only pass `text` when the
           user EXPLICITLY asks for specific typed content; never invent a title,
-          placeholder, or "created by" line. (Typed text renders on the device but
-          not in the strokes-only canvas preview.) Returns the new document id and
+          placeholder, or "created by" line. Returns the new document id and
           first-page geometry.
 
         The interactive canvas calls this exact tool via the MCP Apps bridge,
@@ -882,8 +877,7 @@ def register_write_tools():
         - name: Title of the new notebook (create_document).
         - text: Optional typed text for the first page (create_document). Omit it
             unless the user explicitly requested specific content; never fabricate
-            placeholder text. Paragraphs split on newlines. Note: typed text shows
-            on the device but not in the strokes-only canvas preview.
+            placeholder text. Paragraphs split on newlines.
         - folder: Destination folder path (create_document; default "/").
         - ui_submitted: Set by the canvas app when the user clicked Save. Models omit it.
         </parameters>

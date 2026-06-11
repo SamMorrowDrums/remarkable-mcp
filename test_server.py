@@ -3713,6 +3713,58 @@ class TestFullPageRender:
         finally:
             zpath.unlink(missing_ok=True)
 
+    def test_typed_text_emits_svg_text_elements(self):
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import _v6_blocks, _v6_text_svg_elements
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(nb.page_rm_bytes("Hello world\nSecond line"))
+            rm_path = Path(rm_tmp.name)
+        try:
+            elements = _v6_text_svg_elements(_v6_blocks(rm_path))
+            assert len(elements) == 2
+            joined = "".join(elements)
+            assert "<text " in joined
+            assert "Hello world" in joined
+            assert "Second line" in joined
+        finally:
+            rm_path.unlink(missing_ok=True)
+
+    def test_blank_page_has_no_typed_text(self):
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import _v6_blocks, _v6_text_svg_elements
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(nb.blank_page_rm_bytes())
+            rm_path = Path(rm_tmp.name)
+        try:
+            # An empty RootTextBlock (carried by synthesized blank pages) yields
+            # no <text> nodes, so the page renders blank.
+            assert _v6_text_svg_elements(_v6_blocks(rm_path)) == []
+        finally:
+            rm_path.unlink(missing_ok=True)
+
+    def test_typed_text_rasterizes_to_visible_pixels(self):
+        import io as _io
+
+        from PIL import Image
+
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import render_rm_file_full_page_png
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(nb.page_rm_bytes("Hello world"))
+            rm_path = Path(rm_tmp.name)
+        try:
+            result = render_rm_file_full_page_png(rm_path, background_color="#FFFFFF")
+            assert result is not None
+            png, _ = result
+            im = Image.open(_io.BytesIO(png)).convert("L")
+            # Typed text must rasterize to dark pixels (not a blank white page).
+            assert sum(im.histogram()[:128]) > 0
+        finally:
+            rm_path.unlink(missing_ok=True)
+
 
 class TestRenderCanvasPage:
     """Test the read-only canvas page renderer."""
@@ -4298,8 +4350,6 @@ class TestCanvasWrite:
             assert data["document"] == "My notes"
             assert data["total_pages"] == 1
             assert data["has_text"] is False
-            # Blank notebook: no typed-text render caveat in the hint.
-            assert "canvas preview" not in data["_hint"]
             uid = data["document_id"]
             assert uid in contents and uid in metas
             assert contents[uid]["fileType"] == "notebook"
@@ -4310,8 +4360,8 @@ class TestCanvasWrite:
             mock_restart.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_create_document_with_text_flags_render_caveat(self):
-        """Seeding text sets has_text and warns it won't show in the canvas preview."""
+    async def test_create_document_with_text_seeds_first_page(self):
+        """Seeding text sets has_text; the typed text renders in the canvas preview."""
         import remarkable_mcp.write_tools as wt
 
         client = Mock(spec=["get_meta_items", "_scp_download", "_ssh_command"])
@@ -4332,7 +4382,6 @@ class TestCanvasWrite:
             )
             data = json.loads(result[0][0].text)
             assert data["has_text"] is True
-            assert "canvas preview" in data["_hint"]
 
     @pytest.mark.asyncio
     async def test_create_document_requires_name(self):

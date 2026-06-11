@@ -11,6 +11,7 @@ import zipfile
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from xml.sax.saxutils import escape as _xml_escape
 
 logger = logging.getLogger(__name__)
 
@@ -577,6 +578,88 @@ def _v6_paths_from_blocks(blocks: list) -> Tuple[list, list]:
     return paths, all_coords
 
 
+# reMarkable typed-text layout, in stroke/screen units. Mirrors the rmc
+# exporter (github.com/ricklupton/rmc) so typed text (a RootTextBlock) renders
+# in the full-page view at the same place the device draws it. rmc lays text
+# out in a 72/226-DPI point space; our full-page SVG works in raw screen units,
+# so point font sizes are converted to screen units via _PT_TO_SCREEN.
+_TEXT_TOP_Y = -88
+_PT_TO_SCREEN = 226.0 / 72.0
+
+
+def _v6_text_svg_elements(blocks: list) -> list:
+    """Build SVG ``<text>`` strings for typed text (a RootTextBlock) on a page.
+
+    Returns an empty list when the page has no typed text (the common case for
+    handwritten notebooks) or when rmscene's text helpers are unavailable.
+    Coordinates are in the page's own stroke/screen units (center-origin X),
+    matching :func:`_svg_full_page`, so text lands where the device shows it.
+    """
+    try:
+        from rmscene.scene_items import ParagraphStyle, Text
+        from rmscene.text import TextDocument
+    except ImportError:
+        return []
+
+    text_item = next(
+        (b.value for b in blocks if isinstance(getattr(b, "value", None), Text)),
+        None,
+    )
+    if text_item is None:
+        return []
+
+    # Blank pages we synthesize carry an empty RootTextBlock; skip them so we
+    # neither emit empty <text> nodes nor trigger rmscene's empty-item warning.
+    try:
+        if not any(isinstance(v, str) and v.strip() for v in text_item.items.values()):
+            return []
+    except Exception:
+        pass
+
+    line_heights = {
+        ParagraphStyle.PLAIN: 70,
+        ParagraphStyle.HEADING: 150,
+        ParagraphStyle.BOLD: 70,
+        ParagraphStyle.BULLET: 35,
+        ParagraphStyle.BULLET2: 35,
+        ParagraphStyle.CHECKBOX: 35,
+        ParagraphStyle.CHECKBOX_CHECKED: 35,
+    }
+    font_sizes = {
+        ParagraphStyle.HEADING: 14 * _PT_TO_SCREEN,
+        ParagraphStyle.BOLD: 8 * _PT_TO_SCREEN,
+    }
+    default_font = 7 * _PT_TO_SCREEN
+
+    try:
+        doc = TextDocument.from_scene_item(text_item)
+    except Exception:
+        return []
+
+    pos_x = float(getattr(text_item, "pos_x", 0.0) or 0.0)
+    pos_y = float(getattr(text_item, "pos_y", 0.0) or 0.0)
+
+    elements: list = []
+    y_offset = _TEXT_TOP_Y
+    for para in doc.contents:
+        style = para.style.value if getattr(para, "style", None) is not None else None
+        y_offset += line_heights.get(style, 70)
+        text = str(para).strip()
+        if not text:
+            continue
+        size = font_sizes.get(style, default_font)
+        family = "serif" if style == ParagraphStyle.HEADING else "sans-serif"
+        weight = (
+            ' font-weight="bold"' if style in (ParagraphStyle.BOLD, ParagraphStyle.HEADING) else ""
+        )
+        elements.append(
+            f'<text x="{pos_x:.1f}" y="{pos_y + y_offset:.1f}" '
+            f'font-family="{family}" font-size="{size:.1f}"{weight} '
+            f'fill="black" xml:space="preserve">{_xml_escape(text)}</text>'
+        )
+    return elements
+
+
 def _render_rm_v6_to_svg(rm_file_path: Path) -> Optional[str]:
     """
     Render a v6 .rm file to a content-cropped SVG (read-only viewing).
@@ -771,11 +854,14 @@ def render_rm_file_full_page_png(
         return None
     try:
         paths, _ = _v6_paths_from_blocks(blocks)
+        text_elements = _v6_text_svg_elements(blocks)
         paper_w, paper_h = _v6_paper_size(blocks)
     except Exception:
         return None
 
-    svg = _svg_full_page(paths, paper_w, paper_h)
+    # Typed text is drawn first so handwritten strokes layer on top of it,
+    # matching the device's compositing order.
+    svg = _svg_full_page(text_elements + paths, paper_w, paper_h)
     scale = FULL_PAGE_TARGET_LONG_EDGE / max(paper_w, paper_h)
     output_width = max(1, round(paper_w * scale))
     output_height = max(1, round(paper_h * scale))
