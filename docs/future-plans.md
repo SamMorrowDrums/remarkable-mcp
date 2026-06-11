@@ -6,7 +6,7 @@ This document outlines potential future features for remarkable-mcp. These are i
 
 ### Write Support ([#24](https://github.com/SamMorrowDrums/remarkable-mcp/issues/24))
 
-Currently, remarkable-mcp is read-only. Future versions may add:
+Write tools (upload, create folders, move, rename, delete) are now enabled by default — pass `--read-only` to disable them. Further ideas under consideration:
 
 - **Create documents** — Create new notebooks or upload PDFs
 - **Sync from Obsidian** — Push markdown notes to reMarkable as PDFs

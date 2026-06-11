@@ -29,8 +29,11 @@ Examples:
   # Register and get token (run once)
   uvx remarkable-mcp --register abcd1234
 
-  # Run as MCP server (cloud API)
+  # Run as MCP server (cloud API, write-enabled by default)
   uvx remarkable-mcp
+
+  # Run as a read-only server (no upload/mkdir/move/rename/delete)
+  uvx remarkable-mcp --read-only
 
   # Run with token from environment
   REMARKABLE_TOKEN="your-token" uvx remarkable-mcp
@@ -89,12 +92,22 @@ Security Note:
         action="store_true",
         help="Use USB web interface (connect via USB cable, enable in Storage Settings)",
     )
-    parser.add_argument(
+    write_group = parser.add_mutually_exclusive_group()
+    write_group.add_argument(
         "--write",
         action="store_true",
         help=(
-            "Enable write tools (upload, mkdir, move, rename, delete). "
-            "Cloud and SSH support all of them; USB web supports upload only."
+            "Deprecated no-op. Write tools (upload, mkdir, move, rename, delete) "
+            "are enabled by default, so this flag has no effect. Kept for backward "
+            "compatibility. Mutually exclusive with --read-only."
+        ),
+    )
+    write_group.add_argument(
+        "--read-only",
+        action="store_true",
+        help=(
+            "Disable all write tools (upload, mkdir, move, rename, delete) and "
+            "expose a read-only server. Mutually exclusive with --write."
         ),
     )
     parser.add_argument(
@@ -143,8 +156,8 @@ Security Note:
     elif args.usb:
         # USB web mode - set environment variable and run server
         os.environ["REMARKABLE_USE_USB_WEB"] = "1"
-        if args.write:
-            os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
+        if args.read_only:
+            os.environ["REMARKABLE_READ_ONLY"] = "1"
         if args.no_cloud_fallback:
             os.environ["REMARKABLE_DISABLE_CLOUD_FALLBACK"] = "1"
         from remarkable_mcp.server import run
@@ -155,17 +168,17 @@ Security Note:
         os.environ["REMARKABLE_USE_SSH"] = "1"
         if args.ssh_key:
             os.environ["REMARKABLE_SSH_KEY"] = args.ssh_key
-        if args.write:
-            os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
+        if args.read_only:
+            os.environ["REMARKABLE_READ_ONLY"] = "1"
         if args.no_cloud_fallback:
             os.environ["REMARKABLE_DISABLE_CLOUD_FALLBACK"] = "1"
         from remarkable_mcp.server import run
 
         run()
     else:
-        # Cloud mode (default) - now write-capable via the sync protocol
-        if args.write:
-            os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
+        # Cloud mode (default) - write-capable via the sync protocol
+        if args.read_only:
+            os.environ["REMARKABLE_READ_ONLY"] = "1"
         from remarkable_mcp.server import run
 
         run()

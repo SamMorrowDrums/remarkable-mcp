@@ -18,8 +18,9 @@ everywhere — the canvas is just inert UI metadata to clients that can't use it
 This phase is a **read-only** viewer (render + page navigation). Pen capture,
 local undo, and an explicit Save button that writes strokes back to the device
 are tracked as later, device-validated phases and are intentionally not wired
-here. Write-back, when it lands, will register through the existing ``--write``
-gate alongside the other write tools rather than introducing a new flag.
+here. Write-back, when it lands, will ride the existing write gate
+(``write_enabled()`` / ``--read-only``) alongside the other write tools rather
+than introducing a new flag.
 """
 
 import base64
