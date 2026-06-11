@@ -521,7 +521,11 @@ remarkable_author(
 # Append a blank, drawable page to the end of a notebook
 remarkable_author(method="add_page", document="Ideas")
 
-# Create a new notebook, optionally seeding the first page with typed text
+# Create a new (blank) notebook — the common case
+remarkable_author(method="create_document", name="Sketches")
+
+# Only seed typed text when explicitly requested. Typed text shows on the
+# device but not in the strokes-only canvas preview.
 remarkable_author(method="create_document", name="Meeting notes", text="Agenda\nFollow-ups")
 ```
 

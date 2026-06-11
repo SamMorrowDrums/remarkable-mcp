@@ -807,6 +807,10 @@ def _author_create_document(name: str, text: Optional[str], folder: Optional[str
         "transport": "ssh",
     }
     hint = f"Created notebook '{name}'. Call remarkable_canvas('{name}', 1) to view or draw on it."
+    if text:
+        hint += (
+            " Note: the typed text shows on the device but not in the strokes-only canvas preview."
+        )
     return make_response(result, hint)
 
 
@@ -855,9 +859,12 @@ def register_write_tools():
           notebooks support this (PDF/EPUB pages already exist).
 
         - method="create_document": requires `name`. Creates a new native notebook
-          in `folder` (default root). Pass `text` to seed the first page with typed
-          paragraphs (split on newlines); omit it for a blank page. Returns the new
-          document id and first-page geometry.
+          in `folder` (default root). Leave `text` EMPTY for a blank notebook —
+          that is the default and the correct choice. Only pass `text` when the
+          user EXPLICITLY asks for specific typed content; never invent a title,
+          placeholder, or "created by" line. (Typed text renders on the device but
+          not in the strokes-only canvas preview.) Returns the new document id and
+          first-page geometry.
 
         The interactive canvas calls this exact tool via the MCP Apps bridge,
         passing ui_submitted=true for draw (the human already chose Save). A model
@@ -873,7 +880,10 @@ def register_write_tools():
              "color": "black" | "yellow" | ...,
              "width": <optional float>, "thickness_scale": <optional float>}
         - name: Title of the new notebook (create_document).
-        - text: Optional text to seed the first page with (create_document).
+        - text: Optional typed text for the first page (create_document). Omit it
+            unless the user explicitly requested specific content; never fabricate
+            placeholder text. Paragraphs split on newlines. Note: typed text shows
+            on the device but not in the strokes-only canvas preview.
         - folder: Destination folder path (create_document; default "/").
         - ui_submitted: Set by the canvas app when the user clicked Save. Models omit it.
         </parameters>
@@ -881,8 +891,9 @@ def register_write_tools():
         - remarkable_author(method="draw", document="Ideas", page=1,
             strokes=[{"points": [[0.1,0.2],[0.8,0.2]], "tool": "highlighter", "color": "yellow"}])
         - remarkable_author(method="add_page", document="Ideas")
+        - remarkable_author(method="create_document", name="Sketches")
         - remarkable_author(method="create_document", name="Meeting notes",
-            text="Agenda\nFollow-ups")
+            text="Agenda\nFollow-ups")  # only when the user supplied that text
         </examples>
         """
 

@@ -4298,6 +4298,8 @@ class TestCanvasWrite:
             assert data["document"] == "My notes"
             assert data["total_pages"] == 1
             assert data["has_text"] is False
+            # Blank notebook: no typed-text render caveat in the hint.
+            assert "canvas preview" not in data["_hint"]
             uid = data["document_id"]
             assert uid in contents and uid in metas
             assert contents[uid]["fileType"] == "notebook"
@@ -4306,6 +4308,31 @@ class TestCanvasWrite:
             assert metas[uid]["type"] == "DocumentType"
             assert any(p.endswith(".rm") for p in writes)
             mock_restart.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_document_with_text_flags_render_caveat(self):
+        """Seeding text sets has_text and warns it won't show in the canvas preview."""
+        import remarkable_mcp.write_tools as wt
+
+        client = Mock(spec=["get_meta_items", "_scp_download", "_ssh_command"])
+        client.get_meta_items.return_value = []
+
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch.object(wt, "get_rmapi", lambda: client),
+            patch.object(wt, "_write_remote_bytes", lambda ssh, p, d: None),
+            patch.object(wt, "_write_content_file", lambda ssh, u, d: None),
+            patch.object(wt, "_write_metadata", lambda ssh, u, d: None),
+            patch.object(wt, "_restart_xochitl"),
+            patch.object(wt, "_invalidate_client_cache", lambda c: None),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_author",
+                {"method": "create_document", "name": "My notes", "text": "Agenda"},
+            )
+            data = json.loads(result[0][0].text)
+            assert data["has_text"] is True
+            assert "canvas preview" in data["_hint"]
 
     @pytest.mark.asyncio
     async def test_create_document_requires_name(self):
