@@ -110,9 +110,9 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Six read tools + always-on canvas + five write tools (write-on by default)."""
+        """Six read tools + always-on canvas + six write tools (write-on by default)."""
         tools = await mcp.list_tools()
-        assert len(tools) == 12, f"Expected 12 tools, got {len(tools)}"
+        assert len(tools) == 13, f"Expected 13 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -1133,7 +1133,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await mcp.list_tools()
 
-        assert len(tools) == 12
+        assert len(tools) == 13
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:
@@ -2588,6 +2588,7 @@ class TestWriteTools:
         tool_names = [tool.name for tool in tools]
 
         write_tool_names = [
+            "remarkable_canvas_write",
             "remarkable_upload",
             "remarkable_mkdir",
             "remarkable_move",
@@ -3829,3 +3830,206 @@ class TestCLIFlags:
         finally:
             if old is not None:
                 os.environ["REMARKABLE_READ_ONLY"] = old
+
+
+class TestCanvasWrite:
+    """Test the remarkable_canvas_write stroke write-back tool (SSH-first)."""
+
+    def _mock_doc(self):
+        doc = Mock()
+        doc.VissibleName = "Sketchbook"
+        doc.ID = "doc-abc"
+        doc.Parent = ""
+        doc.is_folder = False
+        doc.is_cloud_archived = False
+        return doc
+
+    @pytest.mark.asyncio
+    async def test_requires_ssh_transport(self):
+        """In cloud/USB mode the tool returns an educational unsupported_transport error."""
+        # Neither SSH nor USB env set -> cloud; canvas_write needs SSH.
+        old = os.environ.pop("REMARKABLE_USE_SSH", None)
+        try:
+            result = await mcp.call_tool(
+                "remarkable_canvas_write",
+                {
+                    "document": "Sketchbook",
+                    "page": 1,
+                    "strokes": [{"points": [[0.1, 0.2], [0.8, 0.2]], "tool": "fineliner"}],
+                },
+            )
+            data = json.loads(result[0][0].text)
+            assert data["_error"]["type"] == "unsupported_transport"
+        finally:
+            if old is not None:
+                os.environ["REMARKABLE_USE_SSH"] = old
+
+    @pytest.mark.asyncio
+    async def test_empty_strokes_rejected(self):
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            result = await mcp.call_tool(
+                "remarkable_canvas_write",
+                {"document": "Sketchbook", "page": 1, "strokes": []},
+            )
+            data = json.loads(result[0][0].text)
+            assert data["_error"]["type"] == "no_strokes"
+
+    @pytest.mark.asyncio
+    async def test_missing_page_layer_is_educational(self):
+        """A page with no existing .rm overlay returns a clear no_page_layer error."""
+        import remarkable_mcp.write_tools as wt
+
+        doc = self._mock_doc()
+        content = json.dumps({"cPages": {"pages": [{"id": "page-1"}]}, "fileType": "pdf"})
+
+        def fake_scp(path):
+            if path.endswith(".content"):
+                return content.encode()
+            return None  # page .rm absent
+
+        client = Mock(spec=["get_meta_items", "_scp_download", "_ssh_command"])
+        client.get_meta_items.return_value = [doc]
+        client._scp_download.side_effect = fake_scp
+
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch.object(wt, "get_rmapi", lambda: client),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_canvas_write",
+                {
+                    "document": "Sketchbook",
+                    "page": 1,
+                    "strokes": [{"points": [[0.1, 0.2], [0.8, 0.2]], "tool": "fineliner"}],
+                },
+            )
+            data = json.loads(result[0][0].text)
+            assert data["_error"]["type"] == "no_page_layer"
+
+    @pytest.mark.asyncio
+    async def test_happy_path_appends_and_backs_up(self):
+        """Strokes are appended, the pristine original is backed up once, xochitl restarts."""
+        import remarkable_mcp.strokes as strokes_mod
+        import remarkable_mcp.write_tools as wt
+
+        doc = self._mock_doc()
+        content = json.dumps(
+            {"cPages": {"pages": [{"id": "page-1"}, {"id": "page-2"}]}, "fileType": "notebook"}
+        )
+
+        def fake_scp(path):
+            if path.endswith(".content"):
+                return content.encode()
+            if path.endswith("/page-1.rm"):
+                return b"ORIGINAL_RM_BYTES"
+            return None
+
+        client = Mock(spec=["get_meta_items", "_scp_download", "_ssh_command"])
+        client.get_meta_items.return_value = [doc]
+        client._scp_download.side_effect = fake_scp
+        client._ssh_command.return_value = "no"  # .bak does not exist yet
+
+        writes = {}
+
+        def fake_write(ssh, remote_path, data):
+            writes[remote_path] = data
+
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch.object(wt, "get_rmapi", lambda: client),
+            patch.object(wt, "_write_remote_bytes", fake_write),
+            patch.object(wt, "_restart_xochitl") as mock_restart,
+            patch.object(
+                strokes_mod,
+                "page_geometry",
+                lambda b: {
+                    "paper_width": 1404,
+                    "paper_height": 1872,
+                    "has_scene_info": True,
+                    "has_layer": True,
+                },
+            ),
+            patch.object(
+                strokes_mod, "append_strokes", lambda original, strokes: original + b"NEW"
+            ),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_canvas_write",
+                {
+                    "document": "Sketchbook",
+                    "page": 1,
+                    "strokes": [
+                        {
+                            "points": [[0.1, 0.2], [0.8, 0.2]],
+                            "tool": "highlighter",
+                            "color": "yellow",
+                        }
+                    ],
+                    "ui_submitted": True,
+                },
+            )
+            data = json.loads(result[0][0].text)
+            assert data["written"] is True
+            assert data["page"] == 1
+            assert data["total_pages"] == 2
+            assert data["strokes_added"] == 1
+            assert data["paper_size"] == [1404, 1872]
+            assert data["ui_submitted"] is True
+            mock_restart.assert_called_once()
+            # Pristine original backed up, then the appended bytes written.
+            bak = f"{wt.XOCHITL_PATH}/doc-abc/page-1.rm.bak"
+            rm = f"{wt.XOCHITL_PATH}/doc-abc/page-1.rm"
+            assert writes[bak] == b"ORIGINAL_RM_BYTES"
+            assert writes[rm] == b"ORIGINAL_RM_BYTESNEW"
+
+    @pytest.mark.asyncio
+    async def test_epub_warns_about_reflow(self):
+        """Annotating a reflowable EPUB surfaces a drift caveat in the response."""
+        import remarkable_mcp.strokes as strokes_mod
+        import remarkable_mcp.write_tools as wt
+
+        doc = self._mock_doc()
+        content = json.dumps({"cPages": {"pages": [{"id": "page-1"}]}, "fileType": "epub"})
+
+        def fake_scp(path):
+            if path.endswith(".content"):
+                return content.encode()
+            if path.endswith("/page-1.rm"):
+                return b"ORIGINAL_RM_BYTES"
+            return None
+
+        client = Mock(spec=["get_meta_items", "_scp_download", "_ssh_command"])
+        client.get_meta_items.return_value = [doc]
+        client._scp_download.side_effect = fake_scp
+        client._ssh_command.return_value = "yes"  # .bak already exists
+
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch.object(wt, "get_rmapi", lambda: client),
+            patch.object(wt, "_write_remote_bytes", lambda *a: None),
+            patch.object(wt, "_restart_xochitl"),
+            patch.object(
+                strokes_mod,
+                "page_geometry",
+                lambda b: {
+                    "paper_width": 1404,
+                    "paper_height": 1872,
+                    "has_scene_info": True,
+                    "has_layer": True,
+                },
+            ),
+            patch.object(
+                strokes_mod, "append_strokes", lambda original, strokes: original + b"NEW"
+            ),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_canvas_write",
+                {
+                    "document": "Sketchbook",
+                    "page": 1,
+                    "strokes": [{"points": [[0.1, 0.2], [0.8, 0.2]], "tool": "highlighter"}],
+                },
+            )
+            data = json.loads(result[0][0].text)
+            assert data["written"] is True
+            assert "caveat" in data and "EPUB" in data["caveat"]
