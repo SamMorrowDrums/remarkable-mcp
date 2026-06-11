@@ -68,11 +68,12 @@ def _build_instructions() -> str:
     has_google_vision = bool(os.environ.get("GOOGLE_VISION_API_KEY"))
     ocr_backend = os.environ.get("REMARKABLE_OCR_BACKEND", "auto").lower()
 
-    write_mode = os.environ.get("REMARKABLE_ENABLE_WRITE", "").lower() in (
+    read_only_mode = os.environ.get("REMARKABLE_READ_ONLY", "").lower() in (
         "1",
         "true",
         "yes",
-    ) and (ssh_mode or usb_web_mode)
+    )
+    write_mode = not read_only_mode
 
     read_only_note = "" if write_mode else " All operations are read-only."
 
@@ -157,6 +158,7 @@ Write operations are enabled. These tools modify your tablet's filesystem:
 - **Delete is destructive** and immediate — the MCP client should confirm with the user first
 - After each write operation, the tablet UI restarts automatically
 - Use `remarkable_browse()` to verify changes after write operations
+- Run with `--read-only` to disable all write tools
 """
     elif usb_web_mode:
         if write_mode:
@@ -178,6 +180,24 @@ Connected via reMarkable Cloud API. Some features require SSH mode:
 - `content_type="raw"` parameter
 
 For faster access and raw files, consider SSH mode: `uvx remarkable-mcp --ssh`
+"""
+        if write_mode:
+            instructions += """
+## Write Tools (Active)
+
+Write operations are enabled (the default). These tools modify your cloud library
+and sync to all your devices:
+
+- `remarkable_upload(file_path, parent_folder, document_name)` - Upload a PDF/EPUB
+- `remarkable_mkdir(folder_name, parent)` - Create a folder
+- `remarkable_move(document, dest_folder)` - Move a document/folder
+- `remarkable_rename(document, new_name)` - Rename a document/folder
+- `remarkable_delete(document)` - Delete a document/folder (destructive)
+
+### Safety
+- **Delete is destructive** — the MCP client should confirm with the user first
+- Changes sync to your devices; use `remarkable_browse()` to verify them
+- Run with `--read-only` to disable all write tools
 """
 
     # Add OCR instructions based on configuration

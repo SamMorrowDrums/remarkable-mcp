@@ -180,7 +180,7 @@ AI assistants use the tools to read documents, search content, and more:
 
 ## Connection Modes
 
-All three modes share the same read, render, and upload tools. **Cloud and SSH additionally support full library management** — create folders, move, rename, and delete (with `--write`) — so capability is near-identical and you can genuinely pick whichever matches how your tablet is connected:
+All three modes share the same read, render, and upload tools. **Cloud and SSH additionally support full library management** — create folders, move, rename, and delete (all enabled by default) — so capability is near-identical and you can genuinely pick whichever matches how your tablet is connected:
 
 - **☁️ Cloud** — *device-free, works from anywhere.* Reads your library straight from reMarkable's cloud over Wi‑Fi with a Connect subscription — no cable, no developer mode. Full read/render plus full write (upload, create folder, move, rename, delete → trash). Parallel fetching and an on-disk blob cache make it fast after the first sync. Best for remote/headless setups or when you don't want to plug in.
 - **🔌 USB Web Interface** — *best when the tablet is plugged in.* Enable the web interface in Storage Settings — no subscription, no developer mode. Full read/render plus upload (to your root folder). The tablet's USB web firmware exposes no folder/move/rename/delete endpoints, so for those over a cable use SSH.
@@ -192,7 +192,7 @@ All three modes share the same read, render, and upload tools. **Cloud and SSH a
 | **🔌 USB Web** | Enable in Settings | Not required | ✅ | ✅ | ✅ PDF | ✅ (to root) | ❌ |
 | **⚡ SSH** | Developer mode | Not required | ✅ | ✅ | ✅ PDF/EPUB | ✅ | ✅ |
 
-¹ Folder ops = create folder / move / rename / delete. Upload and folder ops require the `--write` flag (off by default). Deletes move items to the trash and can prompt for confirmation when your client supports elicitation.
+¹ Folder ops = create folder / move / rename / delete. Upload and folder ops are enabled by default; pass `--read-only` to expose a read-only server. Deletes move items to the trash and can prompt for confirmation when your client supports elicitation.
 
 ### Automatic cloud fallback
 
@@ -243,7 +243,7 @@ Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remark
 | `remarkable_status` | Check connection status and the per-transport capability matrix |
 | `remarkable_image` | Get PNG/SVG images of pages (supports OCR via sampling) |
 
-These six tools are **read-only** and return structured JSON with hints for next actions. Opt-in **write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`) are also available with the `--write` flag — see [Write Tools](#write-tools-cloud-ssh--usb-web). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
+These six tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`) are enabled by default — pass `--read-only` to disable them — see [Write Tools](#write-tools-cloud-ssh--usb-web). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
 
 📖 **[Full Tools Documentation](docs/tools.md)**
 
@@ -416,8 +416,8 @@ When `REMARKABLE_OCR_BACKEND=auto` (default):
 | Offline | ✅ Yes | ✅ Yes | ❌ No |
 | Subscription | ✅ Not required | ✅ Not required | ❌ Connect required |
 | Raw files | ✅ PDFs, EPUBs | ✅ PDFs | ✅ PDFs, EPUBs |
-| Upload | ✅ With `--write` | ✅ With `--write` | ✅ With `--write` |
-| mkdir/move/rename/delete | ✅ With `--write` | ❌ | ✅ With `--write` |
+| Upload | ✅ (default) | ✅ (default) | ✅ (default) |
+| mkdir/move/rename/delete | ✅ (default) | ❌ | ✅ (default) |
 | Setup | Developer mode | Enable in Settings | One-time code |
 
 📖 **[SSH Setup Guide](docs/ssh-setup.md)**
@@ -426,7 +426,7 @@ When `REMARKABLE_OCR_BACKEND=auto` (default):
 
 ## Write Tools (Cloud, SSH & USB Web)
 
-Opt-in write tools let you upload, organize, and manage documents on your reMarkable. **Disabled by default** for safety. Cloud and SSH modes support the full set; USB web supports upload only (its firmware exposes no folder operations).
+Write tools let you upload, organize, and manage documents on your reMarkable. **Enabled by default.** Cloud and SSH modes support the full set; USB web supports upload only (its firmware exposes no folder operations). Pass `--read-only` to expose a read-only server.
 
 | Feature | Cloud Mode | SSH Mode | USB Web Mode |
 |---------|:----------:|:--------:|:------------:|
@@ -436,40 +436,28 @@ Opt-in write tools let you upload, organize, and manage documents on your reMark
 | Rename | ✅ | ✅ | ❌ |
 | Delete | ✅ (→ trash) | ✅ | ❌ |
 
-### Enabling Write Tools
+### Disabling Write Tools (read-only mode)
 
-Add the `--write` flag. It works in any mode (cloud is the default — no flag needed to select it):
+Write tools are on by default in every mode. To run a read-only server, add the `--read-only` flag:
 
 ```json
 {
   "servers": {
     "remarkable": {
       "command": "uvx",
-      "args": ["remarkable-mcp", "--write"]
+      "args": ["remarkable-mcp", "--read-only"]
     }
   }
 }
 ```
 
-For SSH or USB web, combine `--write` with the transport flag:
+It combines with any transport flag (`--ssh`, `--usb`):
 ```json
 {
   "servers": {
     "remarkable": {
       "command": "uvx",
-      "args": ["remarkable-mcp", "--ssh", "--write"]
-    }
-  }
-}
-```
-
-USB web mode (upload only):
-```json
-{
-  "servers": {
-    "remarkable": {
-      "command": "uvx",
-      "args": ["remarkable-mcp", "--usb", "--write"]
+      "args": ["remarkable-mcp", "--ssh", "--read-only"]
     }
   }
 }
@@ -479,10 +467,12 @@ Or set the environment variable:
 ```json
 {
   "env": {
-    "REMARKABLE_ENABLE_WRITE": "1"
+    "REMARKABLE_READ_ONLY": "1"
   }
 }
 ```
+
+> The legacy `--write` flag and `REMARKABLE_ENABLE_WRITE` variable are still accepted for backward compatibility but are now no-ops (write is the default). `--write` and `--read-only` are mutually exclusive.
 
 ### Available Write Tools
 
@@ -542,9 +532,9 @@ How it behaves:
 > **Note:** This phase is a **read-only** viewer (render + page navigation). Pen
 > capture, local undo, and an explicit Save button that writes annotations back
 > to the device are planned as later, device-validated phases; write-back will
-> ride the existing `--write` gate rather than adding a new flag. The iframe
-> bridge follows the MCP Apps spec but is best validated against your specific
-> client.
+> ride the existing write gate (on by default, `--read-only` to disable) rather
+> than adding a new flag. The iframe bridge follows the MCP Apps spec but is best
+> validated against your specific client.
 
 ---
 

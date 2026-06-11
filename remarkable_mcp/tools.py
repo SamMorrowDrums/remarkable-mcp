@@ -1297,7 +1297,8 @@ async def remarkable_status() -> str:
     - USB web: read, render, and upload (to root) only — the tablet's USB web
       interface firmware exposes no folder/move/rename/delete endpoints. For full
       write parity over a USB cable, use SSH mode pointed at the USB IP.
-    Write tools (upload/mkdir/move/rename/delete) require the --write flag.
+    Write tools (upload/mkdir/move/rename/delete) are enabled by default; run
+    with --read-only (or REMARKABLE_READ_ONLY=1) to expose a read-only server.
     </instructions>
     <examples>
     - remarkable_status()
@@ -1335,7 +1336,7 @@ async def remarkable_status() -> str:
         selected_transport = "cloud"
         connection_info = "environment variable" if REMARKABLE_TOKEN else "file (~/.rmapi)"
 
-    # What each transport is capable of (independent of whether --write is on).
+    # What each transport is capable of (independent of read-only mode).
     # read/render are always available; the booleans below are the write surface.
     capability_matrix = {
         "cloud": {
@@ -1395,7 +1396,7 @@ async def remarkable_status() -> str:
                 doc_count += 1
 
         # Effective capabilities for the active transport: write ops only count
-        # when the --write flag is enabled.
+        # when not in read-only mode.
         transport_caps = capability_matrix[transport]
         effective_caps = {
             cap: (supported if cap in ("read", "render") else supported and writes_on)
@@ -1439,7 +1440,10 @@ async def remarkable_status() -> str:
                     "Write is enabled: upload, mkdir, move, rename, and delete are available."
                 )
         else:
-            hint_parts.append("Read-only. Add the --write flag to enable write tools.")
+            hint_parts.append(
+                "Read-only mode is active (--read-only / REMARKABLE_READ_ONLY=1). "
+                "Restart without it to enable write tools."
+            )
         hint_parts.append(
             "Use remarkable_browse() to see your files, "
             "or remarkable_recent() for recent documents."

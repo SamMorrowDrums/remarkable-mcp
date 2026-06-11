@@ -1,10 +1,13 @@
 """
 Write tools for reMarkable tablet via cloud, SSH, or USB web interface.
 
-These tools are opt-in — disabled by default. Enable via:
-- CLI flag: remarkable-mcp --write  (works in the default cloud mode)
-            remarkable-mcp --ssh --write  (or --usb --write)
-- Environment variable: REMARKABLE_ENABLE_WRITE=1
+These tools are enabled by default. Disable them (expose a read-only server) via:
+- CLI flag: remarkable-mcp --read-only  (works in any transport)
+- Environment variable: REMARKABLE_READ_ONLY=1
+
+The legacy --write flag and REMARKABLE_ENABLE_WRITE variable are still accepted
+for backward compatibility but are now no-ops (write is the default). --write and
+--read-only are mutually exclusive.
 
 Write support by transport:
 - Cloud mode: upload, mkdir, move, rename, delete (-> trash)
@@ -49,29 +52,35 @@ RENAME_ANNOTATIONS = WRITE_ANNOTATIONS
 DELETE_ANNOTATIONS = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
 
 
-def write_enabled() -> bool:
-    """Check if write tools are enabled via environment variable."""
-    return os.environ.get("REMARKABLE_ENABLE_WRITE", "").lower() in (
+def read_only_enabled() -> bool:
+    """Check if read-only mode is enabled via the --read-only flag / env var."""
+    return os.environ.get("REMARKABLE_READ_ONLY", "").lower() in (
         "1",
         "true",
         "yes",
     )
 
 
+def write_enabled() -> bool:
+    """Write tools are enabled by default; disabled only in read-only mode."""
+    return not read_only_enabled()
+
+
 def _require_write_transport() -> Optional[str]:
     """Return an error string if writes are disabled, else None.
 
     Upload works in all three transports (cloud, SSH, USB web). Write tools are
-    only registered when REMARKABLE_ENABLE_WRITE is set, so this is mostly a
+    not registered when REMARKABLE_READ_ONLY is set, so this is mostly a
     defensive check that returns a clear error if writes are somehow disabled.
     """
     if not write_enabled():
         return make_error(
             error_type="write_disabled",
-            message="Write operations are disabled",
+            message="Write operations are disabled (read-only mode)",
             suggestion=(
-                "Enable write tools with the --write flag or REMARKABLE_ENABLE_WRITE=1.\n"
-                "Run with: remarkable-mcp --write  (cloud)  or  --ssh --write / --usb --write"
+                "Write tools are enabled by default. Remove the --read-only flag "
+                "(or unset REMARKABLE_READ_ONLY) and restart the server to enable "
+                "upload, mkdir, move, rename, and delete."
             ),
         )
     return None
@@ -114,7 +123,7 @@ def _require_managed_write_mode() -> Optional[str]:
         suggestion=(
             "mkdir, move, rename and delete work in cloud mode (the "
             "default) and SSH mode. Upload works in all three modes.\n"
-            "Run with: remarkable-mcp --write  (cloud)  or  --ssh --write"
+            "Run with: remarkable-mcp  (cloud)  or  remarkable-mcp --ssh"
         ),
     )
 
@@ -485,7 +494,7 @@ def register_write_tools():
         - USB web: uploaded via POST /upload; lands at the root (the firmware's
           upload endpoint has no folder or rename field)
 
-        Requires --write flag.
+        Requires write mode (the default; disabled with --read-only).
         </instructions>
         <parameters>
         - file_path: Absolute path to the local PDF or EPUB file
@@ -676,7 +685,7 @@ def register_write_tools():
             folder appears after xochitl restarts; in cloud mode it syncs to all
             your devices.
 
-            Works in cloud and SSH modes (requires --write). Not available over the
+            Works in cloud and SSH modes (default; --read-only disables). Not available over the
             USB web interface (the firmware exposes no folder-create endpoint).
             </instructions>
             <parameters>
@@ -767,7 +776,7 @@ def register_write_tools():
             Moves a document or folder by updating its parent reference in the metadata.
             Find the document name with remarkable_browse() first.
 
-            Works in cloud and SSH modes (requires --write). Not available over the
+            Works in cloud and SSH modes (default; --read-only disables). Not available over the
             USB web interface.
             </instructions>
             <parameters>
@@ -887,7 +896,7 @@ def register_write_tools():
             Changes the display name of a document or folder by updating its metadata.
             Find the document name with remarkable_browse() first.
 
-            Works in cloud and SSH modes (requires --write). Not available over the
+            Works in cloud and SSH modes (default; --read-only disables). Not available over the
             USB web interface.
             </instructions>
             <parameters>
@@ -972,7 +981,7 @@ def register_write_tools():
             (recoverable from the device's Trash). In SSH mode it is marked deleted
             in its metadata and disappears from the tablet UI after restart.
 
-            Works in cloud and SSH modes (requires --write). Not available over the
+            Works in cloud and SSH modes (default; --read-only disables). Not available over the
             USB web interface.
 
             If the client supports elicitation, this tool asks the user to confirm

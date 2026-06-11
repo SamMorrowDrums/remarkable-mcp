@@ -7,6 +7,7 @@ Tests the 4 intent-based tools using FastMCP's testing capabilities.
 
 import json
 import os
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -109,9 +110,9 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Six read-only tools plus the always-on interactive canvas app."""
+        """Six read tools + always-on canvas + five write tools (write-on by default)."""
         tools = await mcp.list_tools()
-        assert len(tools) == 7, f"Expected 7 tools, got {len(tools)}"
+        assert len(tools) == 12, f"Expected 12 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -1132,7 +1133,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await mcp.list_tools()
 
-        assert len(tools) == 7
+        assert len(tools) == 12
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:
@@ -2502,49 +2503,87 @@ class TestRetryBackoff:
 
 
 class TestWriteTools:
-    """Test write tools opt-in behavior and safety checks."""
+    """Test write tools default-on behavior, the read-only gate, and safety checks."""
 
-    def test_write_enabled_default_off(self):
-        """Test that write_enabled() returns False by default."""
-        from remarkable_mcp.write_tools import write_enabled
+    def test_write_enabled_default_on(self):
+        """write_enabled() is True by default (write is the default mode)."""
+        from remarkable_mcp.write_tools import read_only_enabled, write_enabled
 
-        # Ensure env var is not set
-        old = os.environ.pop("REMARKABLE_ENABLE_WRITE", None)
+        old = os.environ.pop("REMARKABLE_READ_ONLY", None)
         try:
-            assert write_enabled() is False
+            assert write_enabled() is True
+            assert read_only_enabled() is False
         finally:
             if old is not None:
-                os.environ["REMARKABLE_ENABLE_WRITE"] = old
+                os.environ["REMARKABLE_READ_ONLY"] = old
 
-    def test_write_enabled_with_env_var(self):
-        """Test that write_enabled() returns True with env var."""
+    def test_read_only_env_var_disables_write(self):
+        """REMARKABLE_READ_ONLY disables write tools; falsy/unset leaves them on."""
+        from remarkable_mcp.write_tools import read_only_enabled, write_enabled
+
+        old = os.environ.get("REMARKABLE_READ_ONLY")
+        try:
+            for truthy in ("1", "true", "yes"):
+                os.environ["REMARKABLE_READ_ONLY"] = truthy
+                assert write_enabled() is False, truthy
+                assert read_only_enabled() is True, truthy
+
+            for falsy in ("0", "", "no"):
+                os.environ["REMARKABLE_READ_ONLY"] = falsy
+                assert write_enabled() is True, falsy
+                assert read_only_enabled() is False, falsy
+        finally:
+            if old is not None:
+                os.environ["REMARKABLE_READ_ONLY"] = old
+            else:
+                os.environ.pop("REMARKABLE_READ_ONLY", None)
+
+    def test_legacy_write_env_var_is_noop(self):
+        """The legacy REMARKABLE_ENABLE_WRITE var no longer affects write_enabled()."""
         from remarkable_mcp.write_tools import write_enabled
 
-        old = os.environ.get("REMARKABLE_ENABLE_WRITE")
+        old_enable = os.environ.get("REMARKABLE_ENABLE_WRITE")
+        old_ro = os.environ.pop("REMARKABLE_READ_ONLY", None)
         try:
-            os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
-            assert write_enabled() is True
-
-            os.environ["REMARKABLE_ENABLE_WRITE"] = "true"
-            assert write_enabled() is True
-
-            os.environ["REMARKABLE_ENABLE_WRITE"] = "yes"
-            assert write_enabled() is True
-
+            # Even explicitly "disabling" via the legacy var keeps write on.
             os.environ["REMARKABLE_ENABLE_WRITE"] = "0"
-            assert write_enabled() is False
-
-            os.environ["REMARKABLE_ENABLE_WRITE"] = ""
+            assert write_enabled() is True
+            # Read-only still wins regardless of the legacy var.
+            os.environ["REMARKABLE_ENABLE_WRITE"] = "1"
+            os.environ["REMARKABLE_READ_ONLY"] = "1"
             assert write_enabled() is False
         finally:
-            if old is not None:
-                os.environ["REMARKABLE_ENABLE_WRITE"] = old
+            if old_enable is not None:
+                os.environ["REMARKABLE_ENABLE_WRITE"] = old_enable
             else:
                 os.environ.pop("REMARKABLE_ENABLE_WRITE", None)
+            os.environ.pop("REMARKABLE_READ_ONLY", None)
+            if old_ro is not None:
+                os.environ["REMARKABLE_READ_ONLY"] = old_ro
+
+    def test_read_only_blocks_write_transport(self):
+        """In read-only mode, _require_write_transport returns an educational error."""
+        import json
+
+        from remarkable_mcp.write_tools import _require_write_transport
+
+        old = os.environ.get("REMARKABLE_READ_ONLY")
+        try:
+            os.environ["REMARKABLE_READ_ONLY"] = "1"
+            err = _require_write_transport()
+            assert err is not None
+            payload = json.loads(err)
+            assert payload["_error"]["type"] == "write_disabled"
+            assert "--read-only" in payload["_error"]["suggestion"]
+        finally:
+            if old is not None:
+                os.environ["REMARKABLE_READ_ONLY"] = old
+            else:
+                os.environ.pop("REMARKABLE_READ_ONLY", None)
 
     @pytest.mark.asyncio
-    async def test_write_tools_not_registered_by_default(self):
-        """Test that write tools are NOT registered without --write flag."""
+    async def test_write_tools_registered_by_default(self):
+        """Write tools ARE registered by default (write-on); read-only would skip them."""
         tools = await mcp.list_tools()
         tool_names = [tool.name for tool in tools]
 
@@ -2557,13 +2596,13 @@ class TestWriteTools:
         ]
 
         for tool_name in write_tool_names:
-            assert tool_name not in tool_names, (
-                f"Write tool {tool_name} should not be registered without --write flag"
+            assert tool_name in tool_names, (
+                f"Write tool {tool_name} should be registered by default"
             )
 
     @pytest.mark.asyncio
     async def test_write_tools_registered_when_enabled(self):
-        """Test that write tools ARE registered with REMARKABLE_ENABLE_WRITE=1 in SSH mode."""
+        """Write tools register in SSH mode (default-on, re-registered explicitly here)."""
         from remarkable_mcp.write_tools import register_write_tools
 
         with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
@@ -2742,7 +2781,7 @@ class TestWriteTools:
 
         env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
         env.pop("REMARKABLE_USE_USB_WEB", None)
-        env["REMARKABLE_ENABLE_WRITE"] = "1"
+        env.pop("REMARKABLE_READ_ONLY", None)  # write is enabled by default
         with patch.dict(os.environ, env, clear=True):
             register_write_tools()
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
@@ -2815,7 +2854,7 @@ class TestCloudWriteDispatch:
     def _cloud_env(self):
         env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
         env.pop("REMARKABLE_USE_USB_WEB", None)
-        env["REMARKABLE_ENABLE_WRITE"] = "1"
+        env.pop("REMARKABLE_READ_ONLY", None)  # write is enabled by default
         return env
 
     def _make_item(self, doc_id, name, parent="", is_folder=False):
@@ -3680,3 +3719,56 @@ class TestCanvasRegisteredByDefault:
         result = await mcp.call_tool("remarkable_status", {})
         data = json.loads(result[0][0].text)
         assert "app_enabled" not in data
+
+
+# =============================================================================
+# Test CLI flag wiring (--write / --read-only)
+# =============================================================================
+
+
+class TestCLIFlags:
+    """CLI flag wiring for the write/read-only gate."""
+
+    def test_write_and_read_only_mutually_exclusive(self):
+        """Passing both --write and --read-only is an argparse error (exit 2)."""
+        from remarkable_mcp.cli import main
+
+        with patch.object(sys, "argv", ["remarkable-mcp", "--write", "--read-only"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
+
+    def test_read_only_flag_sets_env(self):
+        """--read-only sets REMARKABLE_READ_ONLY=1 before starting the server."""
+        from remarkable_mcp import cli
+
+        old = os.environ.pop("REMARKABLE_READ_ONLY", None)
+        try:
+            with (
+                patch.object(sys, "argv", ["remarkable-mcp", "--read-only"]),
+                patch("remarkable_mcp.server.run") as mock_run,
+            ):
+                cli.main()
+            mock_run.assert_called_once()
+            assert os.environ.get("REMARKABLE_READ_ONLY") == "1"
+        finally:
+            os.environ.pop("REMARKABLE_READ_ONLY", None)
+            if old is not None:
+                os.environ["REMARKABLE_READ_ONLY"] = old
+
+    def test_write_flag_is_accepted_noop(self):
+        """--write is accepted but does not enable read-only (write stays on)."""
+        from remarkable_mcp import cli
+
+        old = os.environ.pop("REMARKABLE_READ_ONLY", None)
+        try:
+            with (
+                patch.object(sys, "argv", ["remarkable-mcp", "--write"]),
+                patch("remarkable_mcp.server.run") as mock_run,
+            ):
+                cli.main()
+            mock_run.assert_called_once()
+            assert "REMARKABLE_READ_ONLY" not in os.environ
+        finally:
+            if old is not None:
+                os.environ["REMARKABLE_READ_ONLY"] = old

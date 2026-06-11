@@ -13,7 +13,7 @@ This document provides detailed documentation for all MCP tools provided by rema
 | [`remarkable_status`](#remarkable_status) | Check connection status |
 | [`remarkable_image`](#remarkable_image) | Get page images (PNG or SVG) |
 
-All tools are **read-only** and return structured JSON with hints for logical next actions.
+These core tools are **read-only** and return structured JSON with hints for logical next actions. Write tools (upload, mkdir, move, rename, delete) are enabled by default and documented in the [README](../README.md#write-tools-cloud-ssh--usb-web).
 
 ## Root Path Filtering
 
@@ -303,7 +303,7 @@ remarkable_status()
 | `transport` | `"cloud"`, `"ssh"`, or `"usb-web"` |
 | `connection` | Connection details |
 | `document_count` | Total documents in library (filtered by root if configured) |
-| `write_enabled` | Whether write tools are enabled (the `--write` flag) |
+| `write_enabled` | Whether write tools are enabled (the default; `false` only with `--read-only`) |
 | `capabilities` | Effective capabilities for the active transport (read/render/upload/mkdir/move/rename/delete) |
 | `capabilities_by_transport` | The full per-transport capability matrix |
 | `root_path` | Configured root path filter (only present if set) |

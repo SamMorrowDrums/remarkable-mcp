@@ -106,8 +106,8 @@ def organize_library_prompt() -> list:
                 "3. Identify any documents that might be misplaced or could be "
                 "better organized\n"
                 "4. Suggest a folder structure that would help me stay organized\n\n"
-                "Note: This server is read-only, so just provide recommendations - "
-                "I'll reorganize manually on my tablet."
+                "Note: Please just provide recommendations - I'll review them "
+                "before making any changes on my tablet."
             ),
         }
     ]
