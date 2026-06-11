@@ -65,9 +65,9 @@ DEFAULT_PAPER_SIZE = (1404, 1872)
 # Stroke defaults.
 DEFAULT_TOOL = "fineliner"
 DEFAULT_COLOR = "black"
-DEFAULT_WIDTH = 80
 DEFAULT_PRESSURE = 90
-DEFAULT_THICKNESS_SCALE = 1.0
+DEFAULT_WIDTH = 16
+DEFAULT_THICKNESS_SCALE = 2.0
 
 
 class StrokeError(ValueError):
@@ -112,6 +112,32 @@ def _color_aliases() -> dict[str, int]:
 
 PEN_IDS = _pen_aliases()
 COLOR_IDS = _color_aliases()
+
+
+# Per-tool brush values measured from real hand-drawn strokes on the device
+# (.rm files on a reMarkable Paper Pro): each pen stores a near-constant
+# Point.width plus a Line.thickness_scale. A flat default (e.g. width 80) renders
+# roughly 5x too thick versus a real fineliner, so synthesized strokes must use
+# the pen's own values to look identical to hand drawing. Maps Pen id ->
+# (point_width, thickness_scale).
+_TOOL_BRUSH: dict[int, tuple[int, float]] = {
+    int(Pen.FINELINER_2.value): (16, 2.0),
+    int(Pen.FINELINER_1.value): (16, 2.0),
+    int(Pen.BALLPOINT_2.value): (12, 2.0),
+    int(Pen.BALLPOINT_1.value): (12, 2.0),
+    int(Pen.CALIGRAPHY.value): (9, 2.2),
+    int(Pen.HIGHLIGHTER_2.value): (30, 2.0),
+    int(Pen.HIGHLIGHTER_1.value): (30, 2.0),
+}
+
+
+def tool_brush(tool_id: int) -> tuple[int, float]:
+    """Return the (point_width, thickness_scale) a given pen renders with.
+
+    Falls back to the generic fineliner-ish default for pens we have not
+    measured, so any tool still produces a sensibly thin stroke.
+    """
+    return _TOOL_BRUSH.get(int(tool_id), (DEFAULT_WIDTH, DEFAULT_THICKNESS_SCALE))
 
 
 def resolve_tool(tool) -> int:
@@ -270,7 +296,12 @@ def build_line_block(
     if len(raw_points) < 1:
         raise StrokeError("A stroke needs at least one point.")
 
+    tool_id = resolve_tool(stroke.get("tool"))
+    base_width, base_scale = tool_brush(tool_id)
+
     width = stroke.get("width")
+    if width is None:
+        width = base_width
     pts: list[Point] = []
     for rp in raw_points:
         if len(rp) >= 3:
@@ -281,9 +312,9 @@ def build_line_block(
 
     line = Line(
         color=PenColor(resolve_color(stroke.get("color"))),
-        tool=Pen(resolve_tool(stroke.get("tool"))),
+        tool=Pen(tool_id),
         points=pts,
-        thickness_scale=float(stroke.get("thickness_scale") or DEFAULT_THICKNESS_SCALE),
+        thickness_scale=float(stroke.get("thickness_scale") or base_scale),
         starting_length=0.0,
         move_id=None,
     )

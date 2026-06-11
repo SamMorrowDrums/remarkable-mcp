@@ -56,7 +56,7 @@ _CANVAS_HTML = """<!doctype html>
 <title>reMarkable Canvas</title>
 <style>
   :root { color-scheme: light dark; }
-  html, body { margin: 0; height: 100%; }
+  html, body { margin: 0; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     display: flex; flex-direction: column; background: #1e1e1e; color: #e8e8e8;
@@ -64,6 +64,7 @@ _CANVAS_HTML = """<!doctype html>
   header {
     display: flex; align-items: center; gap: .5rem; padding: .5rem .75rem;
     border-bottom: 1px solid rgba(255,255,255,.12); flex: 0 0 auto;
+    position: sticky; top: 0; background: #1e1e1e; z-index: 2; flex-wrap: wrap;
   }
   header .title { font-weight: 600; flex: 1 1 auto; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
@@ -73,9 +74,9 @@ _CANVAS_HTML = """<!doctype html>
   }
   button:disabled { opacity: .4; cursor: default; }
   .pageinfo { font-variant-numeric: tabular-nums; min-width: 5rem; text-align: center; }
-  main { flex: 1 1 auto; overflow: auto; display: flex; align-items: flex-start;
+  main { flex: 1 1 auto; display: flex; align-items: flex-start;
     justify-content: center; padding: 1rem; }
-  img { max-width: 100%; height: auto; background: #fbfbfb;
+  img { display: block; max-width: 100%; height: auto; background: #fbfbfb;
     box-shadow: 0 1px 8px rgba(0,0,0,.4); border-radius: 2px; }
   .status { padding: 1rem; opacity: .8; }
   .stage { position: relative; display: inline-block; line-height: 0; }
@@ -201,7 +202,23 @@ _CANVAS_HTML = """<!doctype html>
     notifySize();
   }
   function notifySize() {
-    var h = document.body.scrollHeight, w = document.body.scrollWidth;
+    // Report an explicit height derived from the host-given width and the
+    // page image's natural aspect ratio. Using document.body.scrollHeight is
+    // circular here (the image is max-width:100%, so its height depends on the
+    // width the host gives us, which the host is in turn deriving from our
+    // reported height) and collapses the view to a thin strip in some hosts.
+    var w = document.body.scrollWidth || document.documentElement.clientWidth;
+    var h = document.body.scrollHeight;
+    var img = state.img;
+    if (img && img.naturalWidth && img.naturalHeight) {
+      var head = document.querySelector("header");
+      var foot = document.getElementById("footer");
+      var chrome = (head ? head.offsetHeight : 0) + (foot ? foot.offsetHeight : 0);
+      var availW = Math.max(80, (document.body.clientWidth || w) - 32); // main padding
+      var dispW = Math.min(availW, img.naturalWidth);
+      var dispH = img.naturalHeight * (dispW / img.naturalWidth);
+      h = Math.ceil(chrome + dispH + 32);
+    }
     notify("ui/notifications/size-changed", { width: w, height: h });
   }
   function updateDisplayModeButton() {
@@ -453,7 +470,7 @@ _CANVAS_HTML = """<!doctype html>
     }
   });
 
-  window.addEventListener("resize", function () { sizeOverlay(); redrawOverlay(); });
+  window.addEventListener("resize", function () { sizeOverlay(); redrawOverlay(); notifySize(); });
 
   // Handshake: announce the app (with protocol version + client info, as the
   // spec requires) and the display modes it can use, then signal that we are
