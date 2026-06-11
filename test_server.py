@@ -101,6 +101,7 @@ class TestMCPServerInitialization:
             "remarkable_search",
             "remarkable_status",
             "remarkable_image",
+            "remarkable_canvas",
         ]
 
         for tool_name in expected_tools:
@@ -108,9 +109,9 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Test that we have exactly 6 intent-based tools."""
+        """Six read-only tools plus the always-on interactive canvas app."""
         tools = await mcp.list_tools()
-        assert len(tools) == 6, f"Expected 6 tools, got {len(tools)}"
+        assert len(tools) == 7, f"Expected 7 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -1131,7 +1132,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await mcp.list_tools()
 
-        assert len(tools) == 6
+        assert len(tools) == 7
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:
@@ -3436,30 +3437,6 @@ def _ctx_with_extensions(extensions):
     return ctx
 
 
-class TestAppEnabled:
-    """Test the --app / REMARKABLE_ENABLE_APP gate."""
-
-    def test_app_disabled_by_default(self, monkeypatch):
-        from remarkable_mcp.app_canvas import app_enabled
-
-        monkeypatch.delenv("REMARKABLE_ENABLE_APP", raising=False)
-        assert app_enabled() is False
-
-    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "Yes"])
-    def test_app_enabled_truthy(self, monkeypatch, value):
-        from remarkable_mcp.app_canvas import app_enabled
-
-        monkeypatch.setenv("REMARKABLE_ENABLE_APP", value)
-        assert app_enabled() is True
-
-    @pytest.mark.parametrize("value", ["0", "false", "no", ""])
-    def test_app_enabled_falsy(self, monkeypatch, value):
-        from remarkable_mcp.app_canvas import app_enabled
-
-        monkeypatch.setenv("REMARKABLE_ENABLE_APP", value)
-        assert app_enabled() is False
-
-
 class TestClientSupportsApps:
     """Test MCP Apps UI capability negotiation."""
 
@@ -3655,17 +3632,28 @@ class TestRegisterAppTools:
             app_canvas.mcp = original
 
 
-class TestStatusReportsApp:
-    """remarkable_status reports whether the app is enabled."""
+class TestCanvasRegisteredByDefault:
+    """The canvas app is always registered (no feature flag) and degrades gracefully."""
+
+    @pytest.mark.asyncio
+    async def test_canvas_tool_present_on_default_server(self):
+        tools = await mcp.list_tools()
+        names = [t.name for t in tools]
+        assert "remarkable_canvas" in names
+
+    @pytest.mark.asyncio
+    async def test_canvas_resource_present_on_default_server(self):
+        resources = await mcp.list_resources()
+        assert any(str(r.uri) == "ui://remarkable/canvas" for r in resources)
 
     @pytest.mark.asyncio
     @patch("remarkable_mcp.tools.get_rmapi")
-    async def test_status_includes_app_enabled(self, mock_get_rmapi, monkeypatch):
-        monkeypatch.setenv("REMARKABLE_ENABLE_APP", "1")
+    async def test_status_no_longer_reports_app_enabled(self, mock_get_rmapi):
+        # The app has no on/off gate anymore, so status should not carry the key.
         mock_client = Mock()
         mock_get_rmapi.return_value = mock_client
         mock_client.get_meta_items.return_value = []
 
         result = await mcp.call_tool("remarkable_status", {})
         data = json.loads(result[0][0].text)
-        assert data["app_enabled"] is True
+        assert "app_enabled" not in data

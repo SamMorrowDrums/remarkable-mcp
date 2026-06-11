@@ -1,28 +1,29 @@
 """
 Interactive MCP App canvas for reMarkable documents (SEP-1865 "MCP Apps").
 
-This is opt-in and disabled by default. Enable via:
-- CLI flag: remarkable-mcp --app  (works in any transport)
-- Environment variable: REMARKABLE_ENABLE_APP=1
-
-When enabled, the server registers:
+The server always registers:
 - An HTML app resource at ``ui://remarkable/canvas`` (MIME
   ``text/html;profile=mcp-app``) that the client renders in a sandboxed iframe.
 - A ``remarkable_canvas`` tool whose ``_meta.ui.resourceUri`` points at that
   resource, so app-capable clients open the viewer and feed it page data over
   the MCP Apps postMessage bridge.
 
+There is no separate feature flag: the MCP Apps capability is negotiated at the
+``initialize`` handshake. Clients that advertise the
+``io.modelcontextprotocol/ui`` extension render the interactive canvas; clients
+that don't simply ignore ``_meta.ui``/``ui://`` and receive the rendered page as
+an embedded image. The tool therefore degrades gracefully and is useful
+everywhere — the canvas is just inert UI metadata to clients that can't use it.
+
 This phase is a **read-only** viewer (render + page navigation). Pen capture,
 local undo, and an explicit Save button that writes strokes back to the device
 are tracked as later, device-validated phases and are intentionally not wired
-here. The tool degrades gracefully: clients that do not advertise the MCP Apps
-UI extension still receive the rendered page as an embedded image, so it is
-useful everywhere.
+here. Write-back, when it lands, will register through the existing ``--write``
+gate alongside the other write tools rather than introducing a new flag.
 """
 
 import base64
 import logging
-import os
 from typing import Optional
 
 from mcp import types
@@ -38,15 +39,6 @@ CANVAS_RESOURCE_URI = "ui://remarkable/canvas"
 
 # Read-only viewer annotations (no device mutation in this phase).
 CANVAS_ANNOTATIONS = types.ToolAnnotations(readOnlyHint=True, openWorldHint=False)
-
-
-def app_enabled() -> bool:
-    """Check if the interactive MCP App canvas is enabled."""
-    return os.environ.get("REMARKABLE_ENABLE_APP", "").lower() in (
-        "1",
-        "true",
-        "yes",
-    )
 
 
 # The canvas app: a self-contained, dependency-free HTML/JS surface that speaks
