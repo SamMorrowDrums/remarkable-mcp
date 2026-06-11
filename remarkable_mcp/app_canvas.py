@@ -30,7 +30,6 @@ from mcp import types
 from mcp.server.fastmcp import Context
 
 from remarkable_mcp.capabilities import APP_UI_MIME, client_supports_apps
-from remarkable_mcp.server import mcp
 
 logger = logging.getLogger(__name__)
 
@@ -188,15 +187,30 @@ _CANVAS_HTML = """<!doctype html>
       }
       return;
     }
-    if (msg.method === "ui/notifications/tool-result" ||
-        msg.method === "ui/notifications/tool-input") {
+    // Input/result asymmetry (per the MCP Apps spec): tool-input params are
+    // wrapped as { arguments: {...} } (the document/page the tool was called
+    // with), while tool-result params are a bare CallToolResult carrying the
+    // rendered page in structuredContent. Handle them separately.
+    if (msg.method === "ui/notifications/tool-input" ||
+        msg.method === "ui/notifications/tool-input-partial") {
+      var args = (msg.params && msg.params.arguments) || {};
+      if (args.document) state.document = args.document;
+      if (args.page) state.page = args.page;
+      return;
+    }
+    if (msg.method === "ui/notifications/tool-result") {
       render(digOut(msg.params) || {});
+      return;
     }
   });
 
-  // Handshake: announce the app and the display modes it can use, then signal
-  // that we are ready to receive tool input/results.
+  // Handshake: announce the app (with protocol version + client info, as the
+  // spec requires) and the display modes it can use, then signal that we are
+  // ready to receive tool input/results.
   rpc("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    capabilities: {},
+    clientInfo: { name: "remarkable-canvas", version: "1" },
     appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
   }).then(function (res) {
     notify("ui/notifications/initialized", {});
@@ -396,7 +410,14 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
 
 
 def register_app_tools():
-    """Register the interactive canvas app resource and tool with the server."""
+    """Register the interactive canvas app resource and tool with the server.
+
+    ``mcp`` is imported here rather than at module load so that importing
+    ``app_canvas`` never triggers ``server`` (which imports this module and
+    registers these tools). That avoids a circular import when ``app_canvas``
+    happens to be imported before ``server``.
+    """
+    from remarkable_mcp.server import mcp
 
     @mcp.resource(CANVAS_RESOURCE_URI, mime_type=APP_UI_MIME)
     def remarkable_canvas_ui() -> str:
