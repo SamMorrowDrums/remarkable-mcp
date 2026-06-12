@@ -695,6 +695,20 @@ uv run pytest test_server.py -v
 
 📖 **[Development Guide](docs/development.md)**
 
+### Multi-transport smoke test
+
+When something looks broken, run the deterministic, no-AI smoke test first. It
+drives the real server over MCP and exercises every available tool in every
+reachable transport (cloud → usb-web → ssh):
+
+```bash
+uv run python smoke/run_smoke.py            # all available modes
+uv run python smoke/run_smoke.py --read-only # connectivity + reads only
+```
+
+📖 **[smoke/README.md](smoke/README.md)** — what PASS / N/A / SKIP / FAIL mean
+and per-mode expectations.
+
 ---
 
 ## License

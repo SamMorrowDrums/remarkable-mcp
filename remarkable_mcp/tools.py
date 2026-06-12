@@ -46,6 +46,7 @@ from remarkable_mcp.extract import (
     render_merged_page_from_document_zip,
     render_page_from_document_zip,
     render_page_from_document_zip_svg,
+    render_page_full_page_from_document_zip,
     render_tablet_pdf_page_to_png,
 )
 from remarkable_mcp.responses import make_error, make_response
@@ -1755,6 +1756,22 @@ async def remarkable_image(
                             render_tablet_pdf_page_to_png, pdf_bytes, page
                         )
                         rendered_via_pdf = png_data is not None
+
+                # Blank-page fallback: the stroke renderer returns None for a
+                # notebook page with no drawable strokes (e.g. a freshly-created
+                # or blank page). The interactive canvas already renders such
+                # pages full-bleed at their own paper size; do the same here so a
+                # blank page yields a blank image instead of render_failed,
+                # keeping remarkable_image consistent with remarkable_canvas.
+                if png_data is None:
+                    full = await run_blocking(
+                        render_page_full_page_from_document_zip,
+                        tmp_path,
+                        page,
+                        background_color=background,
+                    )
+                    if full is not None:
+                        png_data = full[0]
 
                 if png_data is None:
                     return make_error(

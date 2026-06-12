@@ -110,9 +110,13 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Six read tools + always-on canvas + six write tools (write-on by default)."""
+        """Cloud default: 6 read tools + always-on canvas + 5 write tools.
+
+        ``remarkable_author`` is SSH-only and therefore hidden in cloud mode, so
+        the default (cloud) surface is 12 tools, not 13.
+        """
         tools = await mcp.list_tools()
-        assert len(tools) == 13, f"Expected 13 tools, got {len(tools)}"
+        assert len(tools) == 12, f"Expected 12 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -1026,6 +1030,7 @@ class TestRenderTabletPdfFallback:
         mock_download_raw.assert_called_once()
 
     @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.render_page_full_page_from_document_zip")
     @patch("remarkable_mcp.tools.download_raw_file")
     @patch("remarkable_mcp.tools.render_page_from_document_zip")
     @patch("remarkable_mcp.tools.get_document_page_count")
@@ -1036,9 +1041,10 @@ class TestRenderTabletPdfFallback:
         mock_page_count,
         mock_render,
         mock_download_raw,
+        mock_full,
         mock_document,
     ):
-        """With no local render and no tablet PDF (e.g. cloud), report render_failed."""
+        """With no local render, no tablet PDF, and no blank-page render, report render_failed."""
         mock_client = Mock()
         mock_get_rmapi.return_value = mock_client
         mock_document.is_folder = False
@@ -1047,6 +1053,7 @@ class TestRenderTabletPdfFallback:
         mock_page_count.return_value = 1
         mock_render.return_value = None
         mock_download_raw.return_value = None  # cloud: no native export
+        mock_full.return_value = None  # full-page blank render also unavailable
 
         with patch("tempfile.NamedTemporaryFile") as mock_tmpfile:
             mock_tmp = Mock()
@@ -1066,6 +1073,55 @@ class TestRenderTabletPdfFallback:
         suggestion = data["_error"]["suggestion"].lower()
         assert "v5" not in suggestion
         assert "cairo" in suggestion or "native pdf" in suggestion
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.render_page_full_page_from_document_zip")
+    @patch("remarkable_mcp.tools.download_raw_file")
+    @patch("remarkable_mcp.tools.render_page_from_document_zip")
+    @patch("remarkable_mcp.tools.get_document_page_count")
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_image_falls_back_to_blank_full_page(
+        self,
+        mock_get_rmapi,
+        mock_page_count,
+        mock_render,
+        mock_download_raw,
+        mock_full,
+        mock_document,
+    ):
+        """A strokeless notebook page renders as a blank page (matches the canvas).
+
+        When the stroke renderer returns None and there is no PDF underlay (a
+        notebook), remarkable_image falls back to the full-page renderer used by
+        remarkable_canvas so a blank/freshly-created page yields a blank image
+        instead of render_failed.
+        """
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_document.is_folder = False
+        mock_client.get_meta_items.return_value = [mock_document]
+        mock_client.download.return_value = b"fake zip"
+        mock_page_count.return_value = 1
+        mock_render.return_value = None  # no strokes -> stroke renderer None
+        mock_download_raw.return_value = None  # notebook -> no PDF underlay
+        mock_full.return_value = (b"\x89PNG-blank-page", (1404.0, 1872.0))
+
+        with patch("tempfile.NamedTemporaryFile") as mock_tmpfile:
+            mock_tmp = Mock()
+            mock_tmp.__enter__ = Mock(return_value=mock_tmp)
+            mock_tmp.__exit__ = Mock(return_value=False)
+            mock_tmp.name = "/tmp/test.zip"
+            mock_tmpfile.return_value = mock_tmp
+            with patch("pathlib.Path.unlink"):
+                result = await mcp.call_tool(
+                    "remarkable_image",
+                    {"document": "Test Document", "page": 1, "compatibility": True},
+                )
+
+        data = json.loads(result[0].text)
+        assert "_error" not in data
+        assert data.get("image_base64")
+        mock_full.assert_called_once()
 
 
 # =============================================================================
@@ -1133,7 +1189,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await mcp.list_tools()
 
-        assert len(tools) == 13
+        assert len(tools) == 12
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:
@@ -2583,12 +2639,16 @@ class TestWriteTools:
 
     @pytest.mark.asyncio
     async def test_write_tools_registered_by_default(self):
-        """Write tools ARE registered by default (write-on); read-only would skip them."""
+        """Write tools ARE registered by default (write-on); read-only would skip them.
+
+        ``remarkable_author`` is intentionally excluded here: it is SSH-only and
+        therefore hidden in cloud mode (the mode these tests import). See
+        ``test_author_only_registered_in_ssh_mode`` for its gating.
+        """
         tools = await mcp.list_tools()
         tool_names = [tool.name for tool in tools]
 
         write_tool_names = [
-            "remarkable_author",
             "remarkable_upload",
             "remarkable_mkdir",
             "remarkable_move",
@@ -2600,6 +2660,9 @@ class TestWriteTools:
             assert tool_name in tool_names, (
                 f"Write tool {tool_name} should be registered by default"
             )
+        assert "remarkable_author" not in tool_names, (
+            "remarkable_author is SSH-only and must be hidden in cloud mode"
+        )
 
     @pytest.mark.asyncio
     async def test_write_tools_registered_when_enabled(self):
@@ -2850,6 +2913,55 @@ class TestWriteTools:
                     "remarkable_delete",
                 ]:
                     mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
+    async def test_author_only_registered_in_ssh_mode(self):
+        """remarkable_author is SSH-only: present in SSH, hidden in cloud and USB web.
+
+        Native ink/notebook authoring has no cloud/USB-web write-back path yet, so
+        rather than registering the tool everywhere and erroring at call time we
+        only expose it in SSH mode.
+        """
+        from remarkable_mcp.write_tools import register_write_tools
+
+        # SSH mode -> author present.
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+            try:
+                names = {t.name for t in await mcp.list_tools()}
+                assert "remarkable_author" in names
+            finally:
+                mcp._tool_manager._tools.pop("remarkable_author", None)
+
+        # Cloud mode -> author hidden.
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env.pop("REMARKABLE_USE_USB_WEB", None)
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            try:
+                names = {t.name for t in await mcp.list_tools()}
+                assert "remarkable_author" not in names
+            finally:
+                for name in [
+                    "remarkable_author",
+                    "remarkable_upload",
+                    "remarkable_mkdir",
+                    "remarkable_move",
+                    "remarkable_rename",
+                    "remarkable_delete",
+                ]:
+                    mcp._tool_manager._tools.pop(name, None)
+
+        # USB web mode -> author hidden.
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env["REMARKABLE_USE_USB_WEB"] = "1"
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            try:
+                names = {t.name for t in await mcp.list_tools()}
+                assert "remarkable_author" not in names
+            finally:
+                mcp._tool_manager._tools.pop("remarkable_author", None)
 
 
 class TestCloudWriteDispatch:
@@ -4007,6 +4119,22 @@ class TestCLIFlags:
 class TestCanvasWrite:
     """Test the remarkable_author tool (method="draw" stroke write-back, SSH-first)."""
 
+    @pytest.fixture(autouse=True)
+    def _register_author(self):
+        """Expose remarkable_author for these tests.
+
+        The tool is SSH-only and therefore hidden in the default (cloud) import
+        mode, so register it explicitly under SSH, then remove it afterward to
+        restore the default surface. Individual tests still patch
+        REMARKABLE_USE_SSH at call time so the impl runs in SSH mode.
+        """
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+        yield
+        mcp._tool_manager._tools.pop("remarkable_author", None)
+
     def _mock_doc(self):
         doc = Mock()
         doc.VissibleName = "Sketchbook"
@@ -4015,27 +4143,6 @@ class TestCanvasWrite:
         doc.is_folder = False
         doc.is_cloud_archived = False
         return doc
-
-    @pytest.mark.asyncio
-    async def test_requires_ssh_transport(self):
-        """In cloud/USB mode the tool returns an educational unsupported_transport error."""
-        # Neither SSH nor USB env set -> cloud; draw needs SSH.
-        old = os.environ.pop("REMARKABLE_USE_SSH", None)
-        try:
-            result = await mcp.call_tool(
-                "remarkable_author",
-                {
-                    "method": "draw",
-                    "document": "Sketchbook",
-                    "page": 1,
-                    "strokes": [{"points": [[0.1, 0.2], [0.8, 0.2]], "tool": "fineliner"}],
-                },
-            )
-            data = json.loads(result[0][0].text)
-            assert data["_error"]["type"] == "unsupported_transport"
-        finally:
-            if old is not None:
-                os.environ["REMARKABLE_USE_SSH"] = old
 
     @pytest.mark.asyncio
     async def test_empty_strokes_rejected(self):

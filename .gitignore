@@ -75,3 +75,6 @@ Thumbs.db
 *.zip
 RESEARCH_NOTES.md
 BLOG_DRAFT.md
+
+# Smoke-test run artifacts (regenerated on every run)
+smoke/snapshots/
