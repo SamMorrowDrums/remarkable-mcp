@@ -3969,6 +3969,51 @@ class TestFullPageRender:
         finally:
             rm_path.unlink(missing_ok=True)
 
+    def test_typed_text_metrics_scale_with_page_height(self):
+        """Layout metrics scale linearly with the page's normalized height so
+        typed text stays proportional on non-1872 geometries (e.g. reMarkable
+        Move/classic). run_smoke only asserts render PASS/FAIL, not pixel
+        layout, so this is the guard against a scaling regression."""
+        import re
+        from unittest.mock import patch
+
+        from remarkable_mcp import extract
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import _v6_blocks, _v6_text_svg_elements
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            # Two paragraphs so the line-to-line gap isolates the scaled
+            # line_height independent of the (unscaled) text-box position.
+            rm_tmp.write(nb.page_rm_bytes("First line\nSecond line"))
+            rm_path = Path(rm_tmp.name)
+        try:
+            blocks = _v6_blocks(rm_path)
+            width, _ = extract._v6_paper_size(blocks)
+
+            def metrics_at(page_h):
+                with patch.object(extract, "_v6_paper_size", return_value=(width, page_h)):
+                    els = _v6_text_svg_elements(blocks)
+                y0 = float(re.search(r'y="([-\d.]+)"', els[0]).group(1))
+                y1 = float(re.search(r'y="([-\d.]+)"', els[1]).group(1))
+                size = float(re.search(r'font-size="([-\d.]+)"', els[0]).group(1))
+                return y1 - y0, size
+
+            # Reference 1872-tall page: full-size metrics.
+            gap_ref, size_ref = metrics_at(extract._TEXT_REF_PAGE_HEIGHT)
+            assert gap_ref == pytest.approx(extract._TEXT_DEFAULT_LINE_HEIGHT, abs=0.5)
+            assert size_ref == pytest.approx(extract._TEXT_DEFAULT_FONT_SIZE, abs=0.5)
+
+            # Half / double height -> metrics scale linearly.
+            gap_half, size_half = metrics_at(extract._TEXT_REF_PAGE_HEIGHT / 2)
+            assert gap_half == pytest.approx(gap_ref / 2, abs=0.5)
+            assert size_half == pytest.approx(size_ref / 2, abs=0.5)
+
+            gap_dbl, size_dbl = metrics_at(extract._TEXT_REF_PAGE_HEIGHT * 2)
+            assert gap_dbl == pytest.approx(gap_ref * 2, abs=0.5)
+            assert size_dbl == pytest.approx(size_ref * 2, abs=0.5)
+        finally:
+            rm_path.unlink(missing_ok=True)
+
 
 class TestRenderCanvasPage:
     """Test the read-only canvas page renderer."""
