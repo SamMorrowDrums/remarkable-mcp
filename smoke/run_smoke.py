@@ -59,6 +59,11 @@ from mcp.client.stdio import stdio_client
 HERE = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
 FIXTURE_PDF = HERE / "fixtures" / "smoke-doc.pdf"
+# A known string embedded in the fixture PDF's text layer. The upload round-trip
+# reads the freshly-uploaded document back and asserts this marker survived, so a
+# "PASS" on upload means the bytes are actually retrievable -- not just that the
+# upload call returned without error.
+FIXTURE_MARKER = "reMarkable MCP Smoke Test"
 SNAP_DIR = HERE / "snapshots"
 USB_HOST = "10.11.99.1"
 
@@ -277,6 +282,31 @@ def _detail_for(tool, payload):
     return None
 
 
+async def verify_upload_roundtrip(session, doc_path):
+    """Read a just-uploaded fixture back and confirm its known text survived.
+
+    Returns ``(ok, note)``. This makes the upload check end-to-end: the cloud
+    client invalidates its in-memory document cache on every root commit and
+    blobs are content-addressed (immutable), so a managed upload is readable in
+    the same session with no eventual-consistency window to wait on.
+    """
+    payload, is_err, exc = await call_tool(
+        session,
+        "remarkable_read",
+        {"document": doc_path, "content_type": "raw", "page": 1},
+        TIMEOUTS["_default"],
+    )
+    if exc:
+        return False, f"read-back errored: {exc}"
+    err_type = _error_type(payload)
+    if err_type:
+        return False, f"read-back error: {err_type}"
+    content = payload.get("content", "") if isinstance(payload, dict) else ""
+    if FIXTURE_MARKER in content:
+        return True, "round-trip OK (read-back content matched)"
+    return False, "read-back found the doc but its known text was missing/garbled"
+
+
 async def run_read_phase(session, mode, rec, registered):
     """browse, recent, search, read, image, canvas -- expected OK where exposed."""
     # browse
@@ -342,6 +372,11 @@ async def run_write_phase(session, mode, rec, registered):
 
     All created items are confined to a unique per-run folder and cleaned up.
     Tools that are not exposed in this transport were already recorded N/A.
+
+    In managed modes (cloud/ssh) the upload is verified end-to-end: the fixture
+    is read back and its known text confirmed, so upload PASS means the bytes are
+    actually retrievable. USB-web uploads land at the device root with the name
+    ignored, so they can't be reliably re-targeted and are not round-tripped.
     """
     is_ssh = MODES[mode]["transport"] == "ssh"
     managed = "remarkable_mkdir" in registered  # folder ops exposed -> cloud/ssh
@@ -381,19 +416,34 @@ async def run_write_phase(session, mode, rec, registered):
                 session, "remarkable_upload", up_args, TIMEOUTS["remarkable_upload"]
             )
             state, note = classify_ok(payload, is_err, exc)
+            uploaded_path = f"{upload_parent.rstrip('/')}/{runid}-doc"
             if state == PASS and not managed:
                 note = (
                     "uploaded to device root (USB web ignores name/folder); "
                     "swept in the SSH phase if SSH is available this run"
                 )
+            elif state == PASS and managed:
+                # End-to-end check: read the just-uploaded fixture back and
+                # confirm its known text survived. A successful-but-unreadable
+                # upload is a real failure worth surfacing on this row.
+                ok, rt_note = await verify_upload_roundtrip(session, uploaded_path)
+                if ok:
+                    note = f"uploaded to {uploaded_path}; {rt_note}"
+                else:
+                    state = FAIL
+                    note = f"upload call returned OK but {rt_note}"
             rec.record(
                 mode, "remarkable_upload", state, note, _detail_for("remarkable_upload", payload)
             )
             if state == PASS:
                 if managed:
-                    created.append(("doc", f"{upload_parent.rstrip('/')}/{runid}-doc"))
+                    created.append(("doc", uploaded_path))
                 else:
                     rec.modes[mode].setdefault("usb_root_leftover", f"/{runid}-doc")
+            elif managed and is_err is False and exc is None:
+                # Upload itself succeeded (only the read-back failed), so the doc
+                # still exists and must be cleaned up despite the FAIL verdict.
+                created.append(("doc", uploaded_path))
 
         # --- rename ------------------------------------------------------
         renamed_path = None

@@ -60,6 +60,22 @@ exposes no folder/move/rename/delete endpoints, so those tools are not registere
 in that mode (shown as N/A). `remarkable_author` requires native `.rm` write-back
 and is SSH-only today.
 
+### Upload is verified end-to-end (cloud/ssh)
+
+In **managed** modes (cloud and ssh) the upload check is a true round-trip: the
+harness uploads the fixture PDF, then reads it straight back and asserts a known
+marker string from the fixture's text layer survived. So an upload **PASS** means
+the bytes are actually retrievable — not merely that the upload call returned
+without error. If the upload call succeeds but the document can't be read back (or
+its content is wrong), the upload row is marked **FAIL** with that reason. This is
+safe and non-flaky: the cloud client invalidates its in-memory document cache on
+every root commit and blobs are content-addressed (immutable), so there is no
+eventual-consistency window to wait on within a session.
+
+USB-web uploads land at the device root with the requested name ignored, so they
+can't be reliably re-targeted for read-back and are **not** round-tripped (the
+upload row still PASSes on a successful upload call).
+
 ## Caveats
 
 - **USB upload leaves a file at the device root.** The USB web interface ignores
