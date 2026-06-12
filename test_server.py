@@ -3877,6 +3877,143 @@ class TestFullPageRender:
         finally:
             rm_path.unlink(missing_ok=True)
 
+    def test_typed_text_in_cropped_read_only_render(self):
+        """remarkable_image's content-cropped render also draws typed text."""
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import _render_rm_v6_to_svg
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            # A text-only page has no strokes; the cropped render must still
+            # produce output (it previously returned None with no ink).
+            rm_tmp.write(nb.page_rm_bytes("Hello world\nSecond line"))
+            rm_path = Path(rm_tmp.name)
+        try:
+            svg = _render_rm_v6_to_svg(rm_path)
+            assert svg is not None
+            assert "<text " in svg
+            assert "Hello world" in svg
+        finally:
+            rm_path.unlink(missing_ok=True)
+
+    def test_typed_text_png_read_only_path_has_dark_pixels(self):
+        import io as _io
+
+        from PIL import Image
+
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import render_rm_file_to_png
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(nb.page_rm_bytes("Hello world"))
+            rm_path = Path(rm_tmp.name)
+        try:
+            png = render_rm_file_to_png(rm_path, background_color="#FFFFFF")
+            assert png is not None
+            im = Image.open(_io.BytesIO(png)).convert("L")
+            assert sum(im.histogram()[:128]) > 0
+        finally:
+            rm_path.unlink(missing_ok=True)
+
+    def test_wrap_text_helper(self):
+        from remarkable_mcp.extract import _wrap_text
+
+        # No wrapping when the text fits or no width/advance is known.
+        assert _wrap_text("short line", 936, 15) == ["short line"]
+        assert _wrap_text("anything at all", 0, 15) == ["anything at all"]
+        # A long line wraps into multiple pieces, each within the width budget.
+        long = " ".join(["word"] * 60)  # 60 words -> well past a 936-unit box
+        lines = _wrap_text(long, 936, 15)
+        assert len(lines) > 1
+        for line in lines:
+            assert len(line) * 15 <= 936
+        # Round-trips the words (wrapping only changes whitespace).
+        assert " ".join(lines).split() == long.split()
+        # A single over-long word is kept on its own line rather than split.
+        assert _wrap_text("supercalifragilistic", 50, 15) == ["supercalifragilistic"]
+
+    def test_long_paragraph_wraps_into_multiple_lines(self):
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import _v6_blocks, _v6_text_svg_elements
+
+        long_para = (
+            "The smallest frog is under 8mm long; the largest, the Goliath "
+            "frog, can reach 32cm and is genuinely enormous for an amphibian."
+        )
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(nb.page_rm_bytes(long_para))
+            rm_path = Path(rm_tmp.name)
+        try:
+            elements = _v6_text_svg_elements(_v6_blocks(rm_path))
+            # One paragraph wider than the text box must emit more than one line.
+            assert len(elements) > 1
+        finally:
+            rm_path.unlink(missing_ok=True)
+
+    def test_typed_text_baseline_matches_device_offset(self):
+        """First line sits where the device draws it (calibrated, not the old
+        rmc offset that rendered text ~50 units too high)."""
+        import re
+
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import _v6_blocks, _v6_text_svg_elements
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(nb.page_rm_bytes("Frog Facts"))
+            rm_path = Path(rm_tmp.name)
+        try:
+            elements = _v6_text_svg_elements(_v6_blocks(rm_path))
+            y = float(re.search(r'y="([-\d.]+)"', elements[0]).group(1))
+            # pos_y(234) + TOP(-39) + line_height(70) == 265 for a 1404x1872 page;
+            # comfortably below the old value of 216.
+            assert 255 <= y <= 275
+        finally:
+            rm_path.unlink(missing_ok=True)
+
+    def test_typed_text_metrics_scale_with_page_height(self):
+        """Layout metrics scale linearly with the page's normalized height so
+        typed text stays proportional on non-1872 geometries (e.g. reMarkable
+        Move/classic). run_smoke only asserts render PASS/FAIL, not pixel
+        layout, so this is the guard against a scaling regression."""
+        import re
+        from unittest.mock import patch
+
+        from remarkable_mcp import extract
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import _v6_blocks, _v6_text_svg_elements
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            # Two paragraphs so the line-to-line gap isolates the scaled
+            # line_height independent of the (unscaled) text-box position.
+            rm_tmp.write(nb.page_rm_bytes("First line\nSecond line"))
+            rm_path = Path(rm_tmp.name)
+        try:
+            blocks = _v6_blocks(rm_path)
+            width, _ = extract._v6_paper_size(blocks)
+
+            def metrics_at(page_h):
+                with patch.object(extract, "_v6_paper_size", return_value=(width, page_h)):
+                    els = _v6_text_svg_elements(blocks)
+                y0 = float(re.search(r'y="([-\d.]+)"', els[0]).group(1))
+                y1 = float(re.search(r'y="([-\d.]+)"', els[1]).group(1))
+                size = float(re.search(r'font-size="([-\d.]+)"', els[0]).group(1))
+                return y1 - y0, size
+
+            # Reference 1872-tall page: full-size metrics.
+            gap_ref, size_ref = metrics_at(extract._TEXT_REF_PAGE_HEIGHT)
+            assert gap_ref == pytest.approx(extract._TEXT_DEFAULT_LINE_HEIGHT, abs=0.5)
+            assert size_ref == pytest.approx(extract._TEXT_DEFAULT_FONT_SIZE, abs=0.5)
+
+            # Half / double height -> metrics scale linearly.
+            gap_half, size_half = metrics_at(extract._TEXT_REF_PAGE_HEIGHT / 2)
+            assert gap_half == pytest.approx(gap_ref / 2, abs=0.5)
+            assert size_half == pytest.approx(size_ref / 2, abs=0.5)
+
+            gap_dbl, size_dbl = metrics_at(extract._TEXT_REF_PAGE_HEIGHT * 2)
+            assert gap_dbl == pytest.approx(gap_ref * 2, abs=0.5)
+            assert size_dbl == pytest.approx(size_ref * 2, abs=0.5)
+        finally:
+            rm_path.unlink(missing_ok=True)
+
 
 class TestRenderCanvasPage:
     """Test the read-only canvas page renderer."""
