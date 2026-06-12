@@ -578,13 +578,50 @@ def _v6_paths_from_blocks(blocks: list) -> Tuple[list, list]:
     return paths, all_coords
 
 
-# reMarkable typed-text layout, in stroke/screen units. Mirrors the rmc
-# exporter (github.com/ricklupton/rmc) so typed text (a RootTextBlock) renders
-# in the full-page view at the same place the device draws it. rmc lays text
-# out in a 72/226-DPI point space; our full-page SVG works in raw screen units,
-# so point font sizes are converted to screen units via _PT_TO_SCREEN.
-_TEXT_TOP_Y = -88
-_PT_TO_SCREEN = 226.0 / 72.0
+# reMarkable typed-text layout, in raw stroke units. Calibrated against
+# device-rendered page thumbnails (a reMarkable Paper Pro / "Ferrari", which
+# normalizes typed text into the same 1404x1872 coordinate space as the rM1/2).
+# These differ from the rmc exporter's constants (github.com/ricklupton/rmc):
+# rmc lays text out in a 72/226-DPI-scaled space and its plain font (7pt) and
+# top offset (-88) render text noticeably smaller and higher than the device
+# actually draws it. Values here are in the reference 1404x1872 space and are
+# scaled by the page's real height (see ``_TEXT_REF_PAGE_HEIGHT``) so they adapt
+# to other geometries (e.g. reMarkable Move) that normalize differently.
+_TEXT_REF_PAGE_HEIGHT = 1872.0
+_TEXT_TOP_Y = -39.0
+_TEXT_DEFAULT_LINE_HEIGHT = 70.0
+_TEXT_DEFAULT_FONT_SIZE = 30.0
+# Continuation lines of a wrapped paragraph are spaced tighter than the gap
+# between paragraphs (device uses ~44 vs ~70 units for plain text).
+_TEXT_WRAP_LINE_RATIO = 44.0 / 70.0
+# Average glyph advance as a fraction of font size, used only to wrap a
+# paragraph to the text-box width (SVG <text> does not wrap on its own).
+_TEXT_CHAR_ADVANCE = 0.5
+
+
+def _wrap_text(text: str, max_width: float, char_advance: float) -> List[str]:
+    """Greedily word-wrap ``text`` to ``max_width`` (stroke units).
+
+    SVG ``<text>`` does not wrap, so paragraphs wider than the text box are
+    split here the way the device wraps them. Line width is approximated as
+    ``len(line) * char_advance`` -- good enough for a faithful preview without
+    embedding the device font. A single word longer than the box is left on its
+    own line rather than split. Returns ``[text]`` when no wrapping applies.
+    """
+    if max_width <= 0 or char_advance <= 0:
+        return [text]
+    lines: List[str] = []
+    cur = ""
+    for word in text.split(" "):
+        trial = word if not cur else f"{cur} {word}"
+        if not cur or len(trial) * char_advance <= max_width:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    return lines
 
 
 def _v6_text_svg_elements(blocks: list) -> list:
@@ -628,19 +665,18 @@ def _v6_text_elements_with_bounds(blocks: list) -> Tuple[list, list]:
         pass
 
     line_heights = {
-        ParagraphStyle.PLAIN: 70,
-        ParagraphStyle.HEADING: 150,
-        ParagraphStyle.BOLD: 70,
-        ParagraphStyle.BULLET: 35,
-        ParagraphStyle.BULLET2: 35,
-        ParagraphStyle.CHECKBOX: 35,
-        ParagraphStyle.CHECKBOX_CHECKED: 35,
+        ParagraphStyle.PLAIN: 70.0,
+        ParagraphStyle.HEADING: 150.0,
+        ParagraphStyle.BOLD: 70.0,
+        ParagraphStyle.BULLET: 35.0,
+        ParagraphStyle.BULLET2: 35.0,
+        ParagraphStyle.CHECKBOX: 35.0,
+        ParagraphStyle.CHECKBOX_CHECKED: 35.0,
     }
     font_sizes = {
-        ParagraphStyle.HEADING: 14 * _PT_TO_SCREEN,
-        ParagraphStyle.BOLD: 8 * _PT_TO_SCREEN,
+        ParagraphStyle.HEADING: 60.0,
+        ParagraphStyle.BOLD: 34.0,
     }
-    default_font = 7 * _PT_TO_SCREEN
 
     try:
         doc = TextDocument.from_scene_item(text_item)
@@ -651,33 +687,44 @@ def _v6_text_elements_with_bounds(blocks: list) -> Tuple[list, list]:
     pos_y = float(getattr(text_item, "pos_y", 0.0) or 0.0)
     box_width = float(getattr(text_item, "width", 0.0) or 0.0)
 
+    # Scale the reference metrics to the page's real height so text on devices
+    # that normalize to a different coordinate space (e.g. reMarkable Move)
+    # stays proportional. Identity for the standard 1404x1872 page.
+    _, paper_h = _v6_paper_size(blocks)
+    scale = paper_h / _TEXT_REF_PAGE_HEIGHT if paper_h else 1.0
+
     elements: list = []
     coords: list = []
-    y_offset = _TEXT_TOP_Y
+    y_offset = _TEXT_TOP_Y * scale
     for para in doc.contents:
         style = para.style.value if getattr(para, "style", None) is not None else None
-        y_offset += line_heights.get(style, 70)
+        line_height = line_heights.get(style, _TEXT_DEFAULT_LINE_HEIGHT) * scale
+        size = font_sizes.get(style, _TEXT_DEFAULT_FONT_SIZE) * scale
         text = str(para).strip()
         if not text:
+            # A blank paragraph still consumes a line (e.g. spacing under a title).
+            y_offset += line_height
             continue
-        size = font_sizes.get(style, default_font)
         family = "serif" if style == ParagraphStyle.HEADING else "sans-serif"
         weight = (
             ' font-weight="bold"' if style in (ParagraphStyle.BOLD, ParagraphStyle.HEADING) else ""
         )
-        baseline = pos_y + y_offset
-        elements.append(
-            f'<text x="{pos_x:.1f}" y="{baseline:.1f}" '
-            f'font-family="{family}" font-size="{size:.1f}"{weight} '
-            f'fill="black" xml:space="preserve">{_xml_escape(text)}</text>'
-        )
-        # Estimate the line's extent for crop sizing: a rough monospace-ish
-        # advance, capped at the text box width when one is known.
-        est_width = len(text) * size * 0.6
-        if box_width > 0:
-            est_width = min(est_width, box_width)
-        coords.append((pos_x, baseline - size))
-        coords.append((pos_x + est_width, baseline + size * 0.3))
+        # Wrap long paragraphs to the text box; each wrapped line takes a line,
+        # with continuation lines spaced tighter than a paragraph break.
+        for idx, line in enumerate(_wrap_text(text, box_width, size * _TEXT_CHAR_ADVANCE)):
+            y_offset += line_height if idx == 0 else line_height * _TEXT_WRAP_LINE_RATIO
+            baseline = pos_y + y_offset
+            elements.append(
+                f'<text x="{pos_x:.1f}" y="{baseline:.1f}" '
+                f'font-family="{family}" font-size="{size:.1f}"{weight} '
+                f'fill="black" xml:space="preserve">{_xml_escape(line)}</text>'
+            )
+            # Estimate the line's extent for crop sizing, capped at the box width.
+            est_width = len(line) * size * _TEXT_CHAR_ADVANCE
+            if box_width > 0:
+                est_width = min(est_width, box_width)
+            coords.append((pos_x, baseline - size))
+            coords.append((pos_x + est_width, baseline + size * 0.3))
     return elements, coords
 
 

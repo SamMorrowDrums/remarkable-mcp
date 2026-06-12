@@ -3914,6 +3914,61 @@ class TestFullPageRender:
         finally:
             rm_path.unlink(missing_ok=True)
 
+    def test_wrap_text_helper(self):
+        from remarkable_mcp.extract import _wrap_text
+
+        # No wrapping when the text fits or no width/advance is known.
+        assert _wrap_text("short line", 936, 15) == ["short line"]
+        assert _wrap_text("anything at all", 0, 15) == ["anything at all"]
+        # A long line wraps into multiple pieces, each within the width budget.
+        long = " ".join(["word"] * 60)  # 60 words -> well past a 936-unit box
+        lines = _wrap_text(long, 936, 15)
+        assert len(lines) > 1
+        for line in lines:
+            assert len(line) * 15 <= 936
+        # Round-trips the words (wrapping only changes whitespace).
+        assert " ".join(lines).split() == long.split()
+        # A single over-long word is kept on its own line rather than split.
+        assert _wrap_text("supercalifragilistic", 50, 15) == ["supercalifragilistic"]
+
+    def test_long_paragraph_wraps_into_multiple_lines(self):
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import _v6_blocks, _v6_text_svg_elements
+
+        long_para = (
+            "The smallest frog is under 8mm long; the largest, the Goliath "
+            "frog, can reach 32cm and is genuinely enormous for an amphibian."
+        )
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(nb.page_rm_bytes(long_para))
+            rm_path = Path(rm_tmp.name)
+        try:
+            elements = _v6_text_svg_elements(_v6_blocks(rm_path))
+            # One paragraph wider than the text box must emit more than one line.
+            assert len(elements) > 1
+        finally:
+            rm_path.unlink(missing_ok=True)
+
+    def test_typed_text_baseline_matches_device_offset(self):
+        """First line sits where the device draws it (calibrated, not the old
+        rmc offset that rendered text ~50 units too high)."""
+        import re
+
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import _v6_blocks, _v6_text_svg_elements
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(nb.page_rm_bytes("Frog Facts"))
+            rm_path = Path(rm_tmp.name)
+        try:
+            elements = _v6_text_svg_elements(_v6_blocks(rm_path))
+            y = float(re.search(r'y="([-\d.]+)"', elements[0]).group(1))
+            # pos_y(234) + TOP(-39) + line_height(70) == 265 for a 1404x1872 page;
+            # comfortably below the old value of 216.
+            assert 255 <= y <= 275
+        finally:
+            rm_path.unlink(missing_ok=True)
+
 
 class TestRenderCanvasPage:
     """Test the read-only canvas page renderer."""
