@@ -590,29 +590,40 @@ _PT_TO_SCREEN = 226.0 / 72.0
 def _v6_text_svg_elements(blocks: list) -> list:
     """Build SVG ``<text>`` strings for typed text (a RootTextBlock) on a page.
 
-    Returns an empty list when the page has no typed text (the common case for
+    Thin wrapper around :func:`_v6_text_elements_with_bounds` for callers (e.g.
+    the full-page render) that fix the viewBox to the page extent and so do not
+    need the text's bounding coordinates.
+    """
+    return _v6_text_elements_with_bounds(blocks)[0]
+
+
+def _v6_text_elements_with_bounds(blocks: list) -> Tuple[list, list]:
+    """Build SVG ``<text>`` strings plus their bounding coords for typed text.
+
+    Returns ``(elements, coords)`` where ``coords`` is a flat list of ``(x, y)``
+    extent points (in the page's stroke/screen units, center-origin X) so a
+    content-cropped render can size its viewBox to include the text. Returns
+    ``([], [])`` when the page has no typed text (the common case for
     handwritten notebooks) or when rmscene's text helpers are unavailable.
-    Coordinates are in the page's own stroke/screen units (center-origin X),
-    matching :func:`_svg_full_page`, so text lands where the device shows it.
     """
     try:
         from rmscene.scene_items import ParagraphStyle, Text
         from rmscene.text import TextDocument
     except ImportError:
-        return []
+        return [], []
 
     text_item = next(
         (b.value for b in blocks if isinstance(getattr(b, "value", None), Text)),
         None,
     )
     if text_item is None:
-        return []
+        return [], []
 
     # Blank pages we synthesize carry an empty RootTextBlock; skip them so we
     # neither emit empty <text> nodes nor trigger rmscene's empty-item warning.
     try:
         if not any(isinstance(v, str) and v.strip() for v in text_item.items.values()):
-            return []
+            return [], []
     except Exception:
         pass
 
@@ -634,12 +645,14 @@ def _v6_text_svg_elements(blocks: list) -> list:
     try:
         doc = TextDocument.from_scene_item(text_item)
     except Exception:
-        return []
+        return [], []
 
     pos_x = float(getattr(text_item, "pos_x", 0.0) or 0.0)
     pos_y = float(getattr(text_item, "pos_y", 0.0) or 0.0)
+    box_width = float(getattr(text_item, "width", 0.0) or 0.0)
 
     elements: list = []
+    coords: list = []
     y_offset = _TEXT_TOP_Y
     for para in doc.contents:
         style = para.style.value if getattr(para, "style", None) is not None else None
@@ -652,12 +665,20 @@ def _v6_text_svg_elements(blocks: list) -> list:
         weight = (
             ' font-weight="bold"' if style in (ParagraphStyle.BOLD, ParagraphStyle.HEADING) else ""
         )
+        baseline = pos_y + y_offset
         elements.append(
-            f'<text x="{pos_x:.1f}" y="{pos_y + y_offset:.1f}" '
+            f'<text x="{pos_x:.1f}" y="{baseline:.1f}" '
             f'font-family="{family}" font-size="{size:.1f}"{weight} '
             f'fill="black" xml:space="preserve">{_xml_escape(text)}</text>'
         )
-    return elements
+        # Estimate the line's extent for crop sizing: a rough monospace-ish
+        # advance, capped at the text box width when one is known.
+        est_width = len(text) * size * 0.6
+        if box_width > 0:
+            est_width = min(est_width, box_width)
+        coords.append((pos_x, baseline - size))
+        coords.append((pos_x + est_width, baseline + size * 0.3))
+    return elements, coords
 
 
 def _render_rm_v6_to_svg(rm_file_path: Path) -> Optional[str]:
@@ -674,7 +695,10 @@ def _render_rm_v6_to_svg(rm_file_path: Path) -> Optional[str]:
         return None
     try:
         paths, all_coords = _v6_paths_from_blocks(blocks)
-        return _svg_from_paths(paths, all_coords)
+        text_elements, text_coords = _v6_text_elements_with_bounds(blocks)
+        # Typed text is drawn under strokes (handwriting layers on top), and its
+        # extent is folded into the crop so a text-only page still renders.
+        return _svg_from_paths(text_elements + paths, all_coords + text_coords)
     except Exception:
         return None
 

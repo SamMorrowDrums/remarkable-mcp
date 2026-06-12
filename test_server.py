@@ -3877,6 +3877,43 @@ class TestFullPageRender:
         finally:
             rm_path.unlink(missing_ok=True)
 
+    def test_typed_text_in_cropped_read_only_render(self):
+        """remarkable_image's content-cropped render also draws typed text."""
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import _render_rm_v6_to_svg
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            # A text-only page has no strokes; the cropped render must still
+            # produce output (it previously returned None with no ink).
+            rm_tmp.write(nb.page_rm_bytes("Hello world\nSecond line"))
+            rm_path = Path(rm_tmp.name)
+        try:
+            svg = _render_rm_v6_to_svg(rm_path)
+            assert svg is not None
+            assert "<text " in svg
+            assert "Hello world" in svg
+        finally:
+            rm_path.unlink(missing_ok=True)
+
+    def test_typed_text_png_read_only_path_has_dark_pixels(self):
+        import io as _io
+
+        from PIL import Image
+
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import render_rm_file_to_png
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(nb.page_rm_bytes("Hello world"))
+            rm_path = Path(rm_tmp.name)
+        try:
+            png = render_rm_file_to_png(rm_path, background_color="#FFFFFF")
+            assert png is not None
+            im = Image.open(_io.BytesIO(png)).convert("L")
+            assert sum(im.histogram()[:128]) > 0
+        finally:
+            rm_path.unlink(missing_ok=True)
+
 
 class TestRenderCanvasPage:
     """Test the read-only canvas page renderer."""
