@@ -38,7 +38,6 @@ from remarkable_mcp.api import (
 )
 from remarkable_mcp.capabilities import client_supports_elicitation
 from remarkable_mcp.responses import make_error, make_response
-from remarkable_mcp.server import mcp
 from remarkable_mcp.ssh import XOCHITL_PATH, SSHClient
 
 logger = logging.getLogger(__name__)
@@ -812,8 +811,11 @@ def _author_create_document(name: str, text: Optional[str], folder: Optional[str
 
 def register_write_tools():
     """Register all write tools with the MCP server."""
+    # Imported lazily to break a circular import: server.py imports this module
+    # at load time and immediately calls register_write_tools(), so importing
+    # `mcp` at module top would re-enter a partially-initialized server module.
+    from remarkable_mcp.server import mcp
 
-    @mcp.tool(annotations=WRITE_ANNOTATIONS)
     async def remarkable_author(
         method: str,
         document: Optional[str] = None,
@@ -895,16 +897,6 @@ def register_write_tools():
             error = _require_write_transport()
             if error:
                 return error
-            if not _is_ssh_mode():
-                return make_error(
-                    error_type="unsupported_transport",
-                    message="Authoring native ink/notebooks currently requires SSH mode.",
-                    suggestion=(
-                        "Run with: remarkable-mcp --ssh (USB cable + SSH enabled). "
-                        "Native write-back over cloud/USB-web is not supported yet — "
-                        "for those, render and re-upload a flattened PDF instead."
-                    ),
-                )
 
             if method == "draw":
                 return _author_draw(document, page, strokes, ui_submitted)
@@ -920,6 +912,13 @@ def register_write_tools():
             )
 
         return await asyncio.to_thread(_impl)
+
+    # Native ink/notebook authoring is SSH-only today (cloud/USB-web write-back
+    # is not implemented yet), so only expose the tool in SSH mode rather than
+    # registering it everywhere and erroring at call time. Clients on other
+    # transports simply don't see a tool they couldn't use.
+    if _is_ssh_mode():
+        mcp.tool(annotations=WRITE_ANNOTATIONS)(remarkable_author)
 
     @mcp.tool(annotations=UPLOAD_ANNOTATIONS)
     async def remarkable_upload(
