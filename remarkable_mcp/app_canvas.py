@@ -56,7 +56,7 @@ _CANVAS_HTML = """<!doctype html>
 <title>reMarkable Canvas</title>
 <style>
   :root { color-scheme: light dark; }
-  html, body { margin: 0; height: 100%; }
+  html, body { margin: 0; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     display: flex; flex-direction: column; background: #1e1e1e; color: #e8e8e8;
@@ -64,6 +64,7 @@ _CANVAS_HTML = """<!doctype html>
   header {
     display: flex; align-items: center; gap: .5rem; padding: .5rem .75rem;
     border-bottom: 1px solid rgba(255,255,255,.12); flex: 0 0 auto;
+    position: sticky; top: 0; background: #1e1e1e; z-index: 2; flex-wrap: wrap;
   }
   header .title { font-weight: 600; flex: 1 1 auto; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
@@ -73,13 +74,23 @@ _CANVAS_HTML = """<!doctype html>
   }
   button:disabled { opacity: .4; cursor: default; }
   .pageinfo { font-variant-numeric: tabular-nums; min-width: 5rem; text-align: center; }
-  main { flex: 1 1 auto; overflow: auto; display: flex; align-items: flex-start;
+  main { flex: 1 1 auto; display: flex; align-items: flex-start;
     justify-content: center; padding: 1rem; }
-  img { max-width: 100%; height: auto; background: #fbfbfb;
+  img { display: block; max-width: 100%; height: auto; background: #fbfbfb;
+    box-shadow: 0 1px 8px rgba(0,0,0,.4); border-radius: 2px; }
+  .blankpage { display: block; max-width: 100%; background: #fbfbfb;
     box-shadow: 0 1px 8px rgba(0,0,0,.4); border-radius: 2px; }
   .status { padding: 1rem; opacity: .8; }
+  .stage { position: relative; display: inline-block; line-height: 0; }
+  .stage canvas.ink { position: absolute; left: 0; top: 0;
+    touch-action: none; cursor: crosshair; }
+  .tools { display: flex; align-items: center; gap: .4rem; }
+  .tools[hidden] { display: none; }
+  select { font: inherit; padding: .3rem; border-radius: .4rem;
+    background: #2d2d2d; color: inherit; border: 1px solid rgba(255,255,255,.2); }
   footer { flex: 0 0 auto; padding: .35rem .75rem; font-size: .8rem; opacity: .6;
     border-top: 1px solid rgba(255,255,255,.12); }
+  footer .dirty { color: #ffd479; }
 </style>
 </head>
 <body>
@@ -88,7 +99,25 @@ _CANVAS_HTML = """<!doctype html>
     <button id="prev" disabled>&larr; Prev</button>
     <span class="pageinfo" id="pageinfo">--</span>
     <button id="next" disabled>Next &rarr;</button>
-    <button id="full">Fullscreen</button>
+    <button id="addpage" hidden>+ Page</button>
+    <button id="full" hidden>Fullscreen</button>
+    <button id="draw" hidden>Draw</button>
+    <span class="tools" id="tools" hidden>
+      <select id="tool" title="Pen">
+        <option value="fineliner">Pen</option>
+        <option value="highlighter">Highlighter</option>
+      </select>
+      <select id="color" title="Color">
+        <option value="black">Black</option>
+        <option value="gray">Gray</option>
+        <option value="red">Red</option>
+        <option value="blue">Blue</option>
+        <option value="yellow">Yellow</option>
+      </select>
+      <button id="undo" disabled>Undo</button>
+    </span>
+    <button id="save" hidden disabled>Save</button>
+    <button id="cancel" hidden disabled>Cancel</button>
   </header>
   <main><div class="status" id="status">Loading&hellip;</div></main>
   <footer id="footer">Read-only viewer</footer>
@@ -96,7 +125,13 @@ _CANVAS_HTML = """<!doctype html>
 (function () {
   "use strict";
   var pending = {}, rpcId = 1;
-  var state = { document: null, page: 1, total: 1, busy: false };
+  var state = { document: null, page: 1, total: 1, busy: false,
+                displayMode: "inline", displayModes: [],
+                appReady: false, fullscreenUnsupported: false,
+                writable: false, drawing: false, cache: {}, cur: null,
+                img: null, canvas: null, fileType: "", pendingPages: 0,
+                stageEl: null, natW: 0, natH: 0, paperW: 1404, paperH: 1872,
+                transport: "", writeMode: false };
 
   function post(msg) {
     try { window.parent.postMessage(msg, "*"); } catch (e) {}
@@ -126,37 +161,348 @@ _CANVAS_HTML = """<!doctype html>
       return payload.toolResult.structuredContent;
     return null;
   }
+  function digText(payload) {
+    // Tools that return a string (make_response / make_error) put JSON in the
+    // first text content block. Parse it so the app can read success / _error.
+    try {
+      var r = payload && (payload.result || payload.toolResult || payload);
+      var c = r && r.content;
+      if (c && c.length) {
+        for (var i = 0; i < c.length; i++) {
+          if (c[i] && c[i].type === "text" && c[i].text) return JSON.parse(c[i].text);
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
   function render(data) {
     if (!data) return;
     if (data.error) { setStatus("Error: " + data.error); return; }
     if (data.document) state.document = data.document;
     if (data.page) state.page = data.page;
     if (data.total_pages) state.total = data.total_pages;
+    if (typeof data.writable === "boolean") state.writable = data.writable;
+    if (typeof data.file_type === "string") state.fileType = data.file_type;
+    if (typeof data.transport === "string") state.transport = data.transport;
+    if (typeof data.write_mode === "boolean") state.writeMode = data.write_mode;
+    if (data.paper_size && data.paper_size.length === 2) {
+      state.paperW = data.paper_size[0]; state.paperH = data.paper_size[1];
+    }
     document.getElementById("title").textContent =
       data.document_name || data.document || "reMarkable Canvas";
-    document.getElementById("pageinfo").textContent =
-      state.page + " / " + state.total;
-    document.getElementById("prev").disabled = state.busy || state.page <= 1;
-    document.getElementById("next").disabled =
-      state.busy || state.page >= state.total;
     if (data.png_data_uri) {
       var m = document.querySelector("main");
       m.innerHTML = "";
+      var stage = document.createElement("div");
+      stage.className = "stage";
       var img = document.createElement("img");
-      img.src = data.png_data_uri;
       img.alt = "Page " + state.page;
-      m.appendChild(img);
+      var cv = document.createElement("canvas");
+      cv.className = "ink";
+      stage.appendChild(img);
+      stage.appendChild(cv);
+      m.appendChild(stage);
+      state.img = img;
+      state.stageEl = img;
+      state.canvas = cv;
+      bindDrawing(cv);
+      img.onload = function () {
+        state.natW = img.naturalWidth; state.natH = img.naturalHeight;
+        sizeOverlay(); redrawOverlay(); notifySize();
+      };
+      img.src = data.png_data_uri;
     }
+    refreshControls();
     notifySize();
   }
+  function effectiveTotal() { return state.total + state.pendingPages; }
+  function isPending(page) { return page > state.total; }
+  function renderPending() {
+    // A locally-added page that does not exist on the device yet. We render a
+    // blank page sized to the document's paper aspect ratio so the user can draw
+    // on it immediately; Save materializes it (remarkable_author add_page) and
+    // then writes the cached strokes. Nothing touches the device until Save.
+    var m = document.querySelector("main");
+    m.innerHTML = "";
+    var stage = document.createElement("div");
+    stage.className = "stage";
+    var page = document.createElement("div");
+    page.className = "blankpage";
+    page.style.width = state.paperW + "px";
+    page.style.aspectRatio = state.paperW + " / " + state.paperH;
+    var cv = document.createElement("canvas");
+    cv.className = "ink";
+    stage.appendChild(page);
+    stage.appendChild(cv);
+    m.appendChild(stage);
+    state.img = null;
+    state.stageEl = page;
+    state.natW = state.paperW; state.natH = state.paperH;
+    state.canvas = cv;
+    bindDrawing(cv);
+    sizeOverlay(); redrawOverlay(); notifySize();
+    refreshControls();
+  }
   function notifySize() {
-    var h = document.body.scrollHeight, w = document.body.scrollWidth;
+    // Report an explicit height derived from the host-given width and the
+    // page's natural aspect ratio. Using document.body.scrollHeight is
+    // circular here (the page box is max-width:100%, so its height depends on
+    // the width the host gives us, which the host is in turn deriving from our
+    // reported height) and collapses the view to a thin strip in some hosts.
+    var w = document.body.scrollWidth || document.documentElement.clientWidth;
+    var h = document.body.scrollHeight;
+    if (state.natW && state.natH) {
+      var head = document.querySelector("header");
+      var foot = document.getElementById("footer");
+      var chrome = (head ? head.offsetHeight : 0) + (foot ? foot.offsetHeight : 0);
+      var availW = Math.max(80, (document.body.clientWidth || w) - 32); // main padding
+      var dispW = Math.min(availW, state.natW);
+      var dispH = state.natH * (dispW / state.natW);
+      h = Math.ceil(chrome + dispH + 32);
+    }
     notify("ui/notifications/size-changed", { width: w, height: h });
+  }
+  function updateDisplayModeButton() {
+    // Offer the control in any app host once the handshake completes. We attempt
+    // the request optimistically (some hosts honor fullscreen without advertising
+    // it in availableDisplayModes) and self-correct: a declined request sets
+    // fullscreenUnsupported, hiding the button so we never leave a dead control.
+    var btn = document.getElementById("full");
+    btn.hidden = !(state.appReady && !state.fullscreenUnsupported);
+    btn.textContent = state.displayMode === "fullscreen" ? "Exit fullscreen" : "Fullscreen";
+  }
+  function applyHostContext(hc) {
+    if (!hc) return;
+    if (Array.isArray(hc.availableDisplayModes)) state.displayModes = hc.availableDisplayModes;
+    if (hc.displayMode) state.displayMode = hc.displayMode;
+    updateDisplayModeButton();
+  }
+
+  // ---- Drawing: a client-side per-page stroke cache (the transaction buffer).
+  // Strokes accumulate locally; nothing touches the device until Save flushes
+  // them through remarkable_author(method:"draw"). Cancel discards the cache.
+  function pageStrokes() {
+    if (!state.cache[state.page]) state.cache[state.page] = [];
+    return state.cache[state.page];
+  }
+  function totalCached() {
+    var n = 0;
+    for (var k in state.cache) { if (state.cache[k]) n += state.cache[k].length; }
+    return n;
+  }
+  function penTool() { return document.getElementById("tool").value; }
+  function penColor() { return document.getElementById("color").value; }
+  function colorCss(c) {
+    return ({ black: "#111", gray: "#888", red: "#e23", blue: "#36c",
+      yellow: "rgba(240,220,60,.45)" })[c] || "#111";
+  }
+  function ptOf(e) {
+    var r = state.canvas.getBoundingClientRect();
+    var nx = (e.clientX - r.left) / r.width;
+    var ny = (e.clientY - r.top) / r.height;
+    return [Math.max(0, Math.min(1, nx)), Math.max(0, Math.min(1, ny))];
+  }
+  function sizeOverlay() {
+    var el = state.stageEl, cv = state.canvas;
+    if (!el || !cv) return;
+    var w = el.clientWidth, h = el.clientHeight;
+    cv.width = w; cv.height = h;
+    cv.style.width = w + "px"; cv.style.height = h + "px";
+    cv.style.pointerEvents = state.drawing ? "auto" : "none";
+  }
+  function drawPoly(ctx, stroke, w, h) {
+    var pts = stroke.points;
+    if (!pts || !pts.length) return;
+    ctx.lineJoin = ctx.lineCap = "round";
+    ctx.strokeStyle = colorCss(stroke.color);
+    ctx.lineWidth = stroke.tool === "highlighter" ? 16 : 2.5;
+    ctx.beginPath();
+    for (var i = 0; i < pts.length; i++) {
+      var x = pts[i][0] * w, y = pts[i][1] * h;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  function redrawOverlay() {
+    var cv = state.canvas;
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    var list = state.cache[state.page] || [];
+    for (var i = 0; i < list.length; i++) drawPoly(ctx, list[i], cv.width, cv.height);
+    if (state.cur) drawPoly(ctx, state.cur, cv.width, cv.height);
+  }
+  function bindDrawing(cv) {
+    cv.onpointerdown = function (e) {
+      if (!state.drawing || state.busy) return;
+      try { cv.setPointerCapture(e.pointerId); } catch (err) {}
+      state.cur = { points: [ptOf(e)], tool: penTool(), color: penColor() };
+      e.preventDefault();
+    };
+    cv.onpointermove = function (e) {
+      if (!state.cur) return;
+      state.cur.points.push(ptOf(e));
+      redrawOverlay();
+    };
+    function endStroke() {
+      if (!state.cur) return;
+      if (state.cur.points.length >= 2) pageStrokes().push(state.cur);
+      state.cur = null;
+      redrawOverlay();
+      refreshControls();
+    }
+    cv.onpointerup = endStroke;
+    cv.onpointercancel = endStroke;
+  }
+  function setDrawing(on) {
+    state.drawing = on;
+    if (state.canvas) state.canvas.style.pointerEvents = on ? "auto" : "none";
+    refreshControls();
+  }
+  function undo() {
+    var list = pageStrokes();
+    if (list.length) { list.pop(); redrawOverlay(); refreshControls(); }
+  }
+  function cancelEdits() {
+    state.cache = {};
+    state.cur = null;
+    var wasPending = isPending(state.page);
+    state.pendingPages = 0;
+    if (wasPending) {
+      // We were viewing a discarded pending page; fall back to the last real page.
+      goto(state.total);
+      return;
+    }
+    redrawOverlay();
+    refreshControls();
+  }
+  function saveEdits() {
+    if (state.busy) return;
+    if (totalCached() === 0 && state.pendingPages === 0) return;
+    var pendingToAdd = state.pendingPages;
+    var pages = [];
+    for (var k in state.cache) {
+      if (state.cache[k] && state.cache[k].length) pages.push(parseInt(k, 10));
+    }
+    pages.sort(function (a, b) { return a - b; });
+    state.busy = true;
+    refreshControls();
+    function fail(msg) {
+      state.busy = false;
+      setStatus("Save failed: " + msg);
+      refreshControls();
+    }
+    // Phase B: write the cached strokes for every dirty page.
+    function drawNext(i) {
+      if (i >= pages.length) {
+        state.cache = {};
+        state.busy = false;
+        goto(state.page); // re-render to show the strokes baked by the device render
+        return;
+      }
+      var pg = pages[i];
+      rpc("tools/call", {
+        name: "remarkable_author",
+        arguments: {
+          method: "draw",
+          document: state.document, page: pg,
+          strokes: state.cache[pg], ui_submitted: true,
+        },
+      }).then(function (result) {
+        var out = digText(result);
+        if (out && out._error) { fail(out._error.message); return; }
+        drawNext(i + 1);
+      }).catch(function (err) {
+        fail(err && err.message ? err.message : err);
+      });
+    }
+    // Phase A: materialize the locally-added blank pages on the device first, so
+    // the page numbers the strokes target actually exist before we draw on them.
+    var added = 0;
+    function addNext() {
+      if (added >= pendingToAdd) {
+        state.total += pendingToAdd;
+        state.pendingPages = 0;
+        drawNext(0);
+        return;
+      }
+      added++;
+      rpc("tools/call", {
+        name: "remarkable_author",
+        arguments: { method: "add_page", document: state.document, ui_submitted: true },
+      }).then(function (result) {
+        var out = digText(result);
+        if (out && out._error) { fail(out._error.message); return; }
+        addNext();
+      }).catch(function (err) {
+        fail(err && err.message ? err.message : err);
+      });
+    }
+    addNext();
+  }
+  function refreshControls() {
+    var w = !!state.writable;
+    var dirty = totalCached() > 0 || state.pendingPages > 0;
+    var total = effectiveTotal();
+    document.getElementById("pageinfo").textContent =
+      state.page + " / " + total + (isPending(state.page) ? " (new)" : "");
+    // Lock page navigation while drawing so strokes can't be stranded on a page
+    // the user has navigated away from. They click "Done drawing" to move pages.
+    var navLock = state.busy || state.drawing;
+    document.getElementById("prev").disabled = navLock || state.page <= 1;
+    document.getElementById("next").disabled = navLock || state.page >= total;
+    var addBtn = document.getElementById("addpage");
+    // +Page only applies to native notebooks (PDFs/EPUBs have fixed pages).
+    addBtn.hidden = !(w && state.fileType === "notebook");
+    addBtn.disabled = state.busy || state.drawing;
+    var drawBtn = document.getElementById("draw");
+    drawBtn.hidden = !w;
+    drawBtn.textContent = state.drawing ? "Done drawing" : "Draw";
+    document.getElementById("tools").hidden = !(w && state.drawing);
+    document.getElementById("undo").disabled = state.busy || pageStrokes().length === 0;
+    var save = document.getElementById("save");
+    var cancel = document.getElementById("cancel");
+    save.hidden = cancel.hidden = !w;
+    save.disabled = state.busy || !dirty;
+    cancel.disabled = state.busy || !dirty;
+    var footer = document.getElementById("footer");
+    if (!w) {
+      // Distinguish the two reasons a page isn't writable so the canvas message
+      // matches what the draw tool would return: read-only MODE vs non-SSH
+      // TRANSPORT (write is on, but native write-back needs the SSH transport).
+      if (state.writeMode && state.transport && state.transport !== "ssh") {
+        footer.textContent =
+          "View-only over this connection — connect via SSH (USB cable + SSH enabled) to draw.";
+      } else {
+        footer.textContent = "Read-only viewer";
+      }
+    } else if (dirty) {
+      var parts = [];
+      if (state.pendingPages > 0) parts.push(state.pendingPages + " new page(s)");
+      if (totalCached() > 0) parts.push(totalCached() + " stroke(s)");
+      footer.innerHTML = '<span class="dirty">' + parts.join(" + ") +
+        " unsaved — Save writes them to your reMarkable.</span>";
+    } else {
+      footer.textContent = "Draw mode — strokes are saved to your reMarkable on Save.";
+    }
+  }
+
+  function addPage() {
+    if (state.busy || state.drawing) return;
+    if (!(state.writable && state.fileType === "notebook")) return;
+    state.pendingPages++;
+    goto(effectiveTotal()); // navigate to the newly added (pending) page
   }
 
   function goto(page) {
     if (state.busy || !state.document) return;
-    if (page < 1 || page > state.total) return;
+    if (page < 1 || page > effectiveTotal()) return;
+    if (isPending(page)) {
+      // A locally-added page that isn't on the device yet — render it blank.
+      state.page = page;
+      renderPending();
+      return;
+    }
     state.busy = true;
     render({});
     rpc("tools/call", {
@@ -173,8 +519,30 @@ _CANVAS_HTML = """<!doctype html>
 
   document.getElementById("prev").onclick = function () { goto(state.page - 1); };
   document.getElementById("next").onclick = function () { goto(state.page + 1); };
+  document.getElementById("addpage").onclick = addPage;
+  document.getElementById("draw").onclick = function () { setDrawing(!state.drawing); };
+  document.getElementById("undo").onclick = undo;
+  document.getElementById("save").onclick = saveEdits;
+  document.getElementById("cancel").onclick = cancelEdits;
   document.getElementById("full").onclick = function () {
-    rpc("ui/request-display-mode", { mode: "fullscreen" }).catch(function () {});
+    var want = state.displayMode === "fullscreen" ? "inline" : "fullscreen";
+    rpc("ui/request-display-mode", { mode: want }).then(function (res) {
+      // Host returns the mode actually set (may differ from the request).
+      if (res && res.mode) state.displayMode = res.mode;
+      if (want === "fullscreen" && state.displayMode !== "fullscreen") {
+        // Host accepted the call but didn't switch -> treat as unsupported.
+        state.fullscreenUnsupported = true;
+        document.getElementById("footer").textContent =
+          "This client does not support fullscreen.";
+      }
+      updateDisplayModeButton();
+      sizeOverlay(); redrawOverlay(); notifySize();
+    }).catch(function () {
+      state.fullscreenUnsupported = true;
+      document.getElementById("footer").textContent =
+        "This client does not support fullscreen.";
+      updateDisplayModeButton();
+    });
   };
 
   window.addEventListener("message", function (event) {
@@ -186,6 +554,13 @@ _CANVAS_HTML = """<!doctype html>
         delete pending[msg.id];
         if (msg.error) p.reject(msg.error); else p.resolve(msg.result);
       }
+      return;
+    }
+    // Host-initiated request: the spec sends ui/resource-teardown before
+    // removing the View. We can't persist async work mid-teardown, so just
+    // acknowledge so the host isn't left waiting. (The View cannot close itself.)
+    if (msg.id !== undefined && msg.method === "ui/resource-teardown") {
+      post({ jsonrpc: "2.0", id: msg.id, result: {} });
       return;
     }
     // Input/result asymmetry (per the MCP Apps spec): tool-input params are
@@ -203,7 +578,15 @@ _CANVAS_HTML = """<!doctype html>
       render(digOut(msg.params) || {});
       return;
     }
+    if (msg.method === "ui/notifications/host-context-changed") {
+      // Host pushes partial context updates (theme, displayMode, available
+      // modes, resize). Merge display-mode fields and refresh the control.
+      applyHostContext(msg.params || {});
+      return;
+    }
   });
+
+  window.addEventListener("resize", function () { sizeOverlay(); redrawOverlay(); notifySize(); });
 
   // Handshake: announce the app (with protocol version + client info, as the
   // spec requires) and the display modes it can use, then signal that we are
@@ -214,12 +597,19 @@ _CANVAS_HTML = """<!doctype html>
     clientInfo: { name: "remarkable-canvas", version: "1" },
     appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
   }).then(function (res) {
+    state.appReady = true;
     notify("ui/notifications/initialized", {});
+    // Capture host context (theme, supported display modes, dimensions) so the
+    // fullscreen control is only offered when the host actually supports it.
+    if (res && res.hostContext) applyHostContext(res.hostContext);
+    updateDisplayModeButton();
     var d = digOut(res);
     if (d) render(d);
   }).catch(function () {
     // Some hosts push tool-input/result without a handshake reply; that's fine.
+    state.appReady = true;
     notify("ui/notifications/initialized", {});
+    updateDisplayModeButton();
   });
 })();
 </script>
@@ -271,8 +661,9 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
     from remarkable_mcp.extract import (
         find_similar_documents,
         get_background_color,
+        get_document_file_type,
         get_document_page_count,
-        render_page_from_document_zip,
+        render_page_full_page_from_document_zip,
         render_tablet_pdf_page_to_png,
     )
     from remarkable_mcp.responses import make_error
@@ -328,6 +719,7 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
 
     try:
         total_pages = await run_blocking(get_document_page_count, tmp_path)
+        file_type = await run_blocking(get_document_file_type, tmp_path)
         if total_pages == 0:
             return make_error(
                 error_type="no_pages",
@@ -344,10 +736,20 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
                 suggestion=f"Use page=1 to {total_pages} to view different pages.",
             )
 
-        png_data = await run_blocking(
-            render_page_from_document_zip, tmp_path, page, background_color=background
+        # Full-page render addressed by cPages index (coherent with the write
+        # tool) so the overlay's normalized coordinates map exactly onto stroke
+        # space and blank pages still render. paper_size is the page's own
+        # coordinate extent, surfaced so the model can draw in-bounds.
+        paper_size = None
+        full = await run_blocking(
+            render_page_full_page_from_document_zip, tmp_path, page, background_color=background
         )
         render_source = "strokes"
+        if full is not None:
+            png_data, paper_wh = full
+            paper_size = [round(paper_wh[0]), round(paper_wh[1])]
+        else:
+            png_data = None
         if png_data is None:
             pdf_bytes = await run_blocking(download_raw_file, client, target_doc, "pdf")
             if pdf_bytes:
@@ -382,6 +784,17 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
     except Exception:
         pass
 
+    from remarkable_mcp.write_tools import write_enabled
+
+    transport = get_active_transport()
+    write_mode = bool(write_enabled())
+    # The canvas can write strokes back only over SSH (the filesystem transport),
+    # and only when write mode is on. Surface both the combined `writable` flag
+    # (Save/Draw/＋Page visibility) AND its two inputs (`write_mode`, `transport`)
+    # so the app can explain WHY a page isn't writable — distinguishing read-only
+    # mode from a non-SSH transport, mirroring the draw tool's own error.
+    writable = write_mode and transport == "ssh"
+
     structured = {
         "document": doc_path,
         "document_name": target_doc.VissibleName,
@@ -390,22 +803,59 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
         "png_data_uri": data_uri,
         "page_width_px": width_px,
         "page_height_px": height_px,
+        "paper_size": paper_size,
         "render_source": render_source,
-        "transport": get_active_transport(),
-        "writable": False,
+        "file_type": file_type,
+        "transport": transport,
+        "write_mode": write_mode,
+        "writable": writable,
     }
 
     resource_uri = f"remarkableimg:///{doc_path.lstrip('/')}.page-{page}.png"
     blob = types.BlobResourceContents(uri=resource_uri, mimeType="image/png", blob=png_base64)
+    # Audience split (MCP content annotations): the rendered page image is for the
+    # USER (it's large base64 the model never needs to read), while a lean text
+    # digest carries the page/doc/writable facts the model may want — keeping the
+    # model's context free of the image blob. When the page is writable we also
+    # give the model the drawable geometry + coordinate convention so it can
+    # compose in-bounds strokes for remarkable_author(method="draw") without
+    # seeing the image (it draws blind, so these bounds are how it stays on the
+    # page).
+    digest = (
+        f"Page {page}/{total_pages} of '{target_doc.VissibleName}' "
+        f"(transport={transport}, writable={'yes' if writable else 'no'})."
+    )
+    if writable and paper_size:
+        digest += (
+            f" Drawable page area is {paper_size[0]}x{paper_size[1]} in the page's own"
+            ' coordinate units. To draw, call remarkable_author(method="draw", document,'
+            " page, strokes) where each stroke's points are normalized [0,1] from the"
+            " page's TOP-LEFT (x rightwards, y downwards); they map onto this exact page."
+            " Pass many strokes in one call."
+        )
+    elif writable:
+        digest += (
+            ' To draw, call remarkable_author(method="draw", document, page, strokes)'
+            " with points normalized [0,1] from the page's TOP-LEFT."
+        )
+    if writable and file_type == "notebook":
+        digest += (
+            " To append a blank page to this notebook, call"
+            ' remarkable_author(method="add_page", document).'
+        )
+    digest += " Rendered in the interactive canvas; the page image is shown to the user."
     info = types.TextContent(
         type="text",
-        text=(
-            f"Page {page}/{total_pages} of '{target_doc.VissibleName}'. "
-            "Open in an MCP Apps-capable client to view the interactive canvas."
-        ),
+        text=digest,
+        annotations=types.Annotations(audience=["assistant"]),
+    )
+    image = types.EmbeddedResource(
+        type="resource",
+        resource=blob,
+        annotations=types.Annotations(audience=["user"]),
     )
     return types.CallToolResult(
-        content=[info, types.EmbeddedResource(type="resource", resource=blob)],
+        content=[info, image],
         structuredContent=structured,
     )
 
