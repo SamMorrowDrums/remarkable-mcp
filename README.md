@@ -442,7 +442,7 @@ Write tools let you upload, organize, and manage documents on your reMarkable. *
 | Rename | ✅ | ✅ | ❌ |
 | Delete | ✅ (→ trash) | ✅ | ❌ |
 | Tags/status labels | ✅ | ✅ | ❌ |
-| Create native notebook | ✅ (`create_document`, `daily_notebook`) | ✅ | ❌ |
+| Create native notebook | ✅ (`create_document`, `daily_notebook`; plain or styled Markdown seed text) | ✅ | ❌ |
 | Native add page / draw | ❌ | ✅ | ❌ |
 
 ### Disabling Write Tools (read-only mode)
@@ -550,6 +550,13 @@ remarkable_author(
 
 # Only seed typed text when the user explicitly requested it.
 remarkable_author(method="create_document", name="Meeting notes", text="Agenda\nFollow-ups")
+
+# Seed styled native typed text when the user supplied Markdown content.
+remarkable_author(
+    method="create_document",
+    name="Styled meeting notes",
+    content_markdown="# Agenda\n- [ ] Follow up\nPlain **bold** and *italic* text",
+)
 ```
 
 ---

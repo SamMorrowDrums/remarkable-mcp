@@ -509,7 +509,14 @@ async def run_write_phase(session, mode, rec, registered):
             payload, is_err, exc = await call_tool(
                 session,
                 "remarkable_author",
-                {"method": "create_document", "name": nb_name, "folder": folder_path},
+                {
+                    "method": "create_document",
+                    "name": nb_name,
+                    "folder": folder_path,
+                    "content_markdown": (
+                        "# Smoke note\n- [ ] Check styled native text\nPlain **bold** and *italic*"
+                    ),
+                },
                 TIMEOUTS["remarkable_author"],
             )
             state, note = classify_ok(payload, is_err, exc)

@@ -23,7 +23,10 @@ import time
 import uuid as _uuid
 from typing import Optional
 
-from rmscene import simple_text_document, write_blocks
+from rmscene import PageInfoBlock, RootTextBlock, simple_text_document, write_blocks
+from rmscene.crdt_sequence import CrdtSequence, CrdtSequenceItem
+from rmscene.scene_items import END_MARKER, ParagraphStyle, Text
+from rmscene.tagged_block_common import CrdtId, LwwValue
 
 from remarkable_mcp.strokes import WRITE_VERSION
 
@@ -51,13 +54,174 @@ def _author_uuid(author_uuid: Optional[str]):
     return _uuid.UUID(str(author_uuid))
 
 
-def page_rm_bytes(text: str = "", author_uuid: Optional[str] = None) -> bytes:
+def _plain_text_from_values(values: list[str | int]) -> str:
+    """Return only user-visible text from text/formatting values."""
+    return "".join(value for value in values if isinstance(value, str))
+
+
+def _inline_markdown_values(text: str) -> list[str | int]:
+    """Convert a small inline Markdown subset into reMarkable text items.
+
+    reMarkable stores inline bold/italic as zero-width formatting items inside
+    the root text CRDT sequence. rmscene decodes those integer codes as:
+    1=bold on, 2=bold off, 3=italic on, 4=italic off.
+    """
+    values: list[str | int] = []
+    buf: list[str] = []
+    bold = False
+    italic = False
+    i = 0
+
+    def flush() -> None:
+        if buf:
+            values.append("".join(buf))
+            buf.clear()
+
+    while i < len(text):
+        if text.startswith("**", i):
+            flush()
+            values.append(2 if bold else 1)
+            bold = not bold
+            i += 2
+            continue
+        if text[i] == "*":
+            flush()
+            values.append(4 if italic else 3)
+            italic = not italic
+            i += 1
+            continue
+        buf.append(text[i])
+        i += 1
+
+    flush()
+    if bold:
+        values.append(2)
+    if italic:
+        values.append(4)
+    return values
+
+
+def _markdown_line_style(line: str) -> tuple[ParagraphStyle, str]:
+    """Return native paragraph style and visible text for a Markdown-ish line."""
+    if line.startswith("# "):
+        return ParagraphStyle.HEADING, line[2:].strip()
+    if line.startswith("## "):
+        return ParagraphStyle.BOLD, line[3:].strip()
+
+    stripped = line.lstrip(" \t")
+    indent = len(line) - len(stripped)
+    if stripped.startswith("- [ ] "):
+        return ParagraphStyle.CHECKBOX, stripped[6:].strip()
+    if stripped.lower().startswith("- [x] "):
+        return ParagraphStyle.CHECKBOX_CHECKED, stripped[6:].strip()
+    if stripped.startswith("- "):
+        style = ParagraphStyle.BULLET2 if indent > 0 else ParagraphStyle.BULLET
+        return style, stripped[2:].strip()
+    return ParagraphStyle.PLAIN, line
+
+
+def _styled_text_values(markdown: str) -> tuple[list[str | int], dict[CrdtId, LwwValue]]:
+    """Build root text CRDT values and paragraph style map from Markdown."""
+    values: list[str | int] = []
+    styles: dict[CrdtId, LwwValue] = {}
+    next_id = 16
+    first_line = True
+
+    for line in markdown.splitlines() or [""]:
+        style, visible_text = _markdown_line_style(line)
+        if first_line:
+            styles[END_MARKER] = LwwValue(CrdtId(1, 15), style)
+            first_line = False
+        else:
+            newline_id = CrdtId(1, next_id)
+            values.append("\n")
+            next_id += 1
+            styles[newline_id] = LwwValue(CrdtId(1, next_id), style)
+
+        for value in _inline_markdown_values(visible_text):
+            values.append(value)
+            next_id += 1 if isinstance(value, int) else max(1, len(value))
+
+    return values, styles
+
+
+def _crdt_sequence_from_values(values: list[str | int]) -> CrdtSequence:
+    """Create a simple ordered CRDT sequence for text/formatting values."""
+    items = []
+    prev = END_MARKER
+    next_id = 16
+    for value in values:
+        item_id = CrdtId(1, next_id)
+        next_id += 1 if isinstance(value, int) else max(1, len(value))
+        item = CrdtSequenceItem(
+            item_id=item_id,
+            left_id=prev,
+            right_id=END_MARKER,
+            deleted_length=0,
+            value=value,
+        )
+        if items:
+            items[-1].right_id = item_id
+        items.append(item)
+        prev = item_id
+    return CrdtSequence(items)
+
+
+def markdown_page_rm_bytes(markdown: str, author_uuid: Optional[str] = None) -> bytes:
+    """Return serialized ``.rm`` bytes for styled native typed text.
+
+    Supported Markdown subset:
+    - ``# Heading`` -> native heading paragraph
+    - ``## Subheading`` -> native bold paragraph
+    - ``- item`` / indented ``- item`` -> bullet / nested bullet
+    - ``- [ ] item`` / ``- [x] item`` -> unchecked / checked checkbox
+    - inline ``**bold**`` and ``*italic*`` spans
+    """
+    au = _author_uuid(author_uuid)
+    values, styles = _styled_text_values(markdown)
+    visible_text = _plain_text_from_values(values)
+    blocks = list(simple_text_document("", author_uuid=au))
+    for i, block in enumerate(blocks):
+        if isinstance(block, PageInfoBlock):
+            blocks[i] = PageInfoBlock(
+                loads_count=block.loads_count,
+                merges_count=block.merges_count,
+                text_chars_count=len(visible_text) + 1,
+                text_lines_count=visible_text.count("\n") + 1,
+                type_folio_use_count=block.type_folio_use_count,
+            )
+        elif isinstance(block, RootTextBlock):
+            blocks[i] = RootTextBlock(
+                block_id=CrdtId(0, 0),
+                value=Text(
+                    items=_crdt_sequence_from_values(values),
+                    styles=styles,
+                    pos_x=block.value.pos_x,
+                    pos_y=block.value.pos_y,
+                    width=block.value.width,
+                ),
+            )
+
+    buf = io.BytesIO()
+    write_blocks(buf, blocks, options={"version": WRITE_VERSION})
+    return buf.getvalue()
+
+
+def page_rm_bytes(
+    text: str = "",
+    author_uuid: Optional[str] = None,
+    content_markdown: Optional[str] = None,
+) -> bytes:
     """Return serialized ``.rm`` bytes for a single drawable page.
 
     With ``text=""`` this is a blank page; with text it is seeded with typed
-    paragraphs (split on newlines). The result always contains a drawable layer
-    node, so :func:`remarkable_mcp.strokes.append_strokes` works on it.
+    paragraphs (split on newlines). Pass ``content_markdown`` to seed styled
+    native typed text using :func:`markdown_page_rm_bytes`. The result always
+    contains a drawable layer node, so :func:`remarkable_mcp.strokes.append_strokes`
+    works on it.
     """
+    if content_markdown is not None:
+        return markdown_page_rm_bytes(content_markdown, author_uuid=author_uuid)
     au = _author_uuid(author_uuid)
     blocks = list(simple_text_document(text, author_uuid=au))
     buf = io.BytesIO()

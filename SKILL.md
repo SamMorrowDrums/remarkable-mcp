@@ -90,6 +90,7 @@ For handwriting OCR, add a Google Vision API key:
 | `remarkable_image` | Render pages as PNG or SVG |
 | `remarkable_status` | Check connection and device info |
 | `remarkable_tags` | Set official metadata tags/status labels |
+| `remarkable_author` | Create native notebooks, including optional styled Markdown seed text |
 
 ## Workflow
 

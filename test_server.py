@@ -2810,6 +2810,7 @@ class TestWriteTools:
             "remarkable_move",
             "remarkable_rename",
             "remarkable_author",
+            "remarkable_tags",
             "remarkable_delete",
         ]
 
@@ -3144,6 +3145,7 @@ class TestCloudWriteDispatch:
             "remarkable_move",
             "remarkable_rename",
             "remarkable_author",
+            "remarkable_tags",
             "remarkable_delete",
         ]:
             mcp._tool_manager._tools.pop(name, None)
@@ -3202,6 +3204,41 @@ class TestCloudWriteDispatch:
                 assert data["has_text"] is True
                 client.create_notebook.assert_called_once_with(
                     "Cloud Sketches", "folder-1", "Agenda\nFollow-ups"
+                )
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_author_create_document_dispatches_markdown_content(self):
+        """Cloud remarkable_author accepts styled Markdown notebook text."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                folder = self._make_item("folder-1", "Inbox", is_folder=True)
+                mock_doc = Mock()
+                mock_doc.id = "styled-native-doc"
+                client = Mock(spec=["get_meta_items", "create_notebook"])
+                client.get_meta_items.return_value = [folder]
+                client.create_notebook.return_value = mock_doc
+                markdown = "# Title\nPlain **bold** and *italic* text\n- [ ] Follow up"
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await mcp.call_tool(
+                        "remarkable_author",
+                        {
+                            "method": "create_document",
+                            "name": "Styled Notes",
+                            "content_markdown": markdown,
+                            "folder": "/Inbox",
+                        },
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["created"] is True
+                assert data["has_markdown"] is True
+                assert data["has_text"] is False
+                client.create_notebook.assert_called_once_with(
+                    "Styled Notes", "folder-1", None, content_markdown=markdown
                 )
             finally:
                 self._cleanup()

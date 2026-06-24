@@ -635,7 +635,10 @@ def _cloud_delete(document: str) -> str:
 
 
 def _cloud_author_create_document(
-    name: Optional[str], text: Optional[str], folder: Optional[str]
+    name: Optional[str],
+    text: Optional[str],
+    folder: Optional[str],
+    content_markdown: Optional[str] = None,
 ) -> str:
     """Create a new native notebook through the cloud sync protocol."""
     if not name:
@@ -667,7 +670,10 @@ def _cloud_author_create_document(
             suggestion="Use cloud mode for create_document or SSH mode for full authoring.",
         )
 
-    doc = create_notebook(name, parent_id, text)
+    if content_markdown is not None:
+        doc = create_notebook(name, parent_id, text, content_markdown=content_markdown)
+    else:
+        doc = create_notebook(name, parent_id, text)
     doc_id = getattr(doc, "id", None)
     _invalidate_client_cache(client)
     result = {
@@ -677,6 +683,7 @@ def _cloud_author_create_document(
         "total_pages": 1,
         "folder": folder_path,
         "has_text": bool(text),
+        "has_markdown": bool(content_markdown),
         "transport": "cloud",
     }
     hint = f"Created notebook '{name}' in the reMarkable cloud. Use remarkable_browse() to verify."
@@ -745,6 +752,7 @@ def _cloud_author_daily_notebook(
     name_format: Optional[str],
     text: Optional[str],
     folder: Optional[str],
+    content_markdown: Optional[str] = None,
 ) -> str:
     """Find or create a dated native notebook through the cloud sync protocol."""
     normalized_date, name, error = _daily_notebook_name(daily_date, name_format)
@@ -792,7 +800,10 @@ def _cloud_author_daily_notebook(
             suggestion="Use cloud mode for daily_notebook or SSH mode for full authoring.",
         )
 
-    doc = create_notebook(name, parent_id, text)
+    if content_markdown is not None:
+        doc = create_notebook(name, parent_id, text, content_markdown=content_markdown)
+    else:
+        doc = create_notebook(name, parent_id, text)
     doc_id = getattr(doc, "id", None)
     _invalidate_client_cache(client)
     path = f"{folder_path.rstrip('/')}/{name}" if folder_path != "/" else f"/{name}"
@@ -806,6 +817,7 @@ def _cloud_author_daily_notebook(
             "folder": folder_path,
             "date": normalized_date,
             "has_text": bool(text),
+            "has_markdown": bool(content_markdown),
             "transport": "cloud",
         },
         f"Created daily notebook '{name}' in the reMarkable cloud.",
@@ -1084,7 +1096,12 @@ def _author_add_page(document: str) -> str:
     return make_response(result, hint)
 
 
-def _author_create_document(name: str, text: Optional[str], folder: Optional[str]) -> str:
+def _author_create_document(
+    name: Optional[str],
+    text: Optional[str],
+    folder: Optional[str],
+    content_markdown: Optional[str] = None,
+) -> str:
     """Create a new native notebook (blank, or seeded with typed text)."""
     if not name:
         return make_error(
@@ -1111,7 +1128,9 @@ def _author_create_document(name: str, text: Optional[str], folder: Optional[str
     doc_uuid = nb.new_uuid()
     page_id = nb.new_uuid()
     author_uuid = nb.new_uuid()
-    page_bytes = nb.page_rm_bytes(text or "", author_uuid=author_uuid)
+    page_bytes = nb.page_rm_bytes(
+        text or "", author_uuid=author_uuid, content_markdown=content_markdown
+    )
     content_data = nb.new_notebook_content([page_id], author_uuid)
     metadata = nb.new_document_metadata(name, parent=parent_id)
 
@@ -1130,6 +1149,7 @@ def _author_create_document(name: str, text: Optional[str], folder: Optional[str
         "total_pages": 1,
         "paper_size": list(nb.DEFAULT_PAPER),
         "has_text": bool(text),
+        "has_markdown": bool(content_markdown),
         "folder": folder or "/",
         "transport": "ssh",
     }
@@ -1142,6 +1162,7 @@ def _author_daily_notebook(
     name_format: Optional[str],
     text: Optional[str],
     folder: Optional[str],
+    content_markdown: Optional[str] = None,
 ) -> str:
     """Find or create a date-based native notebook over SSH."""
     normalized_date, name, error = _daily_notebook_name(daily_date, name_format)
@@ -1180,7 +1201,7 @@ def _author_daily_notebook(
             f"Found existing daily notebook '{name}'.",
         )
 
-    created = json.loads(_author_create_document(name, text, folder))
+    created = json.loads(_author_create_document(name, text, folder, content_markdown))
     path = f"{folder_path.rstrip('/')}/{name}" if folder_path != "/" else f"/{name}"
     created.update(
         {
@@ -1207,6 +1228,7 @@ def register_write_tools():
         strokes: Optional[list] = None,
         name: Optional[str] = None,
         text: Optional[str] = None,
+        content_markdown: Optional[str] = None,
         folder: Optional[str] = None,
         date: Optional[str] = None,
         name_format: Optional[str] = None,
@@ -1244,11 +1266,13 @@ def register_write_tools():
           notebooks support this (PDF/EPUB pages already exist).
 
         - method="create_document": requires `name`. Creates a new native notebook
-          in `folder` (default root). Leave `text` EMPTY for a blank notebook —
-          that is the default and the correct choice. Only pass `text` when the
-          user EXPLICITLY asks for specific typed content; never invent a title,
-          placeholder, or "created by" line. Returns the new document id and
-          first-page geometry.
+          in `folder` (default root). Leave `text` and `content_markdown` EMPTY for
+          a blank notebook — that is the default and the correct choice. Only pass
+          `text` or `content_markdown` when the user EXPLICITLY asks for specific
+          typed content. `content_markdown` supports a small native-styled Markdown
+          subset: headings, bold/italic spans, bullets, nested bullets, and
+          checkboxes. Never invent a title, placeholder, or "created by" line.
+          Returns the new document id and first-page geometry.
 
         - method="daily_notebook": finds or creates one date-based native
           notebook. Optional `date` defaults to today and must be YYYY-MM-DD when
@@ -1274,6 +1298,10 @@ def register_write_tools():
             daily_notebook when created). Omit it unless the user explicitly
             requested specific content; never fabricate placeholder text.
             Paragraphs split on newlines.
+        - content_markdown: Optional styled typed text for the first page
+            (create_document, daily_notebook when created). Supports `# Heading`,
+            `## Bold paragraph`, bullets, nested bullets, `- [ ]`/`- [x]`
+            checkboxes, and inline `**bold**` / `*italic*` spans.
         - folder: Destination folder path (create_document, daily_notebook;
             default "/").
         - date: Optional ISO date for daily_notebook (YYYY-MM-DD; default today).
@@ -1287,6 +1315,8 @@ def register_write_tools():
         - remarkable_author(method="create_document", name="Sketches")
         - remarkable_author(method="create_document", name="Meeting notes",
             text="Agenda\nFollow-ups")  # only when the user supplied that text
+        - remarkable_author(method="create_document", name="Styled notes",
+            content_markdown="# Agenda\n- [ ] Follow up\nPlain **bold** and *italic*")
         - remarkable_author(method="daily_notebook", folder="/Inbox",
             name_format="Daily Notes {date}")
         </examples>
@@ -1299,9 +1329,11 @@ def register_write_tools():
 
             if _is_cloud_mode():
                 if method == "create_document":
-                    return _cloud_author_create_document(name, text, folder)
+                    return _cloud_author_create_document(name, text, folder, content_markdown)
                 if method == "daily_notebook":
-                    return _cloud_author_daily_notebook(date, name_format, text, folder)
+                    return _cloud_author_daily_notebook(
+                        date, name_format, text, folder, content_markdown
+                    )
                 return make_error(
                     error_type="unsupported_in_cloud",
                     message=(
@@ -1320,9 +1352,9 @@ def register_write_tools():
             if method == "add_page":
                 return _author_add_page(document)
             if method == "create_document":
-                return _author_create_document(name, text, folder)
+                return _author_create_document(name, text, folder, content_markdown)
             if method == "daily_notebook":
-                return _author_daily_notebook(date, name_format, text, folder)
+                return _author_daily_notebook(date, name_format, text, folder, content_markdown)
             return make_error(
                 error_type="unknown_method",
                 message=f"Unknown method: '{method}'.",

@@ -1108,12 +1108,15 @@ class RemarkableClient:
         name: str,
         parent_id: str = "",
         text: Optional[str] = None,
+        content_markdown: Optional[str] = None,
     ) -> Document:
         """Create a native notebook in the cloud and return it.
 
-        This mirrors the SSH ``remarkable_author(method="create_document")``
-        path, but commits the generated native notebook blobs through the cloud
-        sync v3/v4 root instead of writing to xochitl over SSH.
+        This writes the same document shape that xochitl expects for a native
+        notebook: metadata, content JSON with a cPages index, and one `.rm`
+        page. When `content_markdown` is provided the first page is seeded with
+        styled typed text; when `text` is provided it is seeded with plain typed
+        text; otherwise it is blank.
         """
         from remarkable_mcp import notebooks as nb
 
@@ -1121,7 +1124,9 @@ class RemarkableClient:
         page_id = nb.new_uuid()
         author_uuid = nb.new_uuid()
 
-        page_bytes = nb.page_rm_bytes(text or "", author_uuid=author_uuid)
+        page_bytes = nb.page_rm_bytes(
+            text or "", author_uuid=author_uuid, content_markdown=content_markdown
+        )
         content_json = nb.new_notebook_content([page_id], author_uuid)
         metadata = nb.new_document_metadata(name, parent=parent_id)
 
