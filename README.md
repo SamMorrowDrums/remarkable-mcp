@@ -435,7 +435,7 @@ Write tools let you upload, organize, and manage documents on your reMarkable. *
 | Move | ✅ | ✅ | ❌ |
 | Rename | ✅ | ✅ | ❌ |
 | Delete | ✅ (→ trash) | ✅ | ❌ |
-| Create native notebook | ✅ (`create_document`) | ✅ | ❌ |
+| Create native notebook | ✅ (`create_document`, `daily_notebook`) | ✅ | ❌ |
 | Native add page / draw | ❌ | ✅ | ❌ |
 
 ### Disabling Write Tools (read-only mode)
@@ -485,7 +485,7 @@ Or set the environment variable:
 | `remarkable_move(document, dest_folder)` | Move a document or folder (cloud and SSH) |
 | `remarkable_rename(document, new_name)` | Rename a document or folder (cloud and SSH) |
 | `remarkable_delete(document)` | Delete a document or folder — destructive (cloud and SSH) |
-| `remarkable_author(method, ...)` | Author native notebooks/ink — cloud supports `create_document`; SSH supports `draw`, `add_page`, and `create_document` |
+| `remarkable_author(method, ...)` | Author native notebooks/ink — cloud supports `create_document` and `daily_notebook`; SSH supports `draw`, `add_page`, `create_document`, and `daily_notebook` |
 
 ### Safety
 
@@ -513,8 +513,8 @@ remarkable_rename("Untitled", "Q4 Planning Notes")
 remarkable_delete("Old Draft")
 
 # Author native ink and notebooks
-# Cloud mode supports create_document. SSH mode supports create_document,
-# add_page, and draw.
+# Cloud mode supports create_document and daily_notebook. SSH mode also supports
+# add_page and draw.
 # Append pen/highlighter strokes to a page (SSH only; coordinates normalized [0,1] from
 # the page's top-left). The interactive canvas Save button calls this too.
 remarkable_author(
@@ -527,6 +527,13 @@ remarkable_author(method="add_page", document="Ideas")
 
 # Create a new (blank) notebook — the common case
 remarkable_author(method="create_document", name="Sketches")
+
+# Create or find a date-based notebook for capture/review workflows
+remarkable_author(
+    method="daily_notebook",
+    folder="/Inbox",
+    name_format="Daily Notes {date}",
+)
 
 # Only seed typed text when the user explicitly requested it.
 remarkable_author(method="create_document", name="Meeting notes", text="Agenda\nFollow-ups")
@@ -559,7 +566,7 @@ When write mode is on (the default) **and** the active transport is SSH, the can
 - **＋ Page** (native notebooks only) — queues a new blank page locally that you can navigate to and draw on immediately. **Save** materializes the queued page(s) on the device first, then writes any cached strokes.
 - One source of truth: the canvas calls the **same** `remarkable_author` tool a model would call (`method="draw"` on Save, `method="add_page"` for ＋Page), so the human path and the model path produce byte-identical results.
 
-The Save / Draw / ＋Page controls are hidden when the page isn't writable (read-only mode, or a non-SSH transport), and the canvas falls back to a plain image viewer. Cloud mode can still create a new native notebook through `remarkable_author(method="create_document")`; editing existing pages remains SSH-only. The iframe bridge follows the MCP Apps spec but is best validated against your specific client.
+The Save / Draw / ＋Page controls are hidden when the page isn't writable (read-only mode, or a non-SSH transport), and the canvas falls back to a plain image viewer. Cloud mode can still create new native notebooks through `remarkable_author(method="create_document")` and create-or-find date-based notebooks through `remarkable_author(method="daily_notebook")`; editing existing pages remains SSH-only. The iframe bridge follows the MCP Apps spec but is best validated against your specific client.
 
 ---
 

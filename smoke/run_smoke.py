@@ -496,6 +496,22 @@ async def run_write_phase(session, mode, rec, registered):
             nb_path = f"{folder_path}/{nb_name}"
             if state == PASS:
                 created.insert(0, ("doc", nb_path))  # delete before its folder
+                daily_date = "2099-01-02"
+                daily_name = f"{runid}-daily-{daily_date}"
+                daily_payload, daily_err, daily_exc = await call_tool(
+                    session,
+                    "remarkable_author",
+                    {
+                        "method": "daily_notebook",
+                        "date": daily_date,
+                        "folder": folder_path,
+                        "name_format": f"{runid}-daily-{{date}}",
+                    },
+                    TIMEOUTS["remarkable_author"],
+                )
+                daily_state, _ = classify_ok(daily_payload, daily_err, daily_exc)
+                if daily_state == PASS:
+                    created.insert(0, ("doc", f"{folder_path}/{daily_name}"))
                 if is_ssh:
                     ap_payload, ap_err, ap_exc = await call_tool(
                         session,
@@ -522,11 +538,20 @@ async def run_write_phase(session, mode, rec, registered):
                         TIMEOUTS["remarkable_author"],
                     )
                     dr_state, _ = classify_ok(dr_payload, dr_err, dr_exc)
-                    sub = f"create_document=PASS; add_page={ap_state}; draw={dr_state}"
-                    final = PASS if (ap_state == PASS and dr_state == PASS) else FAIL
+                    sub = (
+                        f"create_document=PASS; daily_notebook={daily_state}; "
+                        f"add_page={ap_state}; draw={dr_state}"
+                    )
+                    final = (
+                        PASS
+                        if (daily_state == PASS and ap_state == PASS and dr_state == PASS)
+                        else FAIL
+                    )
                     rec.record(mode, "remarkable_author", final, sub)
                 else:
-                    rec.record(mode, "remarkable_author", PASS, "create_document=PASS")
+                    final = PASS if daily_state == PASS else FAIL
+                    sub = f"create_document=PASS; daily_notebook={daily_state}"
+                    rec.record(mode, "remarkable_author", final, sub)
             else:
                 rec.record(mode, "remarkable_author", state, note)
 

@@ -3051,6 +3051,127 @@ class TestCloudWriteDispatch:
                 self._cleanup()
 
     @pytest.mark.asyncio
+    async def test_cloud_author_daily_notebook_creates_missing_notebook(self):
+        """Cloud daily_notebook creates a dated native notebook when absent."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                folder = self._make_item("folder-1", "Inbox", is_folder=True)
+                mock_doc = Mock()
+                mock_doc.id = "daily-doc-id"
+                client = Mock(spec=["get_meta_items", "create_notebook"])
+                client.get_meta_items.return_value = [folder]
+                client.create_notebook.return_value = mock_doc
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await mcp.call_tool(
+                        "remarkable_author",
+                        {
+                            "method": "daily_notebook",
+                            "date": "2026-06-24",
+                            "folder": "/Inbox",
+                            "name_format": "Daily Notes {date}",
+                            "text": "Starter notes",
+                        },
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["created"] is True
+                assert data["found"] is False
+                assert data["document"] == "Daily Notes 2026-06-24"
+                assert data["document_id"] == "daily-doc-id"
+                assert data["path"] == "/Inbox/Daily Notes 2026-06-24"
+                assert data["date"] == "2026-06-24"
+                assert data["folder"] == "/Inbox"
+                assert data["transport"] == "cloud"
+                client.create_notebook.assert_called_once_with(
+                    "Daily Notes 2026-06-24", "folder-1", "Starter notes"
+                )
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_author_daily_notebook_returns_existing_notebook(self):
+        """Cloud daily_notebook is idempotent when the notebook already exists."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                folder = self._make_item("folder-1", "Inbox", is_folder=True)
+                existing = self._make_item(
+                    "daily-doc-id", "Daily Notes 2026-06-24", parent="folder-1"
+                )
+                client = Mock(spec=["get_meta_items", "create_notebook"])
+                client.get_meta_items.return_value = [folder, existing]
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await mcp.call_tool(
+                        "remarkable_author",
+                        {
+                            "method": "daily_notebook",
+                            "date": "2026-06-24",
+                            "folder": "/Inbox",
+                        },
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["created"] is False
+                assert data["found"] is True
+                assert data["document"] == "Daily Notes 2026-06-24"
+                assert data["document_id"] == "daily-doc-id"
+                assert data["path"] == "/Inbox/Daily Notes 2026-06-24"
+                assert data["transport"] == "cloud"
+                client.create_notebook.assert_not_called()
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_author_daily_notebook_rejects_invalid_date(self):
+        """daily_notebook requires an ISO YYYY-MM-DD date when provided."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                client = Mock(spec=["get_meta_items", "create_notebook"])
+                client.get_meta_items.return_value = []
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await mcp.call_tool(
+                        "remarkable_author",
+                        {"method": "daily_notebook", "date": "24-06-2026"},
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["_error"]["type"] == "invalid_date"
+                client.create_notebook.assert_not_called()
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_author_daily_notebook_rejects_missing_folder(self):
+        """daily_notebook returns a structured error for missing folders."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                folder = self._make_item("folder-1", "Inbox", is_folder=True)
+                client = Mock(spec=["get_meta_items", "create_notebook"])
+                client.get_meta_items.return_value = [folder]
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await mcp.call_tool(
+                        "remarkable_author",
+                        {
+                            "method": "daily_notebook",
+                            "date": "2026-06-24",
+                            "folder": "/Missing",
+                        },
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["_error"]["type"] == "folder_not_found"
+                client.create_notebook.assert_not_called()
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
     async def test_cloud_author_rejects_add_page_and_draw(self):
         """Cloud authoring intentionally exposes create_document only."""
         from remarkable_mcp.write_tools import register_write_tools

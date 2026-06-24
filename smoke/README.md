@@ -34,7 +34,7 @@ Each `(mode, tool)` cell is one of:
 | Result | Meaning |
 | ------ | ------- |
 | **PASS** ✅ | The tool ran and returned a sensible result for this transport. |
-| **N/A** ⛔ | The transport does not expose this tool — it is *correctly hidden* (e.g. `mkdir`/`move`/`rename`/`delete` over USB web, or `remarkable_author` outside SSH). This is expected, **not** a failure. |
+| **N/A** ⛔ | The transport does not expose this tool — it is *correctly hidden* (e.g. `mkdir`/`move`/`rename`/`delete` over USB web, or native authoring over USB web). This is expected, **not** a failure. |
 | **SKIP** | The tool could not be run (mode unreachable, or no target document to read). |
 | **FAIL** ❌ | The tool is exposed but errored or returned the wrong thing. **This is the only result that means something is broken.** |
 
@@ -53,13 +53,13 @@ tool visibility changes.
 | `remarkable_status` / `browse` / `recent` / `search` / `read` / `image` / `canvas` | PASS | PASS | PASS |
 | `remarkable_upload` | PASS | PASS | PASS |
 | `remarkable_mkdir` / `rename` / `move` / `delete` | PASS | **N/A** | PASS |
-| `remarkable_author` | PASS (`create_document`) | **N/A** | PASS |
+| `remarkable_author` | PASS (`create_document`, `daily_notebook`) | **N/A** | PASS |
 
 USB web is read + render + upload-to-root only — the device firmware HTTP server
 exposes no folder/move/rename/delete/native authoring endpoints, so those tools
 are not registered in that mode (shown as N/A). Cloud mode exposes
-`remarkable_author` for `create_document` only; SSH mode validates
-`create_document`, `add_page`, and `draw`.
+`remarkable_author` for `create_document` and `daily_notebook` only; SSH mode
+validates `create_document`, `daily_notebook`, `add_page`, and `draw`.
 
 ### Upload is verified end-to-end (cloud/ssh)
 

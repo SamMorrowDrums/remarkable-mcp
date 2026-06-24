@@ -25,6 +25,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import date as date_cls
 from typing import Optional
 
 from mcp.server.fastmcp import Context
@@ -533,6 +534,135 @@ def _cloud_author_create_document(
     return make_response(result, hint)
 
 
+def _daily_notebook_name(
+    daily_date: Optional[str], name_format: Optional[str]
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Return ``(date_string, notebook_name, error_json)``."""
+    date_string = daily_date or date_cls.today().isoformat()
+    try:
+        parsed_date = date_cls.fromisoformat(date_string)
+    except ValueError:
+        return (
+            None,
+            None,
+            make_error(
+                error_type="invalid_date",
+                message=f"Invalid date: '{daily_date}'.",
+                suggestion='Use ISO format: date="YYYY-MM-DD".',
+            ),
+        )
+
+    fmt = name_format or "Daily Notes {date}"
+    try:
+        name = fmt.format(date=parsed_date.isoformat())
+    except (KeyError, IndexError, ValueError) as e:
+        return (
+            None,
+            None,
+            make_error(
+                error_type="invalid_name_format",
+                message=f"Invalid name_format: {e}",
+                suggestion='Use a format string such as "Daily Notes {date}".',
+            ),
+        )
+    if not name.strip():
+        return (
+            None,
+            None,
+            make_error(
+                error_type="invalid_name_format",
+                message="name_format produced an empty notebook name.",
+                suggestion='Use a format string such as "Daily Notes {date}".',
+            ),
+        )
+    return parsed_date.isoformat(), name.strip(), None
+
+
+def _find_child_document(collection: list, parent_id: str, name: str):
+    """Find a non-folder child document with ``name`` under ``parent_id``."""
+    for item in collection:
+        if getattr(item, "Parent", "") != parent_id:
+            continue
+        if getattr(item, "VissibleName", None) != name:
+            continue
+        if getattr(item, "is_folder", False):
+            continue
+        return item
+    return None
+
+
+def _cloud_author_daily_notebook(
+    daily_date: Optional[str],
+    name_format: Optional[str],
+    text: Optional[str],
+    folder: Optional[str],
+) -> str:
+    """Find or create a dated native notebook through the cloud sync protocol."""
+    normalized_date, name, error = _daily_notebook_name(daily_date, name_format)
+    if error:
+        return error
+    assert normalized_date is not None
+    assert name is not None
+
+    client = get_rmapi()
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    folder_path = folder or "/"
+    parent_id = _resolve_parent_id(folder_path, items_by_id, collection)
+    if parent_id is None:
+        folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
+        return make_error(
+            error_type="folder_not_found",
+            message=f"Folder not found: '{folder}'",
+            suggestion="Use remarkable_browse('/') to see available folders.",
+            did_you_mean=folders[:5] if folders else None,
+        )
+
+    existing = _find_child_document(collection, parent_id, name)
+    if existing:
+        path = get_item_path(existing, items_by_id)
+        return make_response(
+            {
+                "created": False,
+                "found": True,
+                "document": name,
+                "document_id": getattr(existing, "ID", None),
+                "path": path,
+                "folder": folder_path,
+                "date": normalized_date,
+                "transport": "cloud",
+            },
+            f"Found existing daily notebook '{name}'.",
+        )
+
+    create_notebook = getattr(client, "create_notebook", None)
+    if not callable(create_notebook):
+        return make_error(
+            error_type="unsupported_transport",
+            message="This transport cannot create native notebooks.",
+            suggestion="Use cloud mode for daily_notebook or SSH mode for full authoring.",
+        )
+
+    doc = create_notebook(name, parent_id, text)
+    doc_id = getattr(doc, "id", None)
+    _invalidate_client_cache(client)
+    path = f"{folder_path.rstrip('/')}/{name}" if folder_path != "/" else f"/{name}"
+    return make_response(
+        {
+            "created": True,
+            "found": False,
+            "document": name,
+            "document_id": doc_id,
+            "path": path,
+            "folder": folder_path,
+            "date": normalized_date,
+            "has_text": bool(text),
+            "transport": "cloud",
+        },
+        f"Created daily notebook '{name}' in the reMarkable cloud.",
+    )
+
+
 class _DeleteConfirmation(BaseModel):
     """Schema for confirming a destructive delete via elicitation."""
 
@@ -858,6 +988,62 @@ def _author_create_document(name: str, text: Optional[str], folder: Optional[str
     return make_response(result, hint)
 
 
+def _author_daily_notebook(
+    daily_date: Optional[str],
+    name_format: Optional[str],
+    text: Optional[str],
+    folder: Optional[str],
+) -> str:
+    """Find or create a date-based native notebook over SSH."""
+    normalized_date, name, error = _daily_notebook_name(daily_date, name_format)
+    if error:
+        return error
+    assert normalized_date is not None
+    assert name is not None
+
+    ssh_client = _get_ssh_client()
+    collection = ssh_client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    folder_path = folder or "/"
+    parent_id = _resolve_parent_id(folder_path, items_by_id, collection)
+    if parent_id is None:
+        folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
+        return make_error(
+            error_type="folder_not_found",
+            message=f"Folder not found: '{folder}'",
+            suggestion="Use remarkable_browse('/') to see available folders.",
+            did_you_mean=folders[:5] if folders else None,
+        )
+
+    existing = _find_child_document(collection, parent_id, name)
+    if existing:
+        return make_response(
+            {
+                "created": False,
+                "found": True,
+                "document": name,
+                "document_id": getattr(existing, "ID", None),
+                "path": get_item_path(existing, items_by_id),
+                "folder": folder_path,
+                "date": normalized_date,
+                "transport": "ssh",
+            },
+            f"Found existing daily notebook '{name}'.",
+        )
+
+    created = json.loads(_author_create_document(name, text, folder))
+    path = f"{folder_path.rstrip('/')}/{name}" if folder_path != "/" else f"/{name}"
+    created.update(
+        {
+            "created": True,
+            "found": False,
+            "path": path,
+            "date": normalized_date,
+        }
+    )
+    return make_response(created, f"Created daily notebook '{name}'.")
+
+
 def register_write_tools():
     """Register all write tools with the MCP server."""
     # Imported lazily to break a circular import: server.py imports this module
@@ -873,23 +1059,25 @@ def register_write_tools():
         name: Optional[str] = None,
         text: Optional[str] = None,
         folder: Optional[str] = None,
+        date: Optional[str] = None,
+        name_format: Optional[str] = None,
         ui_submitted: bool = False,
         ctx: Context = None,
     ) -> str:
         """
         <usecase>Author native reMarkable ink and notebooks. ONE compound write
-        primitive with three methods: "draw" appends pen/highlighter strokes to a
-        page, "add_page" appends a blank drawable page to a notebook, and
+        primitive with four methods: "draw" appends pen/highlighter strokes to a
+        page, "add_page" appends a blank drawable page to a notebook,
         "create_document" creates a new notebook (optionally seeded with typed
-        text). This is the single tool behind the interactive canvas (Save → draw,
+        text), and "daily_notebook" finds or creates a date-based notebook.
         ＋Page → add_page, new notebook → create_document) AND model-driven markup
         (highlighting, underlining, marking) — the model composes the strokes.</usecase>
         <instructions>
         Requires write mode (the default; disabled with --read-only). In cloud
-        mode, only method="create_document" is supported. In SSH mode, all
-        methods are supported and non-destructive (draw appends to existing ink
-        and backs the page up to {pageId}.rm.bak the first time), so no
-        confirmation prompt is required.
+        mode, only method="create_document" and method="daily_notebook" are
+        supported. In SSH mode, all methods are supported and non-destructive
+        (draw appends to existing ink and backs the page up to {pageId}.rm.bak
+        the first time), so no confirmation prompt is required.
 
         Pick the method, then pass only that method's parameters:
 
@@ -913,12 +1101,18 @@ def register_write_tools():
           placeholder, or "created by" line. Returns the new document id and
           first-page geometry.
 
+        - method="daily_notebook": finds or creates one date-based native
+          notebook. Optional `date` defaults to today and must be YYYY-MM-DD when
+          provided. Optional `name_format` defaults to "Daily Notes {date}".
+          Optional `folder` defaults to root. Optional `text` seeds the first
+          page only when a new notebook is created.
+
         The interactive canvas calls this exact tool via the MCP Apps bridge,
         passing ui_submitted=true for draw (the human already chose Save). A model
         calling it directly should omit ui_submitted.
         </instructions>
         <parameters>
-        - method: "draw" | "add_page" | "create_document".
+        - method: "draw" | "add_page" | "create_document" | "daily_notebook".
         - document: Target document name/path/id (draw, add_page).
         - page: 1-based page number (draw).
         - strokes: List of stroke dicts (draw). Each:
@@ -927,10 +1121,14 @@ def register_write_tools():
              "color": "black" | "yellow" | ...,
              "width": <optional float>, "thickness_scale": <optional float>}
         - name: Title of the new notebook (create_document).
-        - text: Optional typed text for the first page (create_document). Omit it
-            unless the user explicitly requested specific content; never fabricate
-            placeholder text. Paragraphs split on newlines.
-        - folder: Destination folder path (create_document; default "/").
+        - text: Optional typed text for the first page (create_document,
+            daily_notebook when created). Omit it unless the user explicitly
+            requested specific content; never fabricate placeholder text.
+            Paragraphs split on newlines.
+        - folder: Destination folder path (create_document, daily_notebook;
+            default "/").
+        - date: Optional ISO date for daily_notebook (YYYY-MM-DD; default today).
+        - name_format: Optional daily_notebook format string with `{date}`.
         - ui_submitted: Set by the canvas app when the user clicked Save. Models omit it.
         </parameters>
         <examples>
@@ -940,6 +1138,8 @@ def register_write_tools():
         - remarkable_author(method="create_document", name="Sketches")
         - remarkable_author(method="create_document", name="Meeting notes",
             text="Agenda\nFollow-ups")  # only when the user supplied that text
+        - remarkable_author(method="daily_notebook", folder="/Inbox",
+            name_format="Daily Notes {date}")
         </examples>
         """
 
@@ -951,14 +1151,19 @@ def register_write_tools():
             if _is_cloud_mode():
                 if method == "create_document":
                     return _cloud_author_create_document(name, text, folder)
+                if method == "daily_notebook":
+                    return _cloud_author_daily_notebook(date, name_format, text, folder)
                 return make_error(
                     error_type="unsupported_in_cloud",
-                    message=f'Cloud mode supports method="create_document" only, not "{method}".',
+                    message=(
+                        'Cloud mode supports method="create_document" and '
+                        f'method="daily_notebook" only, not "{method}".'
+                    ),
                     suggestion=(
                         "Use SSH mode for add_page/draw, or create a new cloud notebook "
                         'with remarkable_author(method="create_document", name=...).'
                     ),
-                    did_you_mean=["create_document"],
+                    did_you_mean=["create_document", "daily_notebook"],
                 )
 
             if method == "draw":
@@ -967,11 +1172,13 @@ def register_write_tools():
                 return _author_add_page(document)
             if method == "create_document":
                 return _author_create_document(name, text, folder)
+            if method == "daily_notebook":
+                return _author_daily_notebook(date, name_format, text, folder)
             return make_error(
                 error_type="unknown_method",
                 message=f"Unknown method: '{method}'.",
-                suggestion='Use method="draw", "add_page", or "create_document".',
-                did_you_mean=["draw", "add_page", "create_document"],
+                suggestion='Use method="draw", "add_page", "create_document", or "daily_notebook".',
+                did_you_mean=["draw", "add_page", "create_document", "daily_notebook"],
             )
 
         return await asyncio.to_thread(_impl)
