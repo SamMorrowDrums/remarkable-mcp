@@ -102,6 +102,7 @@ class TestMCPServerInitialization:
             "remarkable_search",
             "remarkable_review",
             "remarkable_status",
+            "remarkable_tags",
             "remarkable_image",
             "remarkable_canvas",
         ]
@@ -117,7 +118,7 @@ class TestMCPServerInitialization:
         ``daily_notebook``; add_page/draw remain SSH-only.
         """
         tools = await mcp.list_tools()
-        assert len(tools) == 14, f"Expected 14 tools, got {len(tools)}"
+        assert len(tools) == 15, f"Expected 15 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -1344,7 +1345,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await mcp.list_tools()
 
-        assert len(tools) == 14
+        assert len(tools) == 15
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:
@@ -3323,6 +3324,59 @@ class TestCloudWriteDispatch:
                 data = json.loads(result[0][0].text)
                 assert data["_error"]["type"] == "folder_not_found"
                 client.create_notebook.assert_not_called()
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_tags_sets_status_and_preserves_other_tags(self):
+        """remarkable_tags sets official metadata tags through the cloud client."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                target = self._make_item("doc-1", "Daily Notes")
+                target.tags = ["todo", "project"]
+                client = Mock(spec=["get_meta_items", "set_tags"])
+                client.get_meta_items.return_value = [target]
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await mcp.call_tool(
+                        "remarkable_tags",
+                        {
+                            "document": "Daily Notes",
+                            "tags": ["project"],
+                            "status": "review",
+                        },
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["document"] == "Daily Notes"
+                assert data["previous_tags"] == ["todo", "project"]
+                assert data["tags"] == ["project", "review"]
+                assert data["status"] == "review"
+                client.set_tags.assert_called_once_with("doc-1", ["project", "review"])
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_tags_rejects_invalid_status(self):
+        """remarkable_tags only accepts documented status labels."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                target = self._make_item("doc-1", "Daily Notes")
+                target.tags = []
+                client = Mock(spec=["get_meta_items", "set_tags"])
+                client.get_meta_items.return_value = [target]
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await mcp.call_tool(
+                        "remarkable_tags",
+                        {"document": "Daily Notes", "status": "blocked"},
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["_error"]["type"] == "invalid_status"
+                client.set_tags.assert_not_called()
             finally:
                 self._cleanup()
 

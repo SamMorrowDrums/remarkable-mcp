@@ -50,6 +50,7 @@ MKDIR_ANNOTATIONS = WRITE_ANNOTATIONS
 MOVE_ANNOTATIONS = WRITE_ANNOTATIONS
 RENAME_ANNOTATIONS = WRITE_ANNOTATIONS
 DELETE_ANNOTATIONS = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+TAGS_ANNOTATIONS = ToolAnnotations(readOnlyHint=False)
 
 
 def read_only_enabled() -> bool:
@@ -333,6 +334,154 @@ def _invalidate_client_cache(client) -> None:
     """Drop the in-memory document cache so the next read reflects the write."""
     client._documents = []
     client._documents_by_id = {}
+
+
+_STATUS_TAGS = {"review", "todo", "archive"}
+
+
+def _unique_tags(values: Optional[list]) -> list[str]:
+    """Normalize tags while preserving first-seen order."""
+    result = []
+    seen = set()
+    for value in values or []:
+        tag = str(value).strip()
+        if not tag or tag in seen:
+            continue
+        result.append(tag)
+        seen.add(tag)
+    return result
+
+
+def _tags_with_status(
+    base_tags: list[str], status: Optional[str]
+) -> tuple[Optional[list[str]], Optional[str]]:
+    """Return tags with an optional exclusive status label applied."""
+    if status is None:
+        return base_tags, None
+    normalized = status.strip().lower()
+    if normalized not in _STATUS_TAGS and normalized != "none":
+        return None, make_error(
+            error_type="invalid_status",
+            message=f"Unsupported status: '{status}'.",
+            suggestion='Use status="review", "todo", "archive", or "none".',
+        )
+    tags = [tag for tag in base_tags if tag.lower() not in _STATUS_TAGS]
+    if normalized != "none":
+        tags.append(normalized)
+    return tags, None
+
+
+def _update_tags(
+    current_tags: Optional[list],
+    tags: Optional[list],
+    add_tags: Optional[list],
+    remove_tags: Optional[list],
+    status: Optional[str],
+) -> tuple[Optional[list[str]], Optional[str]]:
+    """Compute the requested official metadata tag list."""
+    next_tags = _unique_tags(tags if tags is not None else current_tags)
+    for tag in _unique_tags(add_tags):
+        if tag not in next_tags:
+            next_tags.append(tag)
+    remove = {tag.lower() for tag in _unique_tags(remove_tags)}
+    if remove:
+        next_tags = [tag for tag in next_tags if tag.lower() not in remove]
+    return _tags_with_status(next_tags, status)
+
+
+def _document_not_found(document: str, collection: list) -> str:
+    from remarkable_mcp.extract import find_similar_documents
+
+    similar = find_similar_documents(document, collection)
+    return make_error(
+        error_type="document_not_found",
+        message=f"Document not found: '{document}'",
+        suggestion="Use remarkable_browse() to find the correct name.",
+        did_you_mean=similar if similar else None,
+    )
+
+
+def _cloud_tags(
+    document: str,
+    tags: Optional[list],
+    add_tags: Optional[list],
+    remove_tags: Optional[list],
+    status: Optional[str],
+) -> str:
+    """Set official metadata tags through the cloud sync protocol."""
+    client = get_rmapi()
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    target = _resolve_document(document, collection, items_by_id)
+    if not target:
+        return _document_not_found(document, collection)
+    previous_tags = _unique_tags(getattr(target, "tags", []))
+    next_tags, error = _update_tags(previous_tags, tags, add_tags, remove_tags, status)
+    if error:
+        return error
+    assert next_tags is not None
+    client.set_tags(target.ID, next_tags)
+    _invalidate_client_cache(client)
+    return make_response(
+        {
+            "updated": True,
+            "document": target.VissibleName,
+            "document_id": target.ID,
+            "previous_tags": previous_tags,
+            "tags": next_tags,
+            "status": next((tag for tag in next_tags if tag.lower() in _STATUS_TAGS), None),
+            "transport": "cloud",
+        },
+        "Updated official reMarkable metadata tags. Use remarkable_browse() to verify.",
+    )
+
+
+def _ssh_tags(
+    document: str,
+    tags: Optional[list],
+    add_tags: Optional[list],
+    remove_tags: Optional[list],
+    status: Optional[str],
+) -> str:
+    """Set official metadata tags by rewriting the SSH .metadata file."""
+    ssh_client = _get_ssh_client()
+    collection = ssh_client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    target = _resolve_document(document, collection, items_by_id)
+    if not target:
+        return _document_not_found(document, collection)
+    meta_path = f"{XOCHITL_PATH}/{target.ID}.metadata"
+    raw = _read_remote_bytes(ssh_client, meta_path)
+    if raw is None:
+        return make_error(
+            error_type="metadata_not_found",
+            message=f"Metadata file not found for '{document}'.",
+            suggestion="Use cloud mode if this document is not fully synced to the device.",
+        )
+    metadata = json.loads(raw.decode("utf-8"))
+    previous_tags = _unique_tags(metadata.get("tags", getattr(target, "tags", [])))
+    next_tags, error = _update_tags(previous_tags, tags, add_tags, remove_tags, status)
+    if error:
+        return error
+    assert next_tags is not None
+    metadata["tags"] = next_tags
+    metadata["lastModified"] = str(int(time.time() * 1000))
+    metadata["metadatamodified"] = True
+    _write_metadata(ssh_client, target.ID, metadata)
+    _restart_xochitl(ssh_client)
+    _invalidate_client_cache(ssh_client)
+    return make_response(
+        {
+            "updated": True,
+            "document": target.VissibleName,
+            "document_id": target.ID,
+            "previous_tags": previous_tags,
+            "tags": next_tags,
+            "status": next((tag for tag in next_tags if tag.lower() in _STATUS_TAGS), None),
+            "transport": "ssh",
+        },
+        "Updated official reMarkable metadata tags. Use remarkable_browse() to verify.",
+    )
 
 
 def _cloud_mkdir(folder_name: str, parent: str) -> str:
@@ -1681,6 +1830,47 @@ def register_write_tools():
                         message=f"Failed to rename document: {e}",
                         suggestion="Check SSH connection and try again.",
                     )
+
+            return await asyncio.to_thread(_impl)
+
+        @mcp.tool(annotations=TAGS_ANNOTATIONS)
+        async def remarkable_tags(
+            document: str,
+            tags: Optional[list[str]] = None,
+            add_tags: Optional[list[str]] = None,
+            remove_tags: Optional[list[str]] = None,
+            status: Optional[str] = None,
+        ) -> str:
+            """
+            <usecase>Set official reMarkable document tags and simple status labels.</usecase>
+            <instructions>
+            Updates the document's official metadata `tags` list. Status is not a
+            separate private field: status="review", "todo", or "archive" is stored
+            as one normal tag, with only one of those status tags kept at a time.
+            Use status="none" to clear the status tag. Works in cloud and SSH modes;
+            USB web has no metadata-write endpoint.
+            </instructions>
+            <parameters>
+            - document: Name or path of the document/folder to tag.
+            - tags: Optional full replacement tag list.
+            - add_tags: Optional tags to add to the current/replacement list.
+            - remove_tags: Optional tags to remove from the current/replacement list.
+            - status: Optional status label: "review", "todo", "archive", or "none".
+            </parameters>
+            <examples>
+            - remarkable_tags("Daily Notes", add_tags=["review"])
+            - remarkable_tags("/Daily/Inbox", status="todo")
+            - remarkable_tags("Old Notes", status="archive")
+            </examples>
+            """
+
+            def _impl() -> str:
+                error = _require_managed_write_mode()
+                if error:
+                    return error
+                if _is_cloud_mode():
+                    return _cloud_tags(document, tags, add_tags, remove_tags, status)
+                return _ssh_tags(document, tags, add_tags, remove_tags, status)
 
             return await asyncio.to_thread(_impl)
 

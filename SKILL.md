@@ -89,6 +89,7 @@ For handwriting OCR, add a Google Vision API key:
 | `remarkable_recent` | List recently modified documents |
 | `remarkable_image` | Render pages as PNG or SVG |
 | `remarkable_status` | Check connection and device info |
+| `remarkable_tags` | Set official metadata tags/status labels |
 
 ## Workflow
 

@@ -52,7 +52,7 @@ tool visibility changes.
 | ---- | :---: | :-----: | :-: |
 | `remarkable_status` / `browse` / `recent` / `search` / `review` / `read` / `image` / `canvas` | PASS | PASS | PASS |
 | `remarkable_upload` | PASS | PASS | PASS |
-| `remarkable_mkdir` / `rename` / `move` / `delete` | PASS | **N/A** | PASS |
+| `remarkable_mkdir` / `rename` / `move` / `tags` / `delete` | PASS | **N/A** | PASS |
 | `remarkable_author` | PASS (`create_document`, `daily_notebook`) | **N/A** | PASS |
 
 USB web is read + render + upload-to-root only — the device firmware HTTP server

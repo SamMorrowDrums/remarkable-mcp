@@ -441,6 +441,7 @@ Write tools let you upload, organize, and manage documents on your reMarkable. *
 | Move | ✅ | ✅ | ❌ |
 | Rename | ✅ | ✅ | ❌ |
 | Delete | ✅ (→ trash) | ✅ | ❌ |
+| Tags/status labels | ✅ | ✅ | ❌ |
 | Create native notebook | ✅ (`create_document`, `daily_notebook`) | ✅ | ❌ |
 | Native add page / draw | ❌ | ✅ | ❌ |
 
@@ -491,6 +492,7 @@ Or set the environment variable:
 | `remarkable_move(document, dest_folder)` | Move a document or folder (cloud and SSH) |
 | `remarkable_rename(document, new_name)` | Rename a document or folder (cloud and SSH) |
 | `remarkable_delete(document)` | Delete a document or folder — destructive (cloud and SSH) |
+| `remarkable_tags(document, tags, add_tags, remove_tags, status)` | Set official metadata tags/status labels (cloud and SSH) |
 | `remarkable_author(method, ...)` | Author native notebooks/ink — cloud supports `create_document` and `daily_notebook`; SSH supports `draw`, `add_page`, `create_document`, and `daily_notebook` |
 
 ### Safety
@@ -517,6 +519,11 @@ remarkable_rename("Untitled", "Q4 Planning Notes")
 
 # Delete (destructive — confirms via elicitation when supported)
 remarkable_delete("Old Draft")
+
+# Set official metadata tags/status labels
+remarkable_tags("Daily Notes", add_tags=["review"])
+remarkable_tags("/Daily/Inbox", status="todo")
+remarkable_tags("Old Notes", status="archive")
 
 # Author native ink and notebooks
 # Cloud mode supports create_document and daily_notebook. SSH mode also supports

@@ -1014,6 +1014,18 @@ class RemarkableClient:
         """Restore a trashed document or folder back to ``parent_id`` ("" = root)."""
         self.move(doc_id, parent_id or "")
 
+    def set_tags(self, doc_id: str, tags: List[str]) -> None:
+        """Set a document or folder's official metadata tags in the cloud."""
+
+        def apply(meta):
+            meta["tags"] = tags
+
+        def mutate(entries):
+            entry = self._require_entry(entries, doc_id)
+            return self._replace_root_entry(entries, self._mutate_doc_metadata(entry, apply))
+
+        self._sync_root(mutate)
+
     def upload_document(
         self,
         content: bytes,

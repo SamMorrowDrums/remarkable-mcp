@@ -93,6 +93,7 @@ ALL_TOOLS = [
     "remarkable_rename",
     "remarkable_move",
     "remarkable_author",
+    "remarkable_tags",
     "remarkable_delete",
 ]
 
@@ -111,6 +112,7 @@ WRITE_TOOLS = {
     "remarkable_rename",
     "remarkable_move",
     "remarkable_author",
+    "remarkable_tags",
     "remarkable_delete",
 }
 
@@ -448,6 +450,21 @@ async def run_write_phase(session, mode, rec, registered):
                 # Upload itself succeeded (only the read-back failed), so the doc
                 # still exists and must be cleaned up despite the FAIL verdict.
                 created.append(("doc", uploaded_path))
+
+        # --- tags --------------------------------------------------------
+        if "remarkable_tags" in registered:
+            doc_entry = next((p for k, p in created if k == "doc"), None)
+            if doc_entry:
+                payload, is_err, exc = await call_tool(
+                    session,
+                    "remarkable_tags",
+                    {"document": doc_entry, "tags": ["review"], "status": "review"},
+                    TIMEOUTS["_default"],
+                )
+                state, note = classify_ok(payload, is_err, exc)
+                rec.record(mode, "remarkable_tags", state, note)
+            else:
+                rec.record(mode, "remarkable_tags", SKIP, "no document to tag")
 
         # --- rename ------------------------------------------------------
         renamed_path = None

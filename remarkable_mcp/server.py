@@ -155,6 +155,7 @@ Write operations are enabled. These tools modify your tablet's filesystem:
 - `remarkable_move(document, dest_folder)` - Move a document/folder
 - `remarkable_rename(document, new_name)` - Rename a document/folder
 - `remarkable_delete(document)` - Delete a document/folder (destructive)
+- `remarkable_tags(document, add_tags=..., status=...)` - Set metadata tags/status
 - `remarkable_author(method="create_document", name=..., folder=...)` - Create a native notebook
 - `remarkable_author(method="daily_notebook", folder=...)` - Create/find a dated notebook
 
@@ -197,6 +198,7 @@ and sync to all your devices:
 - `remarkable_move(document, dest_folder)` - Move a document/folder
 - `remarkable_rename(document, new_name)` - Rename a document/folder
 - `remarkable_delete(document)` - Delete a document/folder (destructive)
+- `remarkable_tags(document, add_tags=..., status=...)` - Set metadata tags/status
 - `remarkable_author(method="create_document", name=..., folder=...)` - Create a native notebook
 - `remarkable_author(method="daily_notebook", folder=...)` - Create/find a dated notebook
 
