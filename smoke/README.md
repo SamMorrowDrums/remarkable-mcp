@@ -53,12 +53,13 @@ tool visibility changes.
 | `remarkable_status` / `browse` / `recent` / `search` / `read` / `image` / `canvas` | PASS | PASS | PASS |
 | `remarkable_upload` | PASS | PASS | PASS |
 | `remarkable_mkdir` / `rename` / `move` / `delete` | PASS | **N/A** | PASS |
-| `remarkable_author` | **N/A** | **N/A** | PASS |
+| `remarkable_author` | PASS (`create_document`) | **N/A** | PASS |
 
 USB web is read + render + upload-to-root only — the device firmware HTTP server
-exposes no folder/move/rename/delete endpoints, so those tools are not registered
-in that mode (shown as N/A). `remarkable_author` requires native `.rm` write-back
-and is SSH-only today.
+exposes no folder/move/rename/delete/native authoring endpoints, so those tools
+are not registered in that mode (shown as N/A). Cloud mode exposes
+`remarkable_author` for `create_document` only; SSH mode validates
+`create_document`, `add_page`, and `draw`.
 
 ### Upload is verified end-to-end (cloud/ssh)
 

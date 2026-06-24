@@ -110,13 +110,13 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Cloud default: 6 read tools + always-on canvas + 5 write tools.
+        """Cloud default: read tools + canvas + writes + create-only authoring.
 
-        ``remarkable_author`` is SSH-only and therefore hidden in cloud mode, so
-        the default (cloud) surface is 12 tools, not 13.
+        In cloud mode ``remarkable_author`` is exposed for
+        ``method=create_document`` only; add_page/draw remain SSH-only.
         """
         tools = await mcp.list_tools()
-        assert len(tools) == 12, f"Expected 12 tools, got {len(tools)}"
+        assert len(tools) == 13, f"Expected 13 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -1189,7 +1189,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await mcp.list_tools()
 
-        assert len(tools) == 12
+        assert len(tools) == 13
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:
@@ -2641,9 +2641,9 @@ class TestWriteTools:
     async def test_write_tools_registered_by_default(self):
         """Write tools ARE registered by default (write-on); read-only would skip them.
 
-        ``remarkable_author`` is intentionally excluded here: it is SSH-only and
-        therefore hidden in cloud mode (the mode these tests import). See
-        ``test_author_only_registered_in_ssh_mode`` for its gating.
+        Cloud mode exposes ``remarkable_author`` for create_document only; SSH
+        exposes the full authoring surface. See
+        ``test_author_registered_in_cloud_and_ssh_only`` for transport gating.
         """
         tools = await mcp.list_tools()
         tool_names = [tool.name for tool in tools]
@@ -2653,6 +2653,7 @@ class TestWriteTools:
             "remarkable_mkdir",
             "remarkable_move",
             "remarkable_rename",
+            "remarkable_author",
             "remarkable_delete",
         ]
 
@@ -2660,9 +2661,6 @@ class TestWriteTools:
             assert tool_name in tool_names, (
                 f"Write tool {tool_name} should be registered by default"
             )
-        assert "remarkable_author" not in tool_names, (
-            "remarkable_author is SSH-only and must be hidden in cloud mode"
-        )
 
     @pytest.mark.asyncio
     async def test_write_tools_registered_when_enabled(self):
@@ -2693,6 +2691,7 @@ class TestWriteTools:
                 "remarkable_mkdir",
                 "remarkable_move",
                 "remarkable_rename",
+                "remarkable_author",
                 "remarkable_delete",
             ]:
                 mcp._tool_manager._tools.pop(name, None)
@@ -2771,6 +2770,7 @@ class TestWriteTools:
                 "remarkable_mkdir",
                 "remarkable_move",
                 "remarkable_rename",
+                "remarkable_author",
                 "remarkable_delete",
             ]:
                 mcp._tool_manager._tools.pop(name, None)
@@ -2835,6 +2835,7 @@ class TestWriteTools:
                 "remarkable_mkdir",
                 "remarkable_move",
                 "remarkable_rename",
+                "remarkable_author",
                 "remarkable_delete",
             ]:
                 mcp._tool_manager._tools.pop(name, None)
@@ -2915,12 +2916,11 @@ class TestWriteTools:
                     mcp._tool_manager._tools.pop(name, None)
 
     @pytest.mark.asyncio
-    async def test_author_only_registered_in_ssh_mode(self):
-        """remarkable_author is SSH-only: present in SSH, hidden in cloud and USB web.
+    async def test_author_registered_in_cloud_and_ssh_only(self):
+        """remarkable_author is present in cloud/SSH, hidden in USB web.
 
-        Native ink/notebook authoring has no cloud/USB-web write-back path yet, so
-        rather than registering the tool everywhere and erroring at call time we
-        only expose it in SSH mode.
+        Cloud mode supports create_document only; SSH supports the full
+        create_document/add_page/draw authoring surface.
         """
         from remarkable_mcp.write_tools import register_write_tools
 
@@ -2933,14 +2933,14 @@ class TestWriteTools:
             finally:
                 mcp._tool_manager._tools.pop("remarkable_author", None)
 
-        # Cloud mode -> author hidden.
+        # Cloud mode -> author present for create_document.
         env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
         env.pop("REMARKABLE_USE_USB_WEB", None)
         with patch.dict(os.environ, env, clear=True):
             register_write_tools()
             try:
                 names = {t.name for t in await mcp.list_tools()}
-                assert "remarkable_author" not in names
+                assert "remarkable_author" in names
             finally:
                 for name in [
                     "remarkable_author",
@@ -2987,6 +2987,7 @@ class TestCloudWriteDispatch:
             "remarkable_mkdir",
             "remarkable_move",
             "remarkable_rename",
+            "remarkable_author",
             "remarkable_delete",
         ]:
             mcp._tool_manager._tools.pop(name, None)
@@ -3010,6 +3011,59 @@ class TestCloudWriteDispatch:
                 assert data["transport"] == "cloud"
                 assert data["uuid"] == "folder-xyz"
                 client.create_folder.assert_called_once_with("Projects", "")
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_author_create_document_dispatch(self):
+        """Cloud remarkable_author supports create_document via the cloud client."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                folder = self._make_item("folder-1", "Inbox", is_folder=True)
+                mock_doc = Mock()
+                mock_doc.id = "new-native-doc"
+                client = Mock(spec=["get_meta_items", "create_notebook"])
+                client.get_meta_items.return_value = [folder]
+                client.create_notebook.return_value = mock_doc
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await mcp.call_tool(
+                        "remarkable_author",
+                        {
+                            "method": "create_document",
+                            "name": "Cloud Sketches",
+                            "text": "Agenda\nFollow-ups",
+                            "folder": "/Inbox",
+                        },
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["created"] is True
+                assert data["transport"] == "cloud"
+                assert data["document_id"] == "new-native-doc"
+                assert data["folder"] == "/Inbox"
+                assert data["has_text"] is True
+                client.create_notebook.assert_called_once_with(
+                    "Cloud Sketches", "folder-1", "Agenda\nFollow-ups"
+                )
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cloud_author_rejects_add_page_and_draw(self):
+        """Cloud authoring intentionally exposes create_document only."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, self._cloud_env(), clear=True):
+            register_write_tools()
+            try:
+                for method in ("add_page", "draw"):
+                    result = await mcp.call_tool(
+                        "remarkable_author", {"method": method, "document": "Notebook"}
+                    )
+                    data = json.loads(result[0][0].text)
+                    assert data["_error"]["type"] == "unsupported_in_cloud"
             finally:
                 self._cleanup()
 
@@ -3202,6 +3256,87 @@ class TestConcurrentToolDispatch:
             f"Concurrent tool calls appear serialized: elapsed={elapsed:.2f}s "
             f"vs single-call delay={call_delay}s"
         )
+
+
+class TestCloudNativeNotebookCreate:
+    """Cloud client can create a native notebook document."""
+
+    def test_create_notebook_uploads_native_notebook_blobs(self, monkeypatch):
+        from remarkable_mcp.sync import Document, RemarkableClient
+
+        client = RemarkableClient(user_token="user-token")
+        uploaded = []
+
+        def fake_upload(content, filename):
+            uploaded.append((filename, content))
+            return {
+                "hash": f"hash-{len(uploaded)}",
+                "type": "0",
+                "id": filename,
+                "subfiles": 0,
+                "size": len(content),
+            }
+
+        monkeypatch.setattr(client, "_upload_file_blob", fake_upload)
+        monkeypatch.setattr(
+            client,
+            "_upload_doc_index",
+            lambda doc_id, files: {
+                "hash": "doc-index-hash",
+                "type": "0",
+                "id": doc_id,
+                "subfiles": len(files),
+                "size": sum(int(f["size"]) for f in files),
+            },
+        )
+        synced_entries = []
+
+        def fake_sync_root(mutate):
+            synced_entries.extend(mutate([]))
+
+        monkeypatch.setattr(client, "_sync_root", fake_sync_root)
+        ids = iter(
+            [
+                "00000000-0000-4000-8000-000000000001",
+                "00000000-0000-4000-8000-000000000002",
+                "00000000-0000-4000-8000-000000000003",
+            ]
+        )
+        monkeypatch.setattr("remarkable_mcp.notebooks.new_uuid", ids.__next__)
+
+        doc = client.create_notebook("Cloud Sketches", parent_id="folder-id", text="Agenda")
+
+        assert isinstance(doc, Document)
+        assert doc.id == "00000000-0000-4000-8000-000000000001"
+        assert doc.name == "Cloud Sketches"
+        assert doc.parent == "folder-id"
+        filenames = [name for name, _content in uploaded]
+        assert filenames == [
+            "00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002.rm",
+            "00000000-0000-4000-8000-000000000001.content",
+            "00000000-0000-4000-8000-000000000001.metadata",
+        ]
+        content_data = json.loads(
+            dict(uploaded)["00000000-0000-4000-8000-000000000001.content"].decode("utf-8")
+        )
+        assert content_data["fileType"] == "notebook"
+        assert content_data["pageCount"] == 1
+        assert content_data["cPages"]["pages"][0]["id"] == "00000000-0000-4000-8000-000000000002"
+        metadata = json.loads(
+            dict(uploaded)["00000000-0000-4000-8000-000000000001.metadata"].decode("utf-8")
+        )
+        assert metadata["visibleName"] == "Cloud Sketches"
+        assert metadata["parent"] == "folder-id"
+        assert metadata["type"] == "DocumentType"
+        assert synced_entries == [
+            {
+                "hash": "doc-index-hash",
+                "type": "0",
+                "id": "00000000-0000-4000-8000-000000000001",
+                "subfiles": 3,
+                "size": sum(len(content) for _name, content in uploaded),
+            }
+        ]
 
 
 class TestCloudBlobCache:

@@ -153,6 +153,7 @@ Write operations are enabled. These tools modify your tablet's filesystem:
 - `remarkable_move(document, dest_folder)` - Move a document/folder
 - `remarkable_rename(document, new_name)` - Rename a document/folder
 - `remarkable_delete(document)` - Delete a document/folder (destructive)
+- `remarkable_author(method="create_document", name=..., folder=...)` - Create a native notebook
 
 ### Safety
 - **Delete is destructive** and immediate — the MCP client should confirm with the user first
@@ -193,6 +194,7 @@ and sync to all your devices:
 - `remarkable_move(document, dest_folder)` - Move a document/folder
 - `remarkable_rename(document, new_name)` - Rename a document/folder
 - `remarkable_delete(document)` - Delete a document/folder (destructive)
+- `remarkable_author(method="create_document", name=..., folder=...)` - Create a native notebook
 
 ### Safety
 - **Delete is destructive** — the MCP client should confirm with the user first

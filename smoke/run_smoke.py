@@ -13,7 +13,8 @@ so SSH (the only mode that writes to the device filesystem) runs LAST, after the
 USB-web checks are done.
 
 The server HIDES tools a transport cannot support (e.g. mkdir/move/rename/delete
-are not registered over USB web; remarkable_author is SSH-only). The harness is
+are not registered over USB web; remarkable_author is registered in cloud for
+create_document only and in SSH for full native authoring). The harness is
 therefore ``tools/list``-driven: it asks each running server which tools it
 actually exposes and only exercises those. Any tool in the master list that a
 mode does not expose is reported as N/A for that mode -- which is the *correct*
@@ -482,7 +483,7 @@ async def run_write_phase(session, mode, rec, registered):
             else:
                 rec.record(mode, "remarkable_move", SKIP, "no document to move")
 
-        # --- author (SSH only) ------------------------------------------
+        # --- author ------------------------------------------------------
         if "remarkable_author" in registered:
             nb_name = f"{runid}-nb"
             payload, is_err, exc = await call_tool(
@@ -495,34 +496,37 @@ async def run_write_phase(session, mode, rec, registered):
             nb_path = f"{folder_path}/{nb_name}"
             if state == PASS:
                 created.insert(0, ("doc", nb_path))  # delete before its folder
-                ap_payload, ap_err, ap_exc = await call_tool(
-                    session,
-                    "remarkable_author",
-                    {"method": "add_page", "document": nb_path},
-                    TIMEOUTS["remarkable_author"],
-                )
-                ap_state, _ = classify_ok(ap_payload, ap_err, ap_exc)
-                dr_payload, dr_err, dr_exc = await call_tool(
-                    session,
-                    "remarkable_author",
-                    {
-                        "method": "draw",
-                        "document": nb_path,
-                        "page": 1,
-                        "strokes": [
-                            {
-                                "points": [[0.1, 0.5], [0.9, 0.5]],
-                                "tool": "fineliner",
-                                "color": "black",
-                            }
-                        ],
-                    },
-                    TIMEOUTS["remarkable_author"],
-                )
-                dr_state, _ = classify_ok(dr_payload, dr_err, dr_exc)
-                sub = f"create_document=PASS; add_page={ap_state}; draw={dr_state}"
-                final = PASS if (ap_state == PASS and dr_state == PASS) else FAIL
-                rec.record(mode, "remarkable_author", final, sub)
+                if is_ssh:
+                    ap_payload, ap_err, ap_exc = await call_tool(
+                        session,
+                        "remarkable_author",
+                        {"method": "add_page", "document": nb_path},
+                        TIMEOUTS["remarkable_author"],
+                    )
+                    ap_state, _ = classify_ok(ap_payload, ap_err, ap_exc)
+                    dr_payload, dr_err, dr_exc = await call_tool(
+                        session,
+                        "remarkable_author",
+                        {
+                            "method": "draw",
+                            "document": nb_path,
+                            "page": 1,
+                            "strokes": [
+                                {
+                                    "points": [[0.1, 0.5], [0.9, 0.5]],
+                                    "tool": "fineliner",
+                                    "color": "black",
+                                }
+                            ],
+                        },
+                        TIMEOUTS["remarkable_author"],
+                    )
+                    dr_state, _ = classify_ok(dr_payload, dr_err, dr_exc)
+                    sub = f"create_document=PASS; add_page={ap_state}; draw={dr_state}"
+                    final = PASS if (ap_state == PASS and dr_state == PASS) else FAIL
+                    rec.record(mode, "remarkable_author", final, sub)
+                else:
+                    rec.record(mode, "remarkable_author", PASS, "create_document=PASS")
             else:
                 rec.record(mode, "remarkable_author", state, note)
 

@@ -1091,6 +1091,49 @@ class RemarkableClient:
             parent=parent_id or "",
         )
 
+    def create_notebook(
+        self,
+        name: str,
+        parent_id: str = "",
+        text: Optional[str] = None,
+    ) -> Document:
+        """Create a native notebook in the cloud and return it.
+
+        This mirrors the SSH ``remarkable_author(method="create_document")``
+        path, but commits the generated native notebook blobs through the cloud
+        sync v3/v4 root instead of writing to xochitl over SSH.
+        """
+        from remarkable_mcp import notebooks as nb
+
+        doc_id = nb.new_uuid()
+        page_id = nb.new_uuid()
+        author_uuid = nb.new_uuid()
+
+        page_bytes = nb.page_rm_bytes(text or "", author_uuid=author_uuid)
+        content_json = nb.new_notebook_content([page_id], author_uuid)
+        metadata = nb.new_document_metadata(name, parent=parent_id)
+
+        files = [
+            self._upload_file_blob(page_bytes, f"{doc_id}/{page_id}.rm"),
+            self._upload_file_blob(
+                json.dumps(content_json, sort_keys=True).encode("utf-8"),
+                f"{doc_id}.content",
+            ),
+            self._upload_file_blob(
+                json.dumps(metadata, sort_keys=True).encode("utf-8"),
+                f"{doc_id}.metadata",
+            ),
+        ]
+        new_entry = self._upload_doc_index(doc_id, files)
+        self._sync_root(lambda entries: entries + [new_entry])
+        return Document(
+            id=doc_id,
+            hash=new_entry["hash"],
+            name=name,
+            doc_type="DocumentType",
+            parent=parent_id or "",
+        )
+
     @staticmethod
     def _page_layout(content: bytes, ext: str) -> tuple:
         """Return ``(page_count, page_uuids)`` for a source file.

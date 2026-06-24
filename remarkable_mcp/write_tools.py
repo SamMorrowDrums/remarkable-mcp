@@ -484,6 +484,55 @@ def _cloud_delete(document: str) -> str:
     )
 
 
+def _cloud_author_create_document(
+    name: Optional[str], text: Optional[str], folder: Optional[str]
+) -> str:
+    """Create a new native notebook through the cloud sync protocol."""
+    if not name:
+        return make_error(
+            error_type="missing_parameter",
+            message="create_document requires 'name'.",
+            suggestion='Call remarkable_author(method="create_document", name="My notes").',
+        )
+
+    client = get_rmapi()
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    folder_path = folder or "/"
+    parent_id = _resolve_parent_id(folder_path, items_by_id, collection)
+    if parent_id is None:
+        folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
+        return make_error(
+            error_type="folder_not_found",
+            message=f"Folder not found: '{folder}'",
+            suggestion="Use remarkable_browse('/') to see available folders.",
+            did_you_mean=folders[:5] if folders else None,
+        )
+
+    create_notebook = getattr(client, "create_notebook", None)
+    if not callable(create_notebook):
+        return make_error(
+            error_type="unsupported_transport",
+            message="This transport cannot create native notebooks.",
+            suggestion="Use cloud mode for create_document or SSH mode for full authoring.",
+        )
+
+    doc = create_notebook(name, parent_id, text)
+    doc_id = getattr(doc, "id", None)
+    _invalidate_client_cache(client)
+    result = {
+        "created": True,
+        "document": name,
+        "document_id": doc_id,
+        "total_pages": 1,
+        "folder": folder_path,
+        "has_text": bool(text),
+        "transport": "cloud",
+    }
+    hint = f"Created notebook '{name}' in the reMarkable cloud. Use remarkable_browse() to verify."
+    return make_response(result, hint)
+
+
 class _DeleteConfirmation(BaseModel):
     """Schema for confirming a destructive delete via elicitation."""
 
@@ -836,10 +885,11 @@ def register_write_tools():
         ＋Page → add_page, new notebook → create_document) AND model-driven markup
         (highlighting, underlining, marking) — the model composes the strokes.</usecase>
         <instructions>
-        Requires SSH mode (the default tablet-filesystem transport for write-back)
-        and write mode (the default; disabled with --read-only). All methods are
-        non-destructive (draw appends to existing ink and backs the page up to
-        {pageId}.rm.bak the first time), so no confirmation prompt is required.
+        Requires write mode (the default; disabled with --read-only). In cloud
+        mode, only method="create_document" is supported. In SSH mode, all
+        methods are supported and non-destructive (draw appends to existing ink
+        and backs the page up to {pageId}.rm.bak the first time), so no
+        confirmation prompt is required.
 
         Pick the method, then pass only that method's parameters:
 
@@ -898,6 +948,19 @@ def register_write_tools():
             if error:
                 return error
 
+            if _is_cloud_mode():
+                if method == "create_document":
+                    return _cloud_author_create_document(name, text, folder)
+                return make_error(
+                    error_type="unsupported_in_cloud",
+                    message=f'Cloud mode supports method="create_document" only, not "{method}".',
+                    suggestion=(
+                        "Use SSH mode for add_page/draw, or create a new cloud notebook "
+                        'with remarkable_author(method="create_document", name=...).'
+                    ),
+                    did_you_mean=["create_document"],
+                )
+
             if method == "draw":
                 return _author_draw(document, page, strokes, ui_submitted)
             if method == "add_page":
@@ -913,11 +976,11 @@ def register_write_tools():
 
         return await asyncio.to_thread(_impl)
 
-    # Native ink/notebook authoring is SSH-only today (cloud/USB-web write-back
-    # is not implemented yet), so only expose the tool in SSH mode rather than
-    # registering it everywhere and erroring at call time. Clients on other
-    # transports simply don't see a tool they couldn't use.
-    if _is_ssh_mode():
+    # Native ink/notebook authoring is partially supported in cloud mode:
+    # create_document can be committed as a brand-new sync document, while
+    # add_page/draw still require SSH because they mutate an existing document.
+    # USB web has no native write-back endpoint, so it does not expose authoring.
+    if _is_ssh_mode() or _is_cloud_mode():
         mcp.tool(annotations=WRITE_ANNOTATIONS)(remarkable_author)
 
     @mcp.tool(annotations=UPLOAD_ANNOTATIONS)
