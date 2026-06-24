@@ -7,6 +7,7 @@ USB web) and do not modify any documents.
 """
 
 import base64
+import json
 import os
 import re
 import tempfile
@@ -138,6 +139,11 @@ BROWSE_ANNOTATIONS = ToolAnnotations(
 
 SEARCH_ANNOTATIONS = ToolAnnotations(
     title="Search reMarkable Documents",
+    **_BASE_ANNOTATIONS,
+)
+
+REVIEW_ANNOTATIONS = ToolAnnotations(
+    title="Review/export reMarkable Documents",
     **_BASE_ANNOTATIONS,
 )
 
@@ -1280,6 +1286,204 @@ async def remarkable_search(
             message=str(e),
             suggestion="Check remarkable_status() to verify your connection.",
         )
+
+
+def _review_timestamp(value) -> Optional[float]:
+    """Return a comparable timestamp for ISO strings or datetime values."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        try:
+            return value.timestamp()
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        normalized = value.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(normalized).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _review_metadata_from_read(data: dict, fallback_path: str) -> dict:
+    """Convert a remarkable_read page response into review/export metadata."""
+    doc = {
+        "name": data.get("document") or fallback_path.strip("/").split("/")[-1] or fallback_path,
+        "path": data.get("path") or fallback_path,
+        "file_type": data.get("file_type"),
+        "modified": data.get("modified"),
+        "content": data.get("content", ""),
+    }
+    if "tags" in data:
+        doc["tags"] = data["tags"]
+    if "ocr_backend" in data:
+        doc["ocr_backend"] = data["ocr_backend"]
+    return doc
+
+
+async def _review_read_full_document(path: str, include_ocr: bool) -> dict:
+    """Read every available page from a document through remarkable_read."""
+    page = 1
+    pages = []
+    doc = None
+    while page <= 100:
+        read_result = await remarkable_read(document=path, page=page, include_ocr=include_ocr)
+        data = json.loads(read_result)
+        if "_error" in data:
+            return {"path": path, "error": data["_error"].get("message", "read failed")}
+        if doc is None:
+            doc = _review_metadata_from_read(data, path)
+        content = data.get("content", "")
+        if content:
+            pages.append(content)
+        if not data.get("more"):
+            break
+        page = int(data.get("next_page") or page + 1)
+    if doc is None:
+        doc = {"name": path.strip("/").split("/")[-1] or path, "path": path, "content": ""}
+    doc["content"] = "\n\n".join(pages)
+    return doc
+
+
+def _review_scope(document, folder, tags, since) -> dict:
+    """Build a stable scope object for output."""
+    if document:
+        return {"document": document}
+    scope = {"folder": folder or "/"}
+    if tags:
+        scope["tags"] = tags
+    if since:
+        scope["since"] = since
+    return scope
+
+
+def _review_markdown(result: dict) -> str:
+    """Render review/export data as deterministic Markdown."""
+    lines = ["# reMarkable review export", ""]
+    scope = result["scope"]
+    if "document" in scope:
+        lines.append(f"Scope: document `{scope['document']}`")
+    else:
+        lines.append(f"Scope: folder `{scope.get('folder', '/')}`")
+        if scope.get("tags"):
+            lines.append("Tags: " + ", ".join(f"`{tag}`" for tag in scope["tags"]))
+        if scope.get("since"):
+            lines.append(f"Since: `{scope['since']}`")
+    lines.append(f"Documents: {result['count']}")
+    for doc in result["documents"]:
+        lines.extend(["", f"## {doc.get('name') or doc.get('path')}"])
+        if doc.get("path"):
+            lines.append(f"Path: `{doc['path']}`")
+        if doc.get("modified"):
+            lines.append(f"Modified: `{doc['modified']}`")
+        if doc.get("tags"):
+            lines.append("Tags: " + ", ".join(f"`{tag}`" for tag in doc["tags"]))
+        if doc.get("error"):
+            lines.append(f"Error: {doc['error']}")
+            continue
+        lines.extend(["", doc.get("content", "")])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _review_text(result: dict) -> str:
+    """Render review/export data as plain text."""
+    chunks = ["reMarkable review export", f"documents: {result['count']}"]
+    for doc in result["documents"]:
+        chunks.append(f"\n{doc.get('name') or doc.get('path')}\n{doc.get('path', '')}")
+        if doc.get("modified"):
+            chunks.append(f"modified: {doc['modified']}")
+        if doc.get("tags"):
+            chunks.append("tags: " + ", ".join(doc["tags"]))
+        if doc.get("error"):
+            chunks.append("error: " + doc["error"])
+        else:
+            chunks.append(doc.get("content", ""))
+    return "\n".join(chunks).rstrip() + "\n"
+
+
+@mcp.tool(annotations=REVIEW_ANNOTATIONS)
+async def remarkable_review(
+    document: Optional[str] = None,
+    folder: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    since: Optional[str] = None,
+    include_ocr: bool = False,
+    output_format: str = "json",
+) -> str:
+    """
+    <usecase>Export deterministic review content from one document or folder.</usecase>
+    <instructions>
+    Read-only helper for review workflows. It does not summarize, classify,
+    mutate documents, call an LLM, or integrate with external note/task systems.
+    It gathers document metadata plus extracted text/OCR from existing read tools
+    and returns it as JSON, Markdown, or plain text.
+    </instructions>
+    <parameters>
+    - document: Optional document name/path/id to export.
+    - folder: Optional folder to export when document is omitted (default "/").
+    - tags: Optional tags to filter folder exports.
+    - since: Optional ISO timestamp/date; folder exports skip older documents.
+    - include_ocr: Enable OCR where remarkable_read supports it.
+    - output_format: "json", "markdown", or "text".
+    </parameters>
+    <examples>
+    - remarkable_review(document="/Daily/Daily Notes", output_format="markdown")
+    - remarkable_review(folder="/Daily", tags=["review"], output_format="json")
+    </examples>
+    """
+    output_format = (output_format or "json").lower()
+    if output_format not in {"json", "markdown", "text"}:
+        return make_error(
+            error_type="invalid_output_format",
+            message=f"Unsupported output_format: '{output_format}'.",
+            suggestion='Use output_format="json", "markdown", or "text".',
+        )
+
+    since_ts = _review_timestamp(since) if since else None
+    if since and since_ts is None:
+        return make_error(
+            error_type="invalid_since",
+            message=f"Invalid since value: '{since}'.",
+            suggestion='Use an ISO date or timestamp, e.g. "2026-06-24".',
+        )
+
+    if document:
+        docs = [await _review_read_full_document(document, include_ocr)]
+    else:
+        browse_result = await remarkable_browse(path=folder or "/", tags=tags)
+        browse_data = json.loads(browse_result)
+        if "_error" in browse_data:
+            return browse_result
+        candidates = browse_data.get("documents") or browse_data.get("results") or []
+        docs = []
+        for candidate in candidates:
+            if candidate.get("type") != "document":
+                continue
+            modified_ts = _review_timestamp(candidate.get("modified"))
+            if since_ts is not None and (modified_ts is None or modified_ts < since_ts):
+                continue
+            path = candidate.get("path") or candidate.get("name")
+            if not path:
+                continue
+            doc = await _review_read_full_document(path, include_ocr)
+            if "tags" not in doc and candidate.get("tags"):
+                doc["tags"] = candidate["tags"]
+            if not doc.get("modified") and candidate.get("modified"):
+                doc["modified"] = candidate["modified"]
+            docs.append(doc)
+
+    result = {
+        "output_format": output_format,
+        "scope": _review_scope(document, folder, tags, since),
+        "count": len(docs),
+        "documents": docs,
+    }
+    if output_format == "markdown":
+        return _review_markdown(result)
+    if output_format == "text":
+        return _review_text(result)
+    return make_response(result, f"Exported {len(docs)} document(s) for review.")
 
 
 @mcp.tool(annotations=STATUS_ANNOTATIONS)

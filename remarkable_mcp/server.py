@@ -86,6 +86,7 @@ def _build_instructions() -> str:
 - `remarkable_browse(path, query)` - Browse folders or search for documents
 - `remarkable_read(document, content_type, page, grep)` - Read document content with pagination
 - `remarkable_recent(limit)` - Get recently modified documents
+- `remarkable_review(document, folder, tags, since, output_format)` - Deterministic review/export
 - `remarkable_status()` - Check connection and diagnose issues
 - `remarkable_image(document, page, include_ocr)` - Get a PNG image with optional OCR
 
@@ -116,6 +117,7 @@ Use pagination to avoid overwhelming context. The response includes:
 - Browse → Read: Find documents first, then read them
 - Recent → Read: Check what was recently modified, then read specific ones
 - Read with grep: Search for specific content within large documents
+- Review/export: Use `remarkable_review` for deterministic JSON/Markdown/text exports
 - Browse → Image: Find a document then get its visual representation
 
 ## MCP Resources

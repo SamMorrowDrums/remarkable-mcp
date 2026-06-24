@@ -100,6 +100,7 @@ class TestMCPServerInitialization:
             "remarkable_browse",
             "remarkable_recent",
             "remarkable_search",
+            "remarkable_review",
             "remarkable_status",
             "remarkable_image",
             "remarkable_canvas",
@@ -110,13 +111,13 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Cloud default: read tools + canvas + writes + create-only authoring.
+        """Cloud default: read tools + canvas + writes + cloud-safe authoring.
 
-        In cloud mode ``remarkable_author`` is exposed for
-        ``method=create_document`` only; add_page/draw remain SSH-only.
+        In cloud mode ``remarkable_author`` is exposed for ``create_document`` and
+        ``daily_notebook``; add_page/draw remain SSH-only.
         """
         tools = await mcp.list_tools()
-        assert len(tools) == 13, f"Expected 13 tools, got {len(tools)}"
+        assert len(tools) == 14, f"Expected 14 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -630,6 +631,160 @@ class TestRemarkableSearch:
 
         assert "_error" in data
         assert data["_error"]["type"] == "no_documents_found"
+
+
+# =============================================================================
+# Test remarkable_review Tool
+# =============================================================================
+
+
+class TestRemarkableReview:
+    """Test remarkable_review export helper."""
+
+    @pytest.mark.asyncio
+    async def test_review_single_document_json_export(self):
+        """Review exports one document as deterministic JSON without summarizing."""
+        read_payload = make_response(
+            {
+                "document": "Daily Notes",
+                "path": "/Daily/Daily Notes",
+                "file_type": "notebook",
+                "content": "todo: review notes",
+                "page": 1,
+                "total_pages": 1,
+                "more": False,
+                "modified": "2026-06-24T10:00:00Z",
+                "tags": ["review"],
+            },
+            "ok",
+        )
+
+        with patch(
+            "remarkable_mcp.tools.remarkable_read", new=AsyncMock(return_value=read_payload)
+        ):
+            result = await mcp.call_tool(
+                "remarkable_review",
+                {"document": "/Daily/Daily Notes", "output_format": "json"},
+            )
+
+        data = json.loads(result[0][0].text)
+        assert data["output_format"] == "json"
+        assert data["scope"] == {"document": "/Daily/Daily Notes"}
+        assert data["count"] == 1
+        assert data["documents"][0]["path"] == "/Daily/Daily Notes"
+        assert data["documents"][0]["content"] == "todo: review notes"
+        assert data["documents"][0]["tags"] == ["review"]
+        assert "summary" not in data["documents"][0]
+
+    @pytest.mark.asyncio
+    async def test_review_single_document_markdown_export(self):
+        """Review can render deterministic Markdown for a document."""
+        read_payload = make_response(
+            {
+                "document": "Daily Notes",
+                "path": "/Daily/Daily Notes",
+                "file_type": "notebook",
+                "content": "archive this",
+                "page": 1,
+                "total_pages": 1,
+                "more": False,
+                "modified": None,
+            },
+            "ok",
+        )
+
+        with patch(
+            "remarkable_mcp.tools.remarkable_read", new=AsyncMock(return_value=read_payload)
+        ):
+            result = await mcp.call_tool(
+                "remarkable_review",
+                {"document": "/Daily/Daily Notes", "output_format": "markdown"},
+            )
+
+        text = result[0][0].text
+        assert text.startswith("# reMarkable review export")
+        assert "## Daily Notes" in text
+        assert "Path: `/Daily/Daily Notes`" in text
+        assert "archive this" in text
+
+    @pytest.mark.asyncio
+    async def test_review_folder_filters_tags_and_since(self):
+        """Folder review exports matching documents using browse metadata."""
+        browse_payload = make_response(
+            {
+                "mode": "browse",
+                "path": "/Daily",
+                "documents": [
+                    {
+                        "name": "Keep",
+                        "path": "/Daily/Keep",
+                        "type": "document",
+                        "modified": "2026-06-24T10:00:00Z",
+                        "tags": ["review"],
+                    },
+                    {
+                        "name": "Old",
+                        "path": "/Daily/Old",
+                        "type": "document",
+                        "modified": "2026-06-20T10:00:00Z",
+                        "tags": ["review"],
+                    },
+                ],
+            },
+            "ok",
+        )
+        read_payload = make_response(
+            {
+                "document": "Keep",
+                "path": "/Daily/Keep",
+                "file_type": "pdf",
+                "content": "review me",
+                "page": 1,
+                "total_pages": 1,
+                "more": False,
+                "modified": "2026-06-24T10:00:00Z",
+                "tags": ["review"],
+            },
+            "ok",
+        )
+
+        with (
+            patch(
+                "remarkable_mcp.tools.remarkable_browse", new=AsyncMock(return_value=browse_payload)
+            ),
+            patch(
+                "remarkable_mcp.tools.remarkable_read", new=AsyncMock(return_value=read_payload)
+            ) as read,
+        ):
+            result = await mcp.call_tool(
+                "remarkable_review",
+                {
+                    "folder": "/Daily",
+                    "tags": ["review"],
+                    "since": "2026-06-23T00:00:00Z",
+                    "output_format": "json",
+                },
+            )
+
+        data = json.loads(result[0][0].text)
+        assert data["scope"] == {
+            "folder": "/Daily",
+            "tags": ["review"],
+            "since": "2026-06-23T00:00:00Z",
+        }
+        assert data["count"] == 1
+        assert data["documents"][0]["path"] == "/Daily/Keep"
+        read.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_review_rejects_invalid_output_format(self):
+        """Review rejects unknown output formats with a structured error."""
+        result = await mcp.call_tool(
+            "remarkable_review",
+            {"document": "Daily Notes", "output_format": "html"},
+        )
+        data = json.loads(result[0][0].text)
+        assert data["_error"]["type"] == "invalid_output_format"
 
 
 # =============================================================================
@@ -1189,7 +1344,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await mcp.list_tools()
 
-        assert len(tools) == 13
+        assert len(tools) == 14
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:

@@ -84,6 +84,7 @@ ALL_TOOLS = [
     "remarkable_browse",
     "remarkable_recent",
     "remarkable_search",
+    "remarkable_review",
     "remarkable_read",
     "remarkable_image",
     "remarkable_canvas",
@@ -99,6 +100,7 @@ READ_TOOLS = {
     "remarkable_browse",
     "remarkable_recent",
     "remarkable_search",
+    "remarkable_review",
     "remarkable_read",
     "remarkable_image",
     "remarkable_canvas",
@@ -347,9 +349,10 @@ async def run_read_phase(session, mode, rec, registered):
             mode, "remarkable_search", state, note, _detail_for("remarkable_search", payload)
         )
 
-    # read / image / canvas need a target document
+    # read / review / image / canvas need a target document
     for tool, call_args in (
         ("remarkable_read", {"content_type": "text", "page": 1}),
+        ("remarkable_review", {"output_format": "json"}),
         ("remarkable_image", {"page": 1}),
         ("remarkable_canvas", {"page": 1}),
     ):

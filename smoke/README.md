@@ -50,7 +50,7 @@ tool visibility changes.
 
 | Tool | cloud | usb-web | ssh |
 | ---- | :---: | :-----: | :-: |
-| `remarkable_status` / `browse` / `recent` / `search` / `read` / `image` / `canvas` | PASS | PASS | PASS |
+| `remarkable_status` / `browse` / `recent` / `search` / `review` / `read` / `image` / `canvas` | PASS | PASS | PASS |
 | `remarkable_upload` | PASS | PASS | PASS |
 | `remarkable_mkdir` / `rename` / `move` / `delete` | PASS | **N/A** | PASS |
 | `remarkable_author` | PASS (`create_document`, `daily_notebook`) | **N/A** | PASS |

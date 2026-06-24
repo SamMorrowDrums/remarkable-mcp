@@ -9,6 +9,7 @@ This document provides detailed documentation for all MCP tools provided by rema
 | [`remarkable_read`](#remarkable_read) | Read and search document content |
 | [`remarkable_browse`](#remarkable_browse) | Navigate folders and find documents |
 | [`remarkable_search`](#remarkable_search) | Search across multiple documents |
+| [`remarkable_review`](#remarkable_review) | Export deterministic review bundles |
 | [`remarkable_recent`](#remarkable_recent) | Get recently modified documents |
 | [`remarkable_status`](#remarkable_status) | Check connection status |
 | [`remarkable_image`](#remarkable_image) | Get page images (PNG or SVG) |
@@ -217,6 +218,65 @@ remarkable_search("journal", grep="project idea", include_ocr=True)
 - Maximum 5 documents per search
 - Content is truncated to ~2000 characters per document
 - Designed for quick discovery, use `remarkable_read` for full content
+
+---
+
+## remarkable_review
+
+**Export deterministic review bundles without summarization or mutation.**
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `document` | string | `None` | One document name/path/id to export |
+| `folder` | string | `"/"` | Folder to export when `document` is omitted |
+| `tags` | list[string] | `None` | Optional tags to filter folder exports |
+| `since` | string | `None` | Optional ISO date/timestamp; skip older documents |
+| `include_ocr` | bool | `False` | Enable OCR where `remarkable_read` supports it |
+| `output_format` | string | `"json"` | `"json"`, `"markdown"`, or `"text"` |
+
+### Examples
+
+```python
+# Export one document as Markdown
+remarkable_review(document="/Daily/Daily Notes", output_format="markdown")
+
+# Export review-tagged documents from a folder as JSON
+remarkable_review(folder="/Daily", tags=["review"], output_format="json")
+
+# Include OCR in a plain-text export
+remarkable_review(folder="/Inbox", include_ocr=True, output_format="text")
+```
+
+### Response Format
+
+For `output_format="json"`:
+
+```json
+{
+  "output_format": "json",
+  "scope": {"folder": "/Daily", "tags": ["review"]},
+  "count": 1,
+  "documents": [
+    {
+      "name": "Daily Notes",
+      "path": "/Daily/Daily Notes",
+      "file_type": "notebook",
+      "modified": "2025-11-28T10:30:00Z",
+      "tags": ["review"],
+      "content": "Extracted text content..."
+    }
+  ],
+  "_hint": "Exported 1 document(s) for review."
+}
+```
+
+### Notes
+
+- Read-only: this tool only calls the existing browse/read surface.
+- No LLM summarization, classification, task creation, or external integration.
+- Markdown/text output is deterministic and intended for review/export workflows.
 
 ---
 
