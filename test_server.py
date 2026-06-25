@@ -2815,9 +2815,9 @@ class TestWriteTools:
         ]
 
         for tool_name in write_tool_names:
-            assert tool_name in tool_names, (
-                f"Write tool {tool_name} should be registered by default"
-            )
+            assert (
+                tool_name in tool_names
+            ), f"Write tool {tool_name} should be registered by default"
 
     @pytest.mark.asyncio
     async def test_write_tools_registered_when_enabled(self):
@@ -3705,7 +3705,7 @@ class TestCloudNativeNotebookCreate:
             }
         ]
 
-    def test_create_notebook_rejects_long_markdown_native_seed(self, monkeypatch):
+    def test_create_notebook_splits_long_markdown_across_safe_native_pages(self, monkeypatch):
         from remarkable_mcp.sync import RemarkableClient
 
         client = RemarkableClient(user_token="user-token")
@@ -3722,11 +3722,38 @@ class TestCloudNativeNotebookCreate:
             }
 
         monkeypatch.setattr(client, "_upload_file_blob", fake_upload)
+        monkeypatch.setattr(
+            client,
+            "_upload_doc_index",
+            lambda doc_id, files: {
+                "hash": "doc-index-hash",
+                "type": "0",
+                "id": doc_id,
+                "subfiles": len(files),
+                "size": sum(int(f["size"]) for f in files),
+            },
+        )
+        monkeypatch.setattr(client, "_sync_root", lambda mutate: mutate([]))
+
+        counter = 0
+
+        def fake_uuid():
+            nonlocal counter
+            counter += 1
+            return f"00000000-0000-4000-8000-{counter:012x}"
+
+        monkeypatch.setattr("remarkable_mcp.notebooks.new_uuid", fake_uuid)
 
         markdown = "# Long note\n" + "\n".join(f"Paragraph {i}" for i in range(1, 121))
-        with pytest.raises(ValueError, match="PDF/EPUB"):
-            client.create_notebook("Long Cloud Note", content_markdown=markdown)
-        assert uploaded == []
+        doc = client.create_notebook("Long Cloud Note", content_markdown=markdown)
+
+        filenames = [name for name, _content in uploaded]
+        rm_files = [name for name in filenames if name.endswith(".rm")]
+        assert len(rm_files) == 11
+        content_data = json.loads(dict(uploaded)[f"{doc.id}.content"].decode("utf-8"))
+        assert content_data["pageCount"] == 11
+        assert len(content_data["cPages"]["pages"]) == 11
+        assert doc.page_count == 11
 
 
 class TestCloudBlobCache:

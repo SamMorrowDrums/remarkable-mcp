@@ -19,6 +19,7 @@ writes at the default paper size (see :data:`DEFAULT_PAPER`).
 from __future__ import annotations
 
 import io
+import textwrap
 import time
 import uuid as _uuid
 from typing import Optional
@@ -34,11 +35,13 @@ from remarkable_mcp.strokes import WRITE_VERSION
 # so render + write both fall back to this; keep them consistent.
 DEFAULT_PAPER = (1404, 1872)
 
-# Official reMarkable clients currently render large native typed-text seeds
-# unpredictably even when rmscene can parse the bytes back. Keep native styled
-# authoring as a small seed feature; use PDF/EPUB upload for bulk documents.
-MAX_SAFE_MARKDOWN_LINES = 6
-MAX_SAFE_MARKDOWN_CHARS = 800
+# Official reMarkable clients render native typed-text pages poorly when a page
+# is too dense or when they have to wrap long paragraphs themselves: parser
+# round-trips can pass while the app view overlaps or clips text. Keep each
+# generated page conservative and hard-wrap long source lines before chunking.
+MAX_SAFE_MARKDOWN_LINES = 12
+MAX_SAFE_MARKDOWN_CHARS = 1300
+MAX_SAFE_MARKDOWN_LINE_CHARS = 58
 
 
 def new_uuid() -> str:
@@ -178,42 +181,107 @@ def ensure_markdown_is_safe_native_seed(
     *,
     max_lines: int = MAX_SAFE_MARKDOWN_LINES,
     max_chars: int = MAX_SAFE_MARKDOWN_CHARS,
+    max_line_chars: int = MAX_SAFE_MARKDOWN_LINE_CHARS,
 ) -> None:
-    """Reject bulk Markdown that official clients do not render reliably.
+    """Reject a single native Markdown page that is too dense to render safely.
 
-    Parser round-trips alone are not enough here: long native typed-text seeds
-    can look valid to rmscene while the official reMarkable apps display only a
-    trailing paragraph or otherwise mangle the page. For long note exports, make
-    a PDF/EPUB instead of native typed text.
+    Parser round-trips alone are not enough here: dense native typed-text pages
+    can look valid to rmscene while official reMarkable apps overlap wrapped
+    paragraphs or clip content. Bulk content should go through
+    :func:`markdown_pages_rm_bytes`, which wraps and chunks it first.
     """
     lines = markdown.splitlines() or [""]
     visible_lines = [line for line in lines if line.strip()]
     if len(visible_lines) > max_lines or len(markdown) > max_chars:
         raise ValueError(
-            "content_markdown is too large for safe native typed-text seeding; "
-            "upload a PDF/EPUB for bulk note exports instead"
+            "content_markdown page is too dense for safe native typed-text rendering; "
+            "split it with markdown_pages_rm_bytes or upload a PDF/EPUB"
         )
+    if any(len(line) > max_line_chars for line in visible_lines):
+        raise ValueError(
+            "content_markdown line is too long for safe native typed-text rendering; "
+            "split it with markdown_pages_rm_bytes so long lines are hard-wrapped"
+        )
+
+
+def _wrap_markdown_line(line: str, width: int) -> list[str]:
+    """Hard-wrap one Markdown-ish line without relying on client-side wrapping.
+
+    The official clients can overlap following paragraphs when a long typed-text
+    paragraph wraps inside the renderer. Wrapping in the source CRDT avoids that
+    collision. Continuation lines intentionally fall back to plain text rather
+    than trying to fake nested bullets/headings.
+    """
+    if width < 1:
+        raise ValueError("wrap_width must be at least 1")
+    if len(line) <= width or not line.strip():
+        return [line]
+    # For render-safe exported notes, readability beats preserving inline spans on
+    # very long lines. Strip Markdown emphasis before wrapping so we do not split
+    # an opening ``**`` onto one page line and its closing marker onto another.
+    if "*" in line:
+        line = line.replace("**", "").replace("*", "")
+
+    stripped = line.lstrip(" 	")
+    indent = line[: len(line) - len(stripped)]
+    marker = ""
+    body = stripped
+    for candidate in ("- [ ] ", "- [x] ", "- ", "## ", "# "):
+        if stripped.startswith(candidate):
+            marker = candidate
+            body = stripped[len(candidate) :]
+            break
+
+    prefix = indent + marker
+    continuation = indent + ("  " if marker.startswith("-") else "")
+    first_width = max(8, width - len(prefix))
+    continuation_width = max(8, width - len(continuation))
+    wrapped = textwrap.wrap(
+        body,
+        width=first_width,
+        break_long_words=False,
+        break_on_hyphens=False,
+    ) or [body]
+    lines = [prefix + wrapped[0]]
+    for part in wrapped[1:]:
+        for subpart in textwrap.wrap(
+            part,
+            width=continuation_width,
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [part]:
+            lines.append(continuation + subpart)
+    return lines
+
+
+def wrap_markdown_lines(markdown: str, *, wrap_width: int = MAX_SAFE_MARKDOWN_LINE_CHARS) -> str:
+    """Return Markdown with long lines hard-wrapped for official-client layout."""
+    wrapped: list[str] = []
+    for line in markdown.splitlines() or [""]:
+        wrapped.extend(_wrap_markdown_line(line, wrap_width))
+    return "\n".join(wrapped)
 
 
 def split_markdown_pages(
     markdown: str,
     *,
-    max_lines: int = 40,
-    max_chars: int = 3500,
+    max_lines: int = MAX_SAFE_MARKDOWN_LINES,
+    max_chars: int = MAX_SAFE_MARKDOWN_CHARS,
+    wrap_width: int = MAX_SAFE_MARKDOWN_LINE_CHARS,
 ) -> list[str]:
-    """Split Markdown-ish notebook text into page-sized chunks.
+    """Split Markdown-ish notebook text into render-safe page chunks.
 
-    Native typed-text pages are clipped to a single reMarkable page in the
-    official clients. A huge CRDT text block can contain all text bytes while the
-    tablet only shows the first page area. Split on whole lines so long exports
-    become real `cPages` entries instead of one overflowing page.
+    Native typed-text pages are clipped/overlapped by official clients when a
+    page is too dense or long paragraphs wrap inside the renderer. Hard-wrap
+    long source lines first, then split on whole lines so exports become real
+    ``cPages`` entries instead of one overflowing page.
     """
     if max_lines < 1:
         raise ValueError("max_lines must be at least 1")
     if max_chars < 1:
         raise ValueError("max_chars must be at least 1")
 
-    lines = markdown.splitlines() or [""]
+    lines = wrap_markdown_lines(markdown, wrap_width=wrap_width).splitlines() or [""]
     pages: list[list[str]] = []
     current: list[str] = []
     current_chars = 0
@@ -239,30 +307,33 @@ def markdown_pages_rm_bytes(
     markdown: str,
     author_uuid: Optional[str | _uuid.UUID] = None,
     *,
-    max_lines: int = 40,
-    max_chars: int = 3500,
+    max_lines: int = MAX_SAFE_MARKDOWN_LINES,
+    max_chars: int = MAX_SAFE_MARKDOWN_CHARS,
+    wrap_width: int = MAX_SAFE_MARKDOWN_LINE_CHARS,
 ) -> list[bytes]:
-    """Return one serialized `.rm` page per visible Markdown chunk."""
+    """Return one serialized ``.rm`` page per render-safe Markdown chunk."""
     au = _author_uuid(author_uuid)
-    ensure_markdown_is_safe_native_seed(markdown, max_lines=max_lines, max_chars=max_chars)
-    return [
-        markdown_page_rm_bytes(page, author_uuid=au)
-        for page in split_markdown_pages(markdown, max_lines=max_lines, max_chars=max_chars)
-    ]
+    pages = split_markdown_pages(
+        markdown,
+        max_lines=max_lines,
+        max_chars=max_chars,
+        wrap_width=wrap_width,
+    )
+    for page in pages:
+        ensure_markdown_is_safe_native_seed(
+            page,
+            max_lines=max_lines,
+            max_chars=max_chars,
+            max_line_chars=wrap_width,
+        )
+    return [_markdown_page_rm_bytes_unchecked(page, author_uuid=au) for page in pages]
 
 
-def markdown_page_rm_bytes(markdown: str, author_uuid: Optional[str | _uuid.UUID] = None) -> bytes:
-    """Return serialized ``.rm`` bytes for styled native typed text.
-
-    Supported Markdown subset:
-    - ``# Heading`` -> native heading paragraph
-    - ``## Subheading`` -> native bold paragraph
-    - ``- item`` / indented ``- item`` -> bullet / nested bullet
-    - ``- [ ] item`` / ``- [x] item`` -> unchecked / checked checkbox
-    - inline ``**bold**`` and ``*italic*`` spans
-    """
+def _markdown_page_rm_bytes_unchecked(
+    markdown: str, author_uuid: Optional[str | _uuid.UUID] = None
+) -> bytes:
+    """Return serialized styled typed-text bytes after caller safety checks."""
     au = _author_uuid(author_uuid)
-    ensure_markdown_is_safe_native_seed(markdown)
     values, styles = _styled_text_values(markdown)
     visible_text = _plain_text_from_values(values)
     blocks = list(simple_text_document("", author_uuid=au))
@@ -290,6 +361,20 @@ def markdown_page_rm_bytes(markdown: str, author_uuid: Optional[str | _uuid.UUID
     buf = io.BytesIO()
     write_blocks(buf, blocks, options={"version": WRITE_VERSION})
     return buf.getvalue()
+
+
+def markdown_page_rm_bytes(markdown: str, author_uuid: Optional[str | _uuid.UUID] = None) -> bytes:
+    """Return serialized ``.rm`` bytes for one safe styled native text page.
+
+    Supported Markdown subset:
+    - ``# Heading`` -> native heading paragraph
+    - ``## Subheading`` -> native bold paragraph
+    - ``- item`` / indented ``- item`` -> bullet / nested bullet
+    - ``- [ ] item`` / ``- [x] item`` -> unchecked / checked checkbox
+    - inline ``**bold**`` and ``*italic*`` spans
+    """
+    ensure_markdown_is_safe_native_seed(markdown)
+    return _markdown_page_rm_bytes_unchecked(markdown, author_uuid=author_uuid)
 
 
 def page_rm_bytes(

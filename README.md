@@ -551,10 +551,10 @@ remarkable_author(
 # Only seed typed text when the user explicitly requested it.
 remarkable_author(method="create_document", name="Meeting notes", text="Agenda\nFollow-ups")
 
-# Seed a small amount of styled native typed text when the user supplied Markdown.
-# Keep this to short notebook seeds. For long notes/documents, upload a PDF/EPUB
-# instead; official reMarkable clients do not reliably render large native
-# typed-text seeds even when the bytes parse back correctly.
+# Seed editable styled native typed text when the user supplied Markdown.
+# Longer Markdown is hard-wrapped and split into conservative native pages so
+# official reMarkable clients do not have to wrap dense paragraphs themselves.
+# For print-perfect/fixed-layout documents, upload a PDF/EPUB instead.
 remarkable_author(
     method="create_document",
     name="Styled meeting notes",

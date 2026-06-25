@@ -1123,13 +1123,9 @@ class RemarkableClient:
 
         doc_id = nb.new_uuid()
         if content_markdown is not None:
-            markdown_pages = nb.split_markdown_pages(content_markdown)
-            page_ids = [nb.new_uuid() for _ in markdown_pages]
             author_uuid = nb.new_uuid()
-            page_blobs = [
-                nb.markdown_page_rm_bytes(page, author_uuid=author_uuid)
-                for page in markdown_pages
-            ]
+            page_blobs = nb.markdown_pages_rm_bytes(content_markdown, author_uuid=author_uuid)
+            page_ids = [nb.new_uuid() for _ in page_blobs]
         else:
             page_ids = [nb.new_uuid()]
             author_uuid = nb.new_uuid()
