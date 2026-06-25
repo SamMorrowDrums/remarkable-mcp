@@ -552,6 +552,8 @@ remarkable_author(
 remarkable_author(method="create_document", name="Meeting notes", text="Agenda\nFollow-ups")
 
 # Seed styled native typed text when the user supplied Markdown content.
+# Long Markdown is split across multiple native pages so it does not get
+# clipped into one page in the official reMarkable clients.
 remarkable_author(
     method="create_document",
     name="Styled meeting notes",

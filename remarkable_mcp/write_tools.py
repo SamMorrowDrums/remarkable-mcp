@@ -676,11 +676,14 @@ def _cloud_author_create_document(
         doc = create_notebook(name, parent_id, text)
     doc_id = getattr(doc, "id", None)
     _invalidate_client_cache(client)
+    page_count = getattr(doc, "page_count", 1)
+    if not isinstance(page_count, int):
+        page_count = 1
     result = {
         "created": True,
         "document": name,
         "document_id": doc_id,
-        "total_pages": 1,
+        "total_pages": page_count,
         "folder": folder_path,
         "has_text": bool(text),
         "has_markdown": bool(content_markdown),
@@ -1126,16 +1129,24 @@ def _author_create_document(
         )
 
     doc_uuid = nb.new_uuid()
-    page_id = nb.new_uuid()
-    author_uuid = nb.new_uuid()
-    page_bytes = nb.page_rm_bytes(
-        text or "", author_uuid=author_uuid, content_markdown=content_markdown
-    )
-    content_data = nb.new_notebook_content([page_id], author_uuid)
+    if content_markdown is not None:
+        markdown_pages = nb.split_markdown_pages(content_markdown)
+        page_ids = [nb.new_uuid() for _ in markdown_pages]
+        author_uuid = nb.new_uuid()
+        page_blobs = [
+            nb.markdown_page_rm_bytes(page, author_uuid=author_uuid)
+            for page in markdown_pages
+        ]
+    else:
+        page_ids = [nb.new_uuid()]
+        author_uuid = nb.new_uuid()
+        page_blobs = [nb.page_rm_bytes(text or "", author_uuid=author_uuid)]
+    content_data = nb.new_notebook_content(page_ids, author_uuid)
     metadata = nb.new_document_metadata(name, parent=parent_id)
 
     ssh_client._ssh_command(f"mkdir -p '{XOCHITL_PATH}/{doc_uuid}'")
-    _write_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}/{page_id}.rm", page_bytes)
+    for page_id, page_bytes in zip(page_ids, page_blobs):
+        _write_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}/{page_id}.rm", page_bytes)
     _write_content_file(ssh_client, doc_uuid, content_data)
     _write_metadata(ssh_client, doc_uuid, metadata)
     _restart_xochitl(ssh_client)
@@ -1145,8 +1156,9 @@ def _author_create_document(
         "created": True,
         "document": name,
         "document_id": doc_uuid,
-        "page_id": page_id,
-        "total_pages": 1,
+        "page_id": page_ids[0],
+        "page_ids": page_ids,
+        "total_pages": len(page_ids),
         "paper_size": list(nb.DEFAULT_PAPER),
         "has_text": bool(text),
         "has_markdown": bool(content_markdown),

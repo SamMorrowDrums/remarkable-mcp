@@ -338,6 +338,7 @@ class Document:
     size: int = 0
     files: List[Dict[str, Any]] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
+    page_count: int = 0
 
     @property
     def is_folder(self) -> bool:
@@ -1121,26 +1122,38 @@ class RemarkableClient:
         from remarkable_mcp import notebooks as nb
 
         doc_id = nb.new_uuid()
-        page_id = nb.new_uuid()
-        author_uuid = nb.new_uuid()
+        if content_markdown is not None:
+            markdown_pages = nb.split_markdown_pages(content_markdown)
+            page_ids = [nb.new_uuid() for _ in markdown_pages]
+            author_uuid = nb.new_uuid()
+            page_blobs = [
+                nb.markdown_page_rm_bytes(page, author_uuid=author_uuid)
+                for page in markdown_pages
+            ]
+        else:
+            page_ids = [nb.new_uuid()]
+            author_uuid = nb.new_uuid()
+            page_blobs = [nb.page_rm_bytes(text or "", author_uuid=author_uuid)]
 
-        page_bytes = nb.page_rm_bytes(
-            text or "", author_uuid=author_uuid, content_markdown=content_markdown
-        )
-        content_json = nb.new_notebook_content([page_id], author_uuid)
+        content_json = nb.new_notebook_content(page_ids, author_uuid)
         metadata = nb.new_document_metadata(name, parent=parent_id)
 
         files = [
-            self._upload_file_blob(page_bytes, f"{doc_id}/{page_id}.rm"),
-            self._upload_file_blob(
-                json.dumps(content_json, sort_keys=True).encode("utf-8"),
-                f"{doc_id}.content",
-            ),
-            self._upload_file_blob(
-                json.dumps(metadata, sort_keys=True).encode("utf-8"),
-                f"{doc_id}.metadata",
-            ),
+            self._upload_file_blob(page_bytes, f"{doc_id}/{page_id}.rm")
+            for page_id, page_bytes in zip(page_ids, page_blobs)
         ]
+        files.extend(
+            [
+                self._upload_file_blob(
+                    json.dumps(content_json, sort_keys=True).encode("utf-8"),
+                    f"{doc_id}.content",
+                ),
+                self._upload_file_blob(
+                    json.dumps(metadata, sort_keys=True).encode("utf-8"),
+                    f"{doc_id}.metadata",
+                ),
+            ]
+        )
         new_entry = self._upload_doc_index(doc_id, files)
         self._sync_root(lambda entries: entries + [new_entry])
         return Document(
@@ -1149,6 +1162,7 @@ class RemarkableClient:
             name=name,
             doc_type="DocumentType",
             parent=parent_id or "",
+            page_count=len(page_ids),
         )
 
     @staticmethod

@@ -3705,6 +3705,70 @@ class TestCloudNativeNotebookCreate:
             }
         ]
 
+    def test_create_notebook_splits_long_markdown_across_native_pages(self, monkeypatch):
+        from remarkable_mcp.sync import RemarkableClient
+
+        client = RemarkableClient(user_token="user-token")
+        uploaded = []
+
+        def fake_upload(content, filename):
+            uploaded.append((filename, content))
+            return {
+                "hash": f"hash-{len(uploaded)}",
+                "type": "0",
+                "id": filename,
+                "subfiles": 0,
+                "size": len(content),
+            }
+
+        monkeypatch.setattr(client, "_upload_file_blob", fake_upload)
+        monkeypatch.setattr(
+            client,
+            "_upload_doc_index",
+            lambda doc_id, files: {
+                "hash": "doc-index-hash",
+                "type": "0",
+                "id": doc_id,
+                "subfiles": len(files),
+                "size": sum(int(f["size"]) for f in files),
+            },
+        )
+        monkeypatch.setattr(client, "_sync_root", lambda mutate: mutate([]))
+        ids = iter(
+            [
+                "00000000-0000-4000-8000-000000000010",  # doc
+                "00000000-0000-4000-8000-000000000012",  # page 1
+                "00000000-0000-4000-8000-000000000013",  # page 2
+                "00000000-0000-4000-8000-000000000014",  # page 3
+                "00000000-0000-4000-8000-000000000015",  # page 4
+                "00000000-0000-4000-8000-000000000011",  # author
+            ]
+        )
+        monkeypatch.setattr("remarkable_mcp.notebooks.new_uuid", ids.__next__)
+
+        markdown = "# Long note\n" + "\n".join(f"Paragraph {i}" for i in range(1, 121))
+        client.create_notebook("Long Cloud Note", content_markdown=markdown)
+
+        filenames = [name for name, _content in uploaded]
+        rm_files = [name for name in filenames if name.endswith(".rm")]
+        assert len(rm_files) == 4
+        assert filenames[:4] == [
+            "00000000-0000-4000-8000-000000000010/00000000-0000-4000-8000-000000000012.rm",
+            "00000000-0000-4000-8000-000000000010/00000000-0000-4000-8000-000000000013.rm",
+            "00000000-0000-4000-8000-000000000010/00000000-0000-4000-8000-000000000014.rm",
+            "00000000-0000-4000-8000-000000000010/00000000-0000-4000-8000-000000000015.rm",
+        ]
+        content_data = json.loads(
+            dict(uploaded)["00000000-0000-4000-8000-000000000010.content"].decode("utf-8")
+        )
+        assert content_data["pageCount"] == 4
+        assert [p["id"] for p in content_data["cPages"]["pages"]] == [
+            "00000000-0000-4000-8000-000000000012",
+            "00000000-0000-4000-8000-000000000013",
+            "00000000-0000-4000-8000-000000000014",
+            "00000000-0000-4000-8000-000000000015",
+        ]
+
 
 class TestCloudBlobCache:
     """Tests for the content-addressed blob cache in the cloud client."""

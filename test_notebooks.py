@@ -6,7 +6,7 @@ from rmscene import RootTextBlock, read_blocks
 from rmscene.scene_items import ParagraphStyle
 from rmscene.text import TextDocument
 
-from remarkable_mcp.notebooks import markdown_page_rm_bytes
+from remarkable_mcp.notebooks import markdown_page_rm_bytes, markdown_pages_rm_bytes
 
 
 def _read_text_document(raw: bytes) -> TextDocument:
@@ -57,3 +57,25 @@ def test_markdown_page_rm_bytes_round_trips_inline_bold_and_italic_spans():
         ("italic", {"font-weight": "normal", "font-style": "italic"}),
         (" text", {"font-weight": "normal", "font-style": "normal"}),
     ]
+
+
+def test_markdown_pages_rm_bytes_splits_long_markdown_into_visible_pages():
+    markdown = "# Long note\n" + "\n".join(f"Paragraph {i}" for i in range(1, 121))
+
+    pages = markdown_pages_rm_bytes(markdown, max_lines=40, max_chars=10_000)
+
+    assert len(pages) == 4
+    page_texts = [[str(p) for p in _read_text_document(raw).contents] for raw in pages]
+    assert page_texts[0][0] == "Long note"
+    assert page_texts[0][-1] == "Paragraph 39"
+    assert page_texts[1][0] == "Paragraph 40"
+    assert page_texts[-1][-1] == "Paragraph 120"
+
+
+def test_markdown_pages_rm_bytes_splits_before_single_page_overflows_by_chars():
+    markdown = "# Big blocks\n\n" + "\n\n".join("x" * 80 for _ in range(8))
+
+    pages = markdown_pages_rm_bytes(markdown, max_lines=100, max_chars=220)
+
+    assert len(pages) > 1
+    assert all(sum(len(str(p)) for p in _read_text_document(raw).contents) <= 260 for raw in pages)

@@ -40,7 +40,7 @@ def new_uuid() -> str:
     return str(_uuid.uuid4())
 
 
-def _author_uuid(author_uuid: Optional[str]):
+def _author_uuid(author_uuid: Optional[str | _uuid.UUID]):
     """Coerce an author uuid (str/UUID/None) into a ``uuid.UUID``.
 
     A fresh author uuid is generated when none is supplied so the ``.rm``
@@ -167,7 +167,62 @@ def _crdt_sequence_from_values(values: list[str | int]) -> CrdtSequence:
     return CrdtSequence(items)
 
 
-def markdown_page_rm_bytes(markdown: str, author_uuid: Optional[str] = None) -> bytes:
+def split_markdown_pages(
+    markdown: str,
+    *,
+    max_lines: int = 40,
+    max_chars: int = 3500,
+) -> list[str]:
+    """Split Markdown-ish notebook text into page-sized chunks.
+
+    Native typed-text pages are clipped to a single reMarkable page in the
+    official clients. A huge CRDT text block can contain all text bytes while the
+    tablet only shows the first page area. Split on whole lines so long exports
+    become real `cPages` entries instead of one overflowing page.
+    """
+    if max_lines < 1:
+        raise ValueError("max_lines must be at least 1")
+    if max_chars < 1:
+        raise ValueError("max_chars must be at least 1")
+
+    lines = markdown.splitlines() or [""]
+    pages: list[list[str]] = []
+    current: list[str] = []
+    current_chars = 0
+
+    for line in lines:
+        line_chars = len(line) + 1
+        would_overflow_lines = len(current) >= max_lines
+        would_overflow_chars = current_chars + line_chars > max_chars
+        if current and (would_overflow_lines or would_overflow_chars):
+            pages.append(current)
+            current = []
+            current_chars = 0
+        current.append(line)
+        current_chars += line_chars
+
+    if current:
+        pages.append(current)
+
+    return ["\n".join(page).strip("\n") for page in pages] or [""]
+
+
+def markdown_pages_rm_bytes(
+    markdown: str,
+    author_uuid: Optional[str | _uuid.UUID] = None,
+    *,
+    max_lines: int = 40,
+    max_chars: int = 3500,
+) -> list[bytes]:
+    """Return one serialized `.rm` page per visible Markdown chunk."""
+    au = _author_uuid(author_uuid)
+    return [
+        markdown_page_rm_bytes(page, author_uuid=au)
+        for page in split_markdown_pages(markdown, max_lines=max_lines, max_chars=max_chars)
+    ]
+
+
+def markdown_page_rm_bytes(markdown: str, author_uuid: Optional[str | _uuid.UUID] = None) -> bytes:
     """Return serialized ``.rm`` bytes for styled native typed text.
 
     Supported Markdown subset:
