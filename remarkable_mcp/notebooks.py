@@ -34,6 +34,12 @@ from remarkable_mcp.strokes import WRITE_VERSION
 # so render + write both fall back to this; keep them consistent.
 DEFAULT_PAPER = (1404, 1872)
 
+# Official reMarkable clients currently render large native typed-text seeds
+# unpredictably even when rmscene can parse the bytes back. Keep native styled
+# authoring as a small seed feature; use PDF/EPUB upload for bulk documents.
+MAX_SAFE_MARKDOWN_LINES = 6
+MAX_SAFE_MARKDOWN_CHARS = 800
+
 
 def new_uuid() -> str:
     """Return a fresh lowercase UUID string for a document or page id."""
@@ -167,6 +173,28 @@ def _crdt_sequence_from_values(values: list[str | int]) -> CrdtSequence:
     return CrdtSequence(items)
 
 
+def ensure_markdown_is_safe_native_seed(
+    markdown: str,
+    *,
+    max_lines: int = MAX_SAFE_MARKDOWN_LINES,
+    max_chars: int = MAX_SAFE_MARKDOWN_CHARS,
+) -> None:
+    """Reject bulk Markdown that official clients do not render reliably.
+
+    Parser round-trips alone are not enough here: long native typed-text seeds
+    can look valid to rmscene while the official reMarkable apps display only a
+    trailing paragraph or otherwise mangle the page. For long note exports, make
+    a PDF/EPUB instead of native typed text.
+    """
+    lines = markdown.splitlines() or [""]
+    visible_lines = [line for line in lines if line.strip()]
+    if len(visible_lines) > max_lines or len(markdown) > max_chars:
+        raise ValueError(
+            "content_markdown is too large for safe native typed-text seeding; "
+            "upload a PDF/EPUB for bulk note exports instead"
+        )
+
+
 def split_markdown_pages(
     markdown: str,
     *,
@@ -216,6 +244,7 @@ def markdown_pages_rm_bytes(
 ) -> list[bytes]:
     """Return one serialized `.rm` page per visible Markdown chunk."""
     au = _author_uuid(author_uuid)
+    ensure_markdown_is_safe_native_seed(markdown, max_lines=max_lines, max_chars=max_chars)
     return [
         markdown_page_rm_bytes(page, author_uuid=au)
         for page in split_markdown_pages(markdown, max_lines=max_lines, max_chars=max_chars)
@@ -233,6 +262,7 @@ def markdown_page_rm_bytes(markdown: str, author_uuid: Optional[str | _uuid.UUID
     - inline ``**bold**`` and ``*italic*`` spans
     """
     au = _author_uuid(author_uuid)
+    ensure_markdown_is_safe_native_seed(markdown)
     values, styles = _styled_text_values(markdown)
     visible_text = _plain_text_from_values(values)
     blocks = list(simple_text_document("", author_uuid=au))

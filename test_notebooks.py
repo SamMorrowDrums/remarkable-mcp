@@ -2,6 +2,8 @@
 
 from io import BytesIO
 
+import pytest
+
 from rmscene import RootTextBlock, read_blocks
 from rmscene.scene_items import ParagraphStyle
 from rmscene.text import TextDocument
@@ -59,23 +61,15 @@ def test_markdown_page_rm_bytes_round_trips_inline_bold_and_italic_spans():
     ]
 
 
-def test_markdown_pages_rm_bytes_splits_long_markdown_into_visible_pages():
+def test_markdown_pages_rm_bytes_rejects_bulk_markdown_for_official_client_safety():
     markdown = "# Long note\n" + "\n".join(f"Paragraph {i}" for i in range(1, 121))
 
-    pages = markdown_pages_rm_bytes(markdown, max_lines=40, max_chars=10_000)
-
-    assert len(pages) == 4
-    page_texts = [[str(p) for p in _read_text_document(raw).contents] for raw in pages]
-    assert page_texts[0][0] == "Long note"
-    assert page_texts[0][-1] == "Paragraph 39"
-    assert page_texts[1][0] == "Paragraph 40"
-    assert page_texts[-1][-1] == "Paragraph 120"
+    with pytest.raises(ValueError, match="PDF/EPUB"):
+        markdown_pages_rm_bytes(markdown, max_lines=40, max_chars=10_000)
 
 
-def test_markdown_pages_rm_bytes_splits_before_single_page_overflows_by_chars():
+def test_markdown_page_rm_bytes_rejects_large_single_page_seed():
     markdown = "# Big blocks\n\n" + "\n\n".join("x" * 80 for _ in range(8))
 
-    pages = markdown_pages_rm_bytes(markdown, max_lines=100, max_chars=220)
-
-    assert len(pages) > 1
-    assert all(sum(len(str(p)) for p in _read_text_document(raw).contents) <= 260 for raw in pages)
+    with pytest.raises(ValueError, match="native typed-text"):
+        markdown_page_rm_bytes(markdown)
