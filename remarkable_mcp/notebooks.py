@@ -281,12 +281,14 @@ def split_markdown_pages(
     if max_chars < 1:
         raise ValueError("max_chars must be at least 1")
 
-    lines = wrap_markdown_lines(markdown, wrap_width=wrap_width).splitlines() or [""]
+    source_lines = markdown.splitlines() or [""]
+    groups = [_wrap_markdown_line(line, wrap_width) for line in source_lines]
     pages: list[list[str]] = []
     current: list[str] = []
     current_chars = 0
 
-    for line in lines:
+    def append_line(line: str) -> None:
+        nonlocal current, current_chars
         line_chars = len(line) + 1
         would_overflow_lines = len(current) >= max_lines
         would_overflow_chars = current_chars + line_chars > max_chars
@@ -296,6 +298,21 @@ def split_markdown_pages(
             current_chars = 0
         current.append(line)
         current_chars += line_chars
+
+    for group in groups:
+        group_chars = sum(len(line) + 1 for line in group)
+        group_fits_empty_page = len(group) <= max_lines and group_chars <= max_chars
+        would_split_group = (
+            current
+            and group_fits_empty_page
+            and (len(current) + len(group) > max_lines or current_chars + group_chars > max_chars)
+        )
+        if would_split_group:
+            pages.append(current)
+            current = []
+            current_chars = 0
+        for line in group:
+            append_line(line)
 
     if current:
         pages.append(current)

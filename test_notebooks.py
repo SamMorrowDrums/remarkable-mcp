@@ -88,6 +88,19 @@ def test_split_markdown_pages_hard_wraps_long_lines_before_chunking():
     assert lines[1].startswith("  word")
 
 
+def test_split_markdown_pages_keeps_wrapped_line_group_together_at_page_break():
+    intro = "\n".join(f"Line {i}" for i in range(11))
+    long_bullet = "- " + " ".join(f"word{i}" for i in range(20))
+
+    pages = split_markdown_pages(
+        f"{intro}\n{long_bullet}", max_lines=12, max_chars=1300, wrap_width=40
+    )
+
+    assert pages[0].splitlines()[-1] == "Line 10"
+    assert pages[1].splitlines()[0].startswith("- word0")
+    assert pages[1].splitlines()[1].startswith("  word")
+
+
 def test_markdown_page_rm_bytes_rejects_dense_single_page_seed():
     markdown = "# Big blocks\n\n" + "\n\n".join("x" * 80 for _ in range(8))
 
