@@ -4787,3 +4787,91 @@ class TestGetDocumentFileType:
             assert get_document_file_type(zpath) == ""
         finally:
             zpath.unlink(missing_ok=True)
+
+
+class TestRestartXochitl:
+    """_restart_xochitl waits for the UI to come back before returning.
+
+    Restarting xochitl forces a document-store rescan that briefly starves the
+    SSH daemon. The readiness wait is what prevents a following write from
+    landing mid-rescan and racing on a refused/dropped connection.
+    """
+
+    @staticmethod
+    def _ssh_client(is_active_sequence):
+        """Mock SSHClient whose `_ssh_command` dispatches on the command text.
+
+        `is_active_sequence` is consumed one entry per `systemctl is-active`
+        call: a string is returned as stdout; a RuntimeError instance is raised
+        (mirroring how the SSH layer surfaces a non-zero `is-active` exit while
+        the unit is still activating).
+        """
+        states = iter(is_active_sequence)
+        calls = []
+
+        def _command(command, timeout=30):
+            calls.append(command)
+            if "is-active" in command:
+                state = next(states)
+                if isinstance(state, Exception):
+                    raise state
+                return state
+            return ""
+
+        client = Mock(spec=["_ssh_command"])
+        client._ssh_command.side_effect = _command
+        client.calls = calls
+        return client
+
+    def test_restarts_then_reports_ready_on_first_active(self):
+        from remarkable_mcp import write_tools
+
+        client = self._ssh_client(["active\n"])
+        with patch("remarkable_mcp.write_tools.time.sleep") as mock_sleep:
+            write_tools._restart_xochitl(client)
+
+        assert client.calls[0] == "systemctl restart xochitl"
+        assert any("is-active" in c for c in client.calls)
+        # No poll-interval sleeps when active on the first probe; only the final
+        # settle delay runs.
+        assert mock_sleep.call_count == 1
+        assert mock_sleep.call_args_list[0].args[0] == write_tools._RESTART_SETTLE_SECONDS
+
+    def test_polls_until_active(self):
+        from remarkable_mcp import write_tools
+
+        client = self._ssh_client(["activating\n", "activating\n", "active\n"])
+        with patch("remarkable_mcp.write_tools.time.sleep") as mock_sleep:
+            write_tools._restart_xochitl(client)
+
+        is_active_calls = [c for c in client.calls if "is-active" in c]
+        assert len(is_active_calls) == 3
+        # Two poll-interval waits between the three probes, then one settle wait.
+        sleeps = [c.args[0] for c in mock_sleep.call_args_list]
+        assert sleeps == [
+            write_tools._RESTART_POLL_INTERVAL,
+            write_tools._RESTART_POLL_INTERVAL,
+            write_tools._RESTART_SETTLE_SECONDS,
+        ]
+
+    def test_command_failure_is_treated_as_not_ready(self):
+        from remarkable_mcp import write_tools
+
+        # is-active raises (non-zero exit while activating) before succeeding;
+        # the error must not propagate — keep polling instead.
+        client = self._ssh_client([RuntimeError("SSH command failed"), "active\n"])
+        with patch("remarkable_mcp.write_tools.time.sleep"):
+            write_tools._restart_xochitl(client)
+
+        assert len([c for c in client.calls if "is-active" in c]) == 2
+
+    def test_wait_ready_false_skips_poll(self):
+        from remarkable_mcp import write_tools
+
+        client = self._ssh_client([])
+        with patch("remarkable_mcp.write_tools.time.sleep") as mock_sleep:
+            write_tools._restart_xochitl(client, wait_ready=False)
+
+        assert client.calls == ["systemctl restart xochitl"]
+        assert not any("is-active" in c for c in client.calls)
+        mock_sleep.assert_not_called()

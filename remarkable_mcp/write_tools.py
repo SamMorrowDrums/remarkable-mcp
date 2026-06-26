@@ -191,9 +191,50 @@ def _upload_file_bytes(ssh_client: SSHClient, local_path: str, remote_path: str)
             raise RuntimeError("SSH upload timed out after 120s")
 
 
-def _restart_xochitl(ssh_client: SSHClient) -> None:
-    """Restart the xochitl UI service on the tablet."""
-    ssh_client._ssh_command("systemctl restart xochitl", timeout=15)
+# Tunables for the post-restart readiness wait (see _restart_xochitl). All are
+# overridable by env var so the wait can be tightened or relaxed per device
+# without code changes.
+_RESTART_READY_TIMEOUT = float(os.environ.get("REMARKABLE_RESTART_TIMEOUT", "30"))
+_RESTART_POLL_INTERVAL = float(os.environ.get("REMARKABLE_RESTART_POLL_INTERVAL", "1"))
+_RESTART_SETTLE_SECONDS = float(os.environ.get("REMARKABLE_RESTART_SETTLE", "3"))
+
+
+def _restart_xochitl(ssh_client: SSHClient, wait_ready: bool = True) -> None:
+    """Restart the xochitl UI service so it picks up metadata changes.
+
+    Restarting forces xochitl to rescan the entire document store. On the
+    resource-constrained tablet that briefly starves the SSH daemon, so a
+    follow-up write issued immediately can land mid-rescan and have its
+    connection refused or torn down — the "race" seen during bulk operations.
+
+    To avoid that, after issuing the restart we poll ``systemctl is-active``
+    until xochitl reports ``active`` again, then add a short settle delay so the
+    rescan-driven CPU/IO spike has subsided before we return. The call therefore
+    only completes once the tablet is ready for the next operation. Pass
+    ``wait_ready=False`` to restore the old fire-and-return behaviour.
+    """
+    ssh_client._ssh_command("systemctl restart xochitl", timeout=30)
+    if not wait_ready:
+        return
+
+    deadline = time.monotonic() + _RESTART_READY_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            state = ssh_client._ssh_command("systemctl is-active xochitl", timeout=10).strip()
+        except RuntimeError:
+            # While the unit is still activating, `is-active` exits non-zero
+            # (surfaced as RuntimeError) and the SSH layer itself may be briefly
+            # refusing connections. Either way it isn't ready yet — keep polling.
+            state = "activating"
+        if state == "active":
+            break
+        time.sleep(_RESTART_POLL_INTERVAL)
+
+    # `systemctl restart` returns once the process is respawned, but the store
+    # rescan continues afterwards; settle briefly so the next reconnect lands
+    # after the spike rather than during it.
+    if _RESTART_SETTLE_SECONDS > 0:
+        time.sleep(_RESTART_SETTLE_SECONDS)
 
 
 def _page_ids_from_content(content_data: dict) -> list:

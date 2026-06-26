@@ -187,6 +187,9 @@ Note: WiFi is slower than USB but works from anywhere on your network.
 | `REMARKABLE_SSH_PORT` | `22` | SSH port |
 | `REMARKABLE_SSH_PASSWORD` | *(none)* | SSH password (requires `sshpass`, key auth recommended) |
 | `REMARKABLE_SSH_KEY` | *(none)* | Path to a private key for key auth. Pins this on-disk identity (`IdentitiesOnly`) and ignores any ssh-agent. |
+| `REMARKABLE_RESTART_TIMEOUT` | `30` | Max seconds to wait for `xochitl` to report active again after a write restarts it |
+| `REMARKABLE_RESTART_POLL_INTERVAL` | `1` | Seconds between `systemctl is-active` polls while waiting for `xochitl` |
+| `REMARKABLE_RESTART_SETTLE` | `3` | Extra settle delay (seconds) after `xochitl` is active, before the next operation runs |
 
 ## Troubleshooting
 
