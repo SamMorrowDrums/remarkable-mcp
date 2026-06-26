@@ -237,6 +237,51 @@ def _restart_xochitl(ssh_client: SSHClient, wait_ready: bool = True) -> None:
         time.sleep(_RESTART_SETTLE_SECONDS)
 
 
+def _defer_restart_enabled() -> bool:
+    """Whether xochitl restarts should be deferred by default (env override).
+
+    Set REMARKABLE_DEFER_RESTART=1 to make every write skip its own restart, so
+    a batch of writes pays the restart cost (and its race surface) exactly once
+    via remarkable_refresh instead of once per write.
+    """
+    return os.environ.get("REMARKABLE_DEFER_RESTART", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _maybe_restart_xochitl(ssh_client: SSHClient, defer_restart: bool = False) -> bool:
+    """Restart xochitl unless deferral is requested (per-call arg or env).
+
+    Returns True if a restart was performed, False if it was deferred. When
+    deferred the on-disk metadata has changed but xochitl has not yet rescanned,
+    so the caller must run remarkable_refresh once the batch is complete for the
+    changes to become visible in the UI.
+    """
+    if defer_restart or _defer_restart_enabled():
+        return False
+    _restart_xochitl(ssh_client)
+    return True
+
+
+def _write_result_message(
+    restarted: bool,
+    done: str,
+    verify: str = "Use remarkable_browse() to verify.",
+) -> str:
+    """Build a write tool's success message, accounting for restart deferral.
+
+    ``done`` is the past-tense summary of what happened (e.g. "Document
+    moved."). When the restart ran, ``verify`` tells the user how to confirm the
+    change; when it was deferred, the user is instead reminded to call
+    remarkable_refresh once their batch is complete.
+    """
+    if restarted:
+        return f"{done} {verify}"
+    return f"{done} Restart deferred — call remarkable_refresh() once your batch is done."
+
+
 def _page_ids_from_content(content_data: dict) -> list:
     """Return ordered page ids from a parsed ``.content`` file.
 
@@ -685,7 +730,7 @@ def _author_draw(document: str, page: int, strokes: list, ui_submitted: bool) ->
         if not _remote_file_exists(ssh_client, bak_path):
             _write_remote_bytes(ssh_client, bak_path, original)
     _write_remote_bytes(ssh_client, rm_path, new_bytes)
-    _restart_xochitl(ssh_client)
+    _maybe_restart_xochitl(ssh_client)
 
     result = {
         "written": True,
@@ -778,7 +823,7 @@ def _author_add_page(document: str) -> str:
 
     _write_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}/{new_page_id}.rm", page_bytes)
     _write_content_file(ssh_client, doc_uuid, updated["content"])
-    _restart_xochitl(ssh_client)
+    _maybe_restart_xochitl(ssh_client)
     _invalidate_client_cache(ssh_client)
 
     result = {
@@ -832,7 +877,7 @@ def _author_create_document(name: str, text: Optional[str], folder: Optional[str
     _write_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}/{page_id}.rm", page_bytes)
     _write_content_file(ssh_client, doc_uuid, content_data)
     _write_metadata(ssh_client, doc_uuid, metadata)
-    _restart_xochitl(ssh_client)
+    _maybe_restart_xochitl(ssh_client)
     _invalidate_client_cache(ssh_client)
 
     result = {
@@ -966,6 +1011,7 @@ def register_write_tools():
         file_path: str,
         parent_folder: str = "/",
         document_name: Optional[str] = None,
+        defer_restart: bool = False,
     ) -> str:
         """
         <usecase>Upload a PDF or EPUB file to the reMarkable tablet.</usecase>
@@ -985,11 +1031,22 @@ def register_write_tools():
           Honored in cloud and SSH modes; ignored by the USB web interface.
         - document_name: Display name on tablet (default: filename without
           extension). Honored in cloud and SSH modes; ignored by the USB web interface.
+        - defer_restart: SSH only. When True, skip the xochitl restart that
+          normally makes the upload visible. Use this for every upload in a
+          batch, then call remarkable_refresh() ONCE at the end. Each restart
+          forces a full document-store rescan that briefly destabilises the SSH
+          link, so deferring turns N restarts (and N races) into one. The
+          response sets "refresh_pending": true while a refresh is owed. Ignored
+          in cloud/USB modes (no xochitl).
         </parameters>
         <examples>
         - remarkable_upload("/tmp/paper.pdf")
         - remarkable_upload("/tmp/book.epub", parent_folder="/Books")
         - remarkable_upload("/tmp/report.pdf", document_name="Q4 Report")
+        - # batch import: defer every upload, refresh once at the end
+          remarkable_upload("/tmp/a.pdf", defer_restart=True)
+          remarkable_upload("/tmp/b.pdf", defer_restart=True)
+          remarkable_refresh()
         </examples>
         """
 
@@ -1124,8 +1181,8 @@ def register_write_tools():
                 # Create the document directory (required by xochitl)
                 ssh_client._ssh_command(f"mkdir -p '{XOCHITL_PATH}/{doc_uuid}'")
 
-                # Restart xochitl to pick up changes
-                _restart_xochitl(ssh_client)
+                # Restart xochitl to pick up changes (unless deferred for a batch)
+                restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
 
                 # Clear cached documents so next read picks up the new doc
                 ssh_client._documents = []
@@ -1140,8 +1197,13 @@ def register_write_tools():
                         "parent_folder": parent_folder,
                         "remote_path": remote_file,
                         "transport": "ssh",
+                        "refresh_pending": not restarted,
                     },
-                    "Document uploaded successfully. Use remarkable_browse() to verify it appears.",
+                    _write_result_message(
+                        restarted,
+                        "Document uploaded successfully.",
+                        "Use remarkable_browse() to verify it appears.",
+                    ),
                 )
 
             except Exception as e:
@@ -1160,6 +1222,7 @@ def register_write_tools():
         async def remarkable_mkdir(
             folder_name: str,
             parent: str = "/",
+            defer_restart: bool = False,
         ) -> str:
             """
             <usecase>Create a new folder on the reMarkable tablet.</usecase>
@@ -1174,6 +1237,9 @@ def register_write_tools():
             <parameters>
             - folder_name: Name of the new folder
             - parent: Parent folder path (default: root "/")
+            - defer_restart: SSH only. Skip the xochitl restart so a batch of
+              writes can refresh once via remarkable_refresh() instead of once
+              per write. Sets "refresh_pending": true. Ignored in cloud mode.
             </parameters>
             <examples>
             - remarkable_mkdir("Projects")
@@ -1222,8 +1288,8 @@ def register_write_tools():
                     }
                     _write_metadata(ssh_client, doc_uuid, metadata)
 
-                    # Restart xochitl
-                    _restart_xochitl(ssh_client)
+                    # Restart xochitl (unless deferred for a batch)
+                    restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
 
                     # Clear cache
                     ssh_client._documents = []
@@ -1235,8 +1301,9 @@ def register_write_tools():
                             "folder_name": folder_name,
                             "uuid": doc_uuid,
                             "parent": parent,
+                            "refresh_pending": not restarted,
                         },
-                        "Folder created. Use remarkable_browse() to verify.",
+                        _write_result_message(restarted, "Folder created."),
                     )
 
                 except Exception as e:
@@ -1252,6 +1319,7 @@ def register_write_tools():
         async def remarkable_move(
             document: str,
             dest_folder: str,
+            defer_restart: bool = False,
         ) -> str:
             """
             <usecase>Move a document or folder to a different location.</usecase>
@@ -1265,6 +1333,9 @@ def register_write_tools():
             <parameters>
             - document: Name or path of the document/folder to move
             - dest_folder: Destination folder path (use "/" for root)
+            - defer_restart: SSH only. Skip the xochitl restart so a batch of
+              writes can refresh once via remarkable_refresh() instead of once
+              per write. Sets "refresh_pending": true. Ignored in cloud mode.
             </parameters>
             <examples>
             - remarkable_move("Meeting Notes", "/Archive")
@@ -1342,8 +1413,8 @@ def register_write_tools():
                     metadata["metadatamodified"] = True
                     _write_metadata(ssh_client, target.ID, metadata)
 
-                    # Restart xochitl
-                    _restart_xochitl(ssh_client)
+                    # Restart xochitl (unless deferred for a batch)
+                    restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
 
                     # Clear cache
                     ssh_client._documents = []
@@ -1355,8 +1426,9 @@ def register_write_tools():
                             "name": target.VissibleName,
                             "from": old_path,
                             "to": dest_folder,
+                            "refresh_pending": not restarted,
                         },
-                        "Document moved. Use remarkable_browse() to verify.",
+                        _write_result_message(restarted, "Document moved."),
                     )
 
                 except Exception as e:
@@ -1372,6 +1444,7 @@ def register_write_tools():
         async def remarkable_rename(
             document: str,
             new_name: str,
+            defer_restart: bool = False,
         ) -> str:
             """
             <usecase>Rename a document or folder on the reMarkable tablet.</usecase>
@@ -1385,6 +1458,9 @@ def register_write_tools():
             <parameters>
             - document: Current name or path of the document/folder
             - new_name: New display name
+            - defer_restart: SSH only. Skip the xochitl restart so a batch of
+              writes can refresh once via remarkable_refresh() instead of once
+              per write. Sets "refresh_pending": true. Ignored in cloud mode.
             </parameters>
             <examples>
             - remarkable_rename("Untitled", "Meeting Notes 2024-01-15")
@@ -1430,8 +1506,8 @@ def register_write_tools():
                     metadata["metadatamodified"] = True
                     _write_metadata(ssh_client, target.ID, metadata)
 
-                    # Restart xochitl
-                    _restart_xochitl(ssh_client)
+                    # Restart xochitl (unless deferred for a batch)
+                    restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
 
                     # Clear cache
                     ssh_client._documents = []
@@ -1442,8 +1518,9 @@ def register_write_tools():
                             "renamed": True,
                             "old_name": old_name,
                             "new_name": new_name,
+                            "refresh_pending": not restarted,
                         },
-                        "Document renamed. Use remarkable_browse() to verify.",
+                        _write_result_message(restarted, "Document renamed."),
                     )
 
                 except Exception as e:
@@ -1456,7 +1533,11 @@ def register_write_tools():
             return await asyncio.to_thread(_impl)
 
         @mcp.tool(annotations=DELETE_ANNOTATIONS)
-        async def remarkable_delete(document: str, ctx: Optional[Context] = None) -> str:
+        async def remarkable_delete(
+            document: str,
+            defer_restart: bool = False,
+            ctx: Optional[Context] = None,
+        ) -> str:
             """
             <usecase>Delete a document or folder on the reMarkable tablet.</usecase>
             <instructions>
@@ -1474,6 +1555,9 @@ def register_write_tools():
             </instructions>
             <parameters>
             - document: Name or path of the document/folder to delete
+            - defer_restart: SSH only. Skip the xochitl restart so a batch of
+              deletes can refresh once via remarkable_refresh() instead of once
+              per delete. Sets "refresh_pending": true. Ignored in cloud mode.
             </parameters>
             <examples>
             - remarkable_delete("Old Notes")
@@ -1522,8 +1606,8 @@ def register_write_tools():
                     metadata["metadatamodified"] = True
                     _write_metadata(ssh_client, target.ID, metadata)
 
-                    # Restart xochitl
-                    _restart_xochitl(ssh_client)
+                    # Restart xochitl (unless deferred for a batch)
+                    restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
 
                     # Clear cache
                     ssh_client._documents = []
@@ -1535,8 +1619,13 @@ def register_write_tools():
                             "name": target.VissibleName,
                             "path": doc_path,
                             "type": "folder" if target.is_folder else "document",
+                            "refresh_pending": not restarted,
                         },
-                        "Document deleted. It will no longer appear on the tablet.",
+                        _write_result_message(
+                            restarted,
+                            "Document deleted.",
+                            "It will no longer appear on the tablet.",
+                        ),
                     )
 
                 except Exception as e:
@@ -1547,3 +1636,57 @@ def register_write_tools():
                     )
 
             return await asyncio.to_thread(_impl)
+
+    async def remarkable_refresh() -> str:
+        """
+        <usecase>Restart xochitl once to apply writes made with
+        defer_restart=True (or with REMARKABLE_DEFER_RESTART set).</usecase>
+        <instructions>
+        SSH only. Each write normally restarts xochitl so the change becomes
+        visible, but every restart forces a full document-store rescan that
+        briefly destabilises the SSH link. For a batch of writes, pass
+        defer_restart=True to each one and then call this tool ONCE at the end:
+        it pays the restart cost a single time instead of once per write,
+        eliminating the per-write race and the redundant rescans.
+
+        Calling it when nothing is pending is harmless — it just restarts the UI.
+        Requires write mode (the default; disabled with --read-only).
+        </instructions>
+        <parameters>(none)</parameters>
+        <examples>
+        - remarkable_upload("/tmp/a.pdf", defer_restart=True)
+          remarkable_upload("/tmp/b.pdf", defer_restart=True)
+          remarkable_refresh()
+        </examples>
+        """
+
+        def _impl() -> str:
+            error = _require_write_transport()
+            if error:
+                return error
+
+            try:
+                ssh_client = _get_ssh_client()
+                _restart_xochitl(ssh_client)
+                # Drop any cache populated while restarts were deferred so the
+                # next read reflects the just-applied changes.
+                ssh_client._documents = []
+                ssh_client._documents_by_id = {}
+                return make_response(
+                    {"refreshed": True, "transport": "ssh"},
+                    "xochitl restarted; any deferred changes are now visible. "
+                    "Use remarkable_browse() to verify.",
+                )
+            except Exception as e:
+                return make_error(
+                    error_type="refresh_failed",
+                    message=f"Failed to refresh tablet UI: {e}",
+                    suggestion="Check SSH connection and try again.",
+                )
+
+        return await asyncio.to_thread(_impl)
+
+    # Refreshing is meaningful only for the SSH transport's xochitl restart;
+    # cloud/USB clients have no equivalent, so the tool is hidden there.
+    if _is_ssh_mode():
+        mcp.tool(annotations=WRITE_ANNOTATIONS)(remarkable_refresh)

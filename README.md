@@ -243,7 +243,7 @@ Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remark
 | `remarkable_status` | Check connection status and the per-transport capability matrix |
 | `remarkable_image` | Get PNG/SVG images of pages (supports OCR via sampling) |
 
-These six tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`, and `remarkable_author` for native ink/notebooks) are enabled by default — pass `--read-only` to disable them — see [Write Tools](#write-tools-cloud-ssh--usb-web). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
+These six tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`, `remarkable_refresh`, and `remarkable_author` for native ink/notebooks) are enabled by default — pass `--read-only` to disable them — see [Write Tools](#write-tools-cloud-ssh--usb-web). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
 
 📖 **[Full Tools Documentation](docs/tools.md)**
 
@@ -478,11 +478,12 @@ Or set the environment variable:
 
 | Tool | Description |
 |------|-------------|
-| `remarkable_upload(file_path, parent_folder, document_name)` | Upload a PDF or EPUB file (all modes; USB web ignores folder/name and uploads to root) |
-| `remarkable_mkdir(folder_name, parent)` | Create a new folder (cloud and SSH) |
-| `remarkable_move(document, dest_folder)` | Move a document or folder (cloud and SSH) |
-| `remarkable_rename(document, new_name)` | Rename a document or folder (cloud and SSH) |
-| `remarkable_delete(document)` | Delete a document or folder — destructive (cloud and SSH) |
+| `remarkable_upload(file_path, parent_folder, document_name, defer_restart)` | Upload a PDF or EPUB file (all modes; USB web ignores folder/name and uploads to root) |
+| `remarkable_mkdir(folder_name, parent, defer_restart)` | Create a new folder (cloud and SSH) |
+| `remarkable_move(document, dest_folder, defer_restart)` | Move a document or folder (cloud and SSH) |
+| `remarkable_rename(document, new_name, defer_restart)` | Rename a document or folder (cloud and SSH) |
+| `remarkable_delete(document, defer_restart)` | Delete a document or folder — destructive (cloud and SSH) |
+| `remarkable_refresh()` | Restart `xochitl` once to apply writes made with `defer_restart=True` — **SSH only** |
 | `remarkable_author(method, ...)` | Author native ink and notebooks — `draw` (append strokes), `add_page` (append a blank notebook page), `create_document` (new notebook) — **SSH only** |
 
 ### Safety
@@ -490,7 +491,7 @@ Or set the environment variable:
 - **Upload registers in all modes** — cloud, SSH, and USB web.
 - **mkdir, move, rename, delete register in cloud and SSH modes only** — they are not exposed on USB web (the tablet's USB web firmware has no folder/move/rename/delete endpoints), keeping the tool list scoped to what the active transport actually supports.
 - **Delete prompts for confirmation when possible** — if the client supports MCP elicitation, `remarkable_delete` asks the user to confirm before deleting. If the client can't show a prompt, the delete is **refused** (not performed) unless `REMARKABLE_SKIP_CONFIRM=1` is set — so write-on-by-default can't silently delete from clients that lack elicitation. In cloud mode delete moves the item to the trash (recoverable from your device); set `REMARKABLE_SKIP_CONFIRM=1` to allow deletes without a prompt in automated setups. All write tools carry `ToolAnnotations(readOnlyHint=False)` (and `destructiveHint=True` for delete) so an agent harness can gate writes at the MCP layer.
-- After each write operation in SSH mode, the tablet UI restarts automatically to reflect changes.
+- After each write operation in SSH mode, the tablet UI (`xochitl`) restarts automatically to reflect changes; the call waits for it to come back before returning so the next write doesn't race a restarting daemon. For bulk operations, pass `defer_restart=True` to each write — or set `REMARKABLE_DEFER_RESTART=1` — and call `remarkable_refresh()` once at the end, so the batch triggers a single restart instead of one per write (each restart forces a full document-store rescan).
 
 ### Examples
 
@@ -509,6 +510,12 @@ remarkable_rename("Untitled", "Q4 Planning Notes")
 
 # Delete (destructive — confirms via elicitation when supported)
 remarkable_delete("Old Draft")
+
+# Bulk import (SSH): defer the restart on each write, then refresh once.
+# One xochitl restart for the whole batch instead of one per upload.
+remarkable_upload("a.pdf", parent_folder="/Research", defer_restart=True)
+remarkable_upload("b.pdf", parent_folder="/Research", defer_restart=True)
+remarkable_refresh()
 
 # Author native ink and notebooks (SSH only)
 # Append pen/highlighter strokes to a page (coordinates normalized [0,1] from

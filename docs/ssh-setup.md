@@ -190,6 +190,7 @@ Note: WiFi is slower than USB but works from anywhere on your network.
 | `REMARKABLE_RESTART_TIMEOUT` | `30` | Max seconds to wait for `xochitl` to report active again after a write restarts it |
 | `REMARKABLE_RESTART_POLL_INTERVAL` | `1` | Seconds between `systemctl is-active` polls while waiting for `xochitl` |
 | `REMARKABLE_RESTART_SETTLE` | `3` | Extra settle delay (seconds) after `xochitl` is active, before the next operation runs |
+| `REMARKABLE_DEFER_RESTART` | *(unset)* | When set (`1`/`true`/`yes`), write tools skip their per-write `xochitl` restart; call `remarkable_refresh` once to apply a whole batch with a single restart |
 
 ## Troubleshooting
 

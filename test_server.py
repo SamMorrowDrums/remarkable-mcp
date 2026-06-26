@@ -4875,3 +4875,174 @@ class TestRestartXochitl:
         assert client.calls == ["systemctl restart xochitl"]
         assert not any("is-active" in c for c in client.calls)
         mock_sleep.assert_not_called()
+
+
+class TestDeferRestart:
+    """Writes can defer the xochitl restart so a batch refreshes once.
+
+    Each write normally restarts xochitl; deferral lets N writes skip their
+    restarts and apply them all with a single remarkable_refresh, turning N
+    rescans (and N races) into one.
+    """
+
+    # Tool names registered by register_write_tools(); popped between tests so
+    # repeated registration across the suite stays hermetic.
+    _REGISTERED = [
+        "remarkable_upload",
+        "remarkable_mkdir",
+        "remarkable_move",
+        "remarkable_rename",
+        "remarkable_delete",
+        "remarkable_refresh",
+        "remarkable_author",
+    ]
+
+    @classmethod
+    def _cleanup_tools(cls):
+        for name in cls._REGISTERED:
+            mcp._tool_manager._tools.pop(name, None)
+
+    @staticmethod
+    def _make_ssh_client():
+        client = Mock(
+            spec=[
+                "get_meta_items",
+                "_ssh_command",
+                "_scp_download",
+                "_documents",
+                "_documents_by_id",
+            ]
+        )
+        client.get_meta_items.return_value = []
+        return client
+
+    def test_defer_restart_enabled_reads_env(self, monkeypatch):
+        from remarkable_mcp import write_tools
+
+        monkeypatch.delenv("REMARKABLE_DEFER_RESTART", raising=False)
+        assert write_tools._defer_restart_enabled() is False
+        monkeypatch.setenv("REMARKABLE_DEFER_RESTART", "1")
+        assert write_tools._defer_restart_enabled() is True
+
+    def test_maybe_restart_honors_per_call_defer(self):
+        from remarkable_mcp import write_tools
+
+        client = self._make_ssh_client()
+        with (
+            patch("remarkable_mcp.write_tools._restart_xochitl") as mock_restart,
+            patch("remarkable_mcp.write_tools._defer_restart_enabled", return_value=False),
+        ):
+            assert write_tools._maybe_restart_xochitl(client, defer_restart=True) is False
+            mock_restart.assert_not_called()
+            assert write_tools._maybe_restart_xochitl(client, defer_restart=False) is True
+            mock_restart.assert_called_once_with(client)
+
+    def test_maybe_restart_honors_env_defer(self):
+        from remarkable_mcp import write_tools
+
+        client = self._make_ssh_client()
+        with (
+            patch("remarkable_mcp.write_tools._restart_xochitl") as mock_restart,
+            patch("remarkable_mcp.write_tools._defer_restart_enabled", return_value=True),
+        ):
+            # env defers even though the per-call argument is False
+            assert write_tools._maybe_restart_xochitl(client, defer_restart=False) is False
+            mock_restart.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_defer_skips_restart_and_flags_pending(self, tmp_path):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        pdf = tmp_path / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4 test")
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+        try:
+            client = self._make_ssh_client()
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+                patch("remarkable_mcp.write_tools._upload_file_bytes"),
+                patch("remarkable_mcp.write_tools._write_metadata"),
+                patch("remarkable_mcp.write_tools._write_content_file"),
+                patch("remarkable_mcp.write_tools._restart_xochitl") as mock_restart,
+                patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            ):
+                result = await mcp.call_tool(
+                    "remarkable_upload",
+                    {"file_path": str(pdf), "defer_restart": True},
+                )
+                data = json.loads(result[0][0].text)
+                assert data["uploaded"] is True
+                assert data["refresh_pending"] is True
+                mock_restart.assert_not_called()
+        finally:
+            self._cleanup_tools()
+
+    @pytest.mark.asyncio
+    async def test_upload_without_defer_restarts_and_clears_flag(self, tmp_path):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        pdf = tmp_path / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4 test")
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+        try:
+            client = self._make_ssh_client()
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+                patch("remarkable_mcp.write_tools._upload_file_bytes"),
+                patch("remarkable_mcp.write_tools._write_metadata"),
+                patch("remarkable_mcp.write_tools._write_content_file"),
+                patch("remarkable_mcp.write_tools._restart_xochitl") as mock_restart,
+                patch("remarkable_mcp.write_tools._defer_restart_enabled", return_value=False),
+                patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            ):
+                result = await mcp.call_tool(
+                    "remarkable_upload",
+                    {"file_path": str(pdf)},
+                )
+                data = json.loads(result[0][0].text)
+                assert data["uploaded"] is True
+                assert data["refresh_pending"] is False
+                mock_restart.assert_called_once_with(client)
+        finally:
+            self._cleanup_tools()
+
+    @pytest.mark.asyncio
+    async def test_refresh_tool_registered_in_ssh_and_restarts_once(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+        try:
+            tools = await mcp.list_tools()
+            assert "remarkable_refresh" in [t.name for t in tools]
+
+            client = self._make_ssh_client()
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+                patch("remarkable_mcp.write_tools._restart_xochitl") as mock_restart,
+                patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            ):
+                result = await mcp.call_tool("remarkable_refresh", {})
+                data = json.loads(result[0][0].text)
+                assert data["refreshed"] is True
+                mock_restart.assert_called_once_with(client)
+        finally:
+            self._cleanup_tools()
+
+    @pytest.mark.asyncio
+    async def test_refresh_tool_hidden_in_cloud_mode(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env.pop("REMARKABLE_USE_USB_WEB", None)
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            try:
+                tools = await mcp.list_tools()
+                assert "remarkable_refresh" not in [t.name for t in tools]
+            finally:
+                self._cleanup_tools()
