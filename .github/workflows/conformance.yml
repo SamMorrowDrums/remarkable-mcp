@@ -27,7 +27,7 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - uses: SamMorrowDrums/mcp-conformance-action@v2
+      - uses: SamMorrowDrums/mcp-conformance-action@v3
         with:
           install_command: uv sync
           start_command: uv run python server.py
