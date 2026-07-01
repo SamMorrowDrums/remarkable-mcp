@@ -10,7 +10,11 @@ import json
 import tempfile
 from pathlib import Path
 
-from remarkable_mcp.extract import _resolve_pdf_page_index
+from remarkable_mcp.extract import (
+    _get_ordered_rm_files,
+    _resolve_pdf_page_index,
+    _select_rm_file_for_page,
+)
 
 
 def _write_content(tmp: Path, content: dict) -> None:
@@ -59,3 +63,37 @@ def test_no_mapping_returns_none():
         tmp = Path(td)
         _write_content(tmp, {"formatVersion": 1, "pages": ["a", "b"]})
         assert _resolve_pdf_page_index(tmp, 1) is None
+
+
+def test_select_rm_file_by_page_id_on_sparse_document():
+    """The .rm is chosen by page id, not positional index in the compacted list.
+
+    An 8-page doc annotated on pages 2,3,4,6,7,8 must render page 4's own strokes
+    (p4.rm), not the 4th entry of the compacted rm list (p6.rm).
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        ids = [f"p{i}" for i in range(1, 9)]
+        _write_content(tmp, {"cPages": {"pages": [{"id": i} for i in ids]}})
+        for pid in ("p2", "p3", "p4", "p6", "p7", "p8"):
+            (tmp / f"{pid}.rm").write_bytes(b"")
+        rm_files = _get_ordered_rm_files(tmp)
+
+        assert _select_rm_file_for_page(tmp, rm_files, 4).stem == "p4"
+        assert _select_rm_file_for_page(tmp, rm_files, 8).stem == "p8"
+        # Un-annotated pages have no stroke layer.
+        assert _select_rm_file_for_page(tmp, rm_files, 1) is None
+        assert _select_rm_file_for_page(tmp, rm_files, 5) is None
+        # Out of range.
+        assert _select_rm_file_for_page(tmp, rm_files, 9) is None
+
+
+def test_select_rm_file_positional_without_page_order():
+    """With no .content page order, fall back to positional selection."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        (tmp / "a.rm").write_bytes(b"")
+        (tmp / "b.rm").write_bytes(b"")
+        rm_files = _get_ordered_rm_files(tmp)
+        assert _select_rm_file_for_page(tmp, rm_files, 1) is not None
+        assert _select_rm_file_for_page(tmp, rm_files, 5) is None
