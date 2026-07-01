@@ -1085,6 +1085,27 @@ def _get_ordered_rm_files(tmpdir_path: Path) -> List[Path]:
     return rm_files
 
 
+def _get_page_order(tmpdir_path: Path) -> List[str]:
+    """Return the ordered list of page ids from the .content file.
+
+    formatVersion 2 stores them under ``cPages.pages[].id``; formatVersion 1 as
+    a flat ``pages`` list of ids. Returns an empty list if unavailable. This is
+    the full page order (including pages that have no strokes), unlike
+    ``_get_ordered_rm_files`` which is compacted to pages that do.
+    """
+    for content_file in tmpdir_path.glob("*.content"):
+        try:
+            data = json.loads(content_file.read_text())
+            if "cPages" in data and "pages" in data["cPages"]:
+                return [p.get("id") for p in data["cPages"]["pages"] if p.get("id")]
+            if isinstance(data.get("pages"), list):
+                return [p for p in data["pages"] if isinstance(p, str)]
+        except Exception:
+            pass
+        break
+    return []
+
+
 def render_page_from_document_zip_svg(
     zip_path: Path, page: int = 1, background_color: Optional[str] = None
 ) -> Optional[str]:
@@ -1476,11 +1497,24 @@ def render_merged_page_from_document_zip(
         pdf_bytes = pdf_path.read_bytes()
 
         rm_files = _get_ordered_rm_files(tmpdir_path)
+        page_order = _get_page_order(tmpdir_path)
+        total_pages = len(page_order) or len(rm_files)
 
-        if page < 1 or page > len(rm_files):
-            return None, f"Page {page} out of range (document has {len(rm_files)} pages)."
+        if page < 1 or page > total_pages:
+            return None, f"Page {page} out of range (document has {total_pages} pages)."
 
-        target_rm_file = rm_files[page - 1]
+        # Select the .rm for this page BY PAGE ID. _get_ordered_rm_files returns
+        # only pages that actually have strokes (compacted), so indexing it by
+        # page number pairs the wrong strokes with the page whenever an earlier
+        # page is un-annotated (e.g. page 4 would get page 6's ink). Map through
+        # the full .content page order instead. A page with no strokes yields
+        # target_rm_file=None and composites to the bare PDF page.
+        target_rm_file: Optional[Path] = None
+        if page_order and page <= len(page_order):
+            page_id = page_order[page - 1]
+            target_rm_file = next((p for p in rm_files if p.stem == page_id), None)
+        elif page <= len(rm_files):
+            target_rm_file = rm_files[page - 1]
 
         # Determine which PDF page this reMarkable page maps to. Handles both the
         # formatVersion 2 (cPages.redir) and formatVersion 1 (redirectionPageMap)
@@ -1490,6 +1524,8 @@ def render_merged_page_from_document_zip(
 
         if pdf_page_index is None:
             # No redirect — this page may be a user-added blank page
+            if target_rm_file is None:
+                return None, "Page has no PDF underlay and no annotations."
             png = render_rm_file_to_png(target_rm_file, background_color=background_color)
             return png, "Page has no PDF underlay (user-added page); annotation-only render."
 
@@ -1528,7 +1564,7 @@ def render_merged_page_from_document_zip(
             with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
                 ann_svg_path = Path(tmp_svg.name)
 
-            if _rm_to_svg(target_rm_file, ann_svg_path):
+            if target_rm_file is not None and _rm_to_svg(target_rm_file, ann_svg_path):
                 # Read the SVG and adjust viewBox to match PDF page bounds.
                 #
                 # rmscene emits stroke coordinates in the reMarkable device
