@@ -1149,6 +1149,30 @@ def _get_page_order(tmpdir_path: Path) -> List[str]:
     return []
 
 
+def _select_rm_file_for_page(
+    tmpdir_path: Path, rm_files: List[Path], page: int
+) -> Optional[Path]:
+    """Return the .rm stroke file for a 1-based page, matched by page id.
+
+    ``_get_ordered_rm_files`` is compacted (only pages that actually have
+    strokes), so indexing it by page number pairs the wrong ink with a page
+    whenever an earlier page is un-annotated. Map through the full ``.content``
+    page order and match by id instead. Returns None when the page has no
+    strokes (a page with a PDF underlay but no annotation), or when the page is
+    out of range; callers should treat None as "no annotation layer".
+    """
+    page_order = _get_page_order(tmpdir_path)
+    if page_order:
+        if 1 <= page <= len(page_order):
+            page_id = page_order[page - 1]
+            return next((p for p in rm_files if p.stem == page_id), None)
+        return None
+    # No page order available (unusual): fall back to positional selection.
+    if 1 <= page <= len(rm_files):
+        return rm_files[page - 1]
+    return None
+
+
 def render_page_from_document_zip_svg(
     zip_path: Path, page: int = 1, background_color: Optional[str] = None
 ) -> Optional[str]:
@@ -1172,12 +1196,12 @@ def render_page_from_document_zip_svg(
 
         rm_files = _get_ordered_rm_files(tmpdir_path)
 
-        # Validate page number
-        if page < 1 or page > len(rm_files):
+        # Select the page's .rm by id (see _select_rm_file_for_page); None means
+        # the page has no annotation layer.
+        target_rm_file = _select_rm_file_for_page(tmpdir_path, rm_files, page)
+        if target_rm_file is None:
             return None
 
-        # Render the requested page
-        target_rm_file = rm_files[page - 1]
         return render_rm_file_to_svg(target_rm_file, background_color=background_color)
 
 
@@ -1204,12 +1228,12 @@ def render_page_from_document_zip(
 
         rm_files = _get_ordered_rm_files(tmpdir_path)
 
-        # Validate page number
-        if page < 1 or page > len(rm_files):
+        # Select the page's .rm by id (see _select_rm_file_for_page); None means
+        # the page has no annotation layer.
+        target_rm_file = _select_rm_file_for_page(tmpdir_path, rm_files, page)
+        if target_rm_file is None:
             return None
 
-        # Render the requested page
-        target_rm_file = rm_files[page - 1]
         return render_rm_file_to_png(target_rm_file, background_color=background_color)
 
 
@@ -1540,24 +1564,16 @@ def render_merged_page_from_document_zip(
         pdf_bytes = pdf_path.read_bytes()
 
         rm_files = _get_ordered_rm_files(tmpdir_path)
-        page_order = _get_page_order(tmpdir_path)
-        total_pages = len(page_order) or len(rm_files)
+        total_pages = len(_get_page_order(tmpdir_path)) or len(rm_files)
 
         if page < 1 or page > total_pages:
             return None, f"Page {page} out of range (document has {total_pages} pages)."
 
-        # Select the .rm for this page BY PAGE ID. _get_ordered_rm_files returns
-        # only pages that actually have strokes (compacted), so indexing it by
-        # page number pairs the wrong strokes with the page whenever an earlier
-        # page is un-annotated (e.g. page 4 would get page 6's ink). Map through
-        # the full .content page order instead. A page with no strokes yields
-        # target_rm_file=None and composites to the bare PDF page.
-        target_rm_file: Optional[Path] = None
-        if page_order and page <= len(page_order):
-            page_id = page_order[page - 1]
-            target_rm_file = next((p for p in rm_files if p.stem == page_id), None)
-        elif page <= len(rm_files):
-            target_rm_file = rm_files[page - 1]
+        # Select the .rm for this page by id (see _select_rm_file_for_page). A
+        # page with no strokes yields None and composites to the bare PDF page.
+        target_rm_file: Optional[Path] = _select_rm_file_for_page(
+            tmpdir_path, rm_files, page
+        )
 
         # Determine which PDF page this reMarkable page maps to. Handles both the
         # formatVersion 2 (cPages.redir) and formatVersion 1 (redirectionPageMap)
