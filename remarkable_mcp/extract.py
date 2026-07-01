@@ -1531,23 +1531,40 @@ def render_merged_page_from_document_zip(
             if _rm_to_svg(target_rm_file, ann_svg_path):
                 # Read the SVG and adjust viewBox to match PDF page bounds.
                 #
-                # rmscene's v6 renderer emits stroke coordinates with the
-                # origin at the top of the page and x=0 in the horizontal
-                # center (so x ranges roughly from -W/2 to +W/2). Setting the
-                # viewBox to (-W_pt/2, 0, W_pt, H_pt) maps that coordinate
-                # system to the PDF page bounds so annotations align. If the
-                # upstream coordinate convention changes, this alignment will
-                # need to be revisited.
+                # rmscene emits stroke coordinates in the reMarkable device
+                # coordinate system (~226 dpi), NOT in PDF points: x=0 is the
+                # horizontal centre of the page and y=0 the top, and one unit is
+                # 72/226 pt. So a point on the page at (px, py) pt corresponds to
+                # rmscene ((px - W/2)/S, py/S) with S = 72/226. To map the whole
+                # page [0,W]x[0,H] pt into the output canvas we set the SVG
+                # viewBox to the rmscene rectangle that covers it:
+                #   (-W/(2S), 0, W/S, H/S).
+                # (The previous code assumed S=1, i.e. rmscene units == points,
+                # which placed strokes far outside the page and filled it black.)
+                # Validated against A4 imports on a reMarkable Paper Pro; the
+                # 226-dpi constant is the reMarkable display resolution.
                 svg_content = ann_svg_path.read_text()
 
+                rm_units_per_point = 226.0 / 72.0
+                vb_w = pdf_w_pt * rm_units_per_point
+                vb_h = pdf_h_pt * rm_units_per_point
                 svg_content = re.sub(
                     r'viewBox="[^"]*"',
-                    f'viewBox="{-pdf_w_pt / 2:.1f} 0 {pdf_w_pt:.1f} {pdf_h_pt:.1f}"',
+                    f'viewBox="{-vb_w / 2:.2f} 0 {vb_w:.2f} {vb_h:.2f}"',
                     svg_content,
                 )
-                # Also set explicit width/height to match output canvas
-                svg_content = re.sub(r'width="[^"]*"', f'width="{out_w}"', svg_content)
-                svg_content = re.sub(r'height="[^"]*"', f'height="{out_h}"', svg_content)
+                # Also set explicit width/height to match output canvas. Only
+                # the root <svg> element's attributes (the first occurrence), and
+                # a negative lookbehind so we never rewrite `stroke-width="..."`
+                # (a plain `width="[^"]*"` also matches inside `stroke-width`,
+                # which blows every stroke up to `out_w` units wide and fills the
+                # page solid black).
+                svg_content = re.sub(
+                    r'(?<![-\w])width="[^"]*"', f'width="{out_w}"', svg_content, count=1
+                )
+                svg_content = re.sub(
+                    r'(?<![-\w])height="[^"]*"', f'height="{out_h}"', svg_content, count=1
+                )
 
                 # Render SVG to PNG with transparent background
                 import cairosvg
