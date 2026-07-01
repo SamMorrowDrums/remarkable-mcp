@@ -1278,6 +1278,58 @@ def _pdf_page_index_for_cpages_entry(entry: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def _read_redirection_page_map(tmpdir_path: Path) -> List[Any]:
+    """Read the legacy (formatVersion 1) redirectionPageMap from .content.
+
+    formatVersion 1 documents have no cPages structure; instead the reMarkable
+    page -> original PDF page mapping is a flat list where the index is the
+    0-based reMarkable page and the value is the 0-based PDF page index (-1 for
+    user-added pages). Many cloud-imported PDFs use this layout.
+
+    Returns the list, or an empty list if not found.
+    """
+    content_file = next(tmpdir_path.glob("*.content"), None)
+    if content_file is None:
+        return []
+    try:
+        data = json.loads(content_file.read_text())
+        rpm = data.get("redirectionPageMap")
+        if isinstance(rpm, list):
+            return rpm
+    except Exception:
+        pass
+    return []
+
+
+def _resolve_pdf_page_index(tmpdir_path: Path, page: int) -> Optional[int]:
+    """Resolve the 0-based PDF page index for a 1-based reMarkable page.
+
+    Handles both document layouts:
+    - formatVersion 2: ``cPages.pages[i].redir.value``
+    - formatVersion 1: ``redirectionPageMap[i]`` (legacy; used by many
+      cloud-imported PDFs)
+
+    Returns None only when the page genuinely has no PDF underlay (a user-added
+    page). This lets render_merged composite annotations onto imported PDFs that
+    use either layout, instead of falling back to an annotation-only render.
+    """
+    # formatVersion 2 (cPages)
+    entries = _read_cpages_entries(tmpdir_path)
+    if entries and page <= len(entries):
+        idx = _pdf_page_index_for_cpages_entry(entries[page - 1])
+        if idx is not None:
+            return idx
+
+    # formatVersion 1 (redirectionPageMap)
+    rpm = _read_redirection_page_map(tmpdir_path)
+    if rpm and page <= len(rpm):
+        val = rpm[page - 1]
+        if isinstance(val, int) and val >= 0:
+            return val
+
+    return None
+
+
 def _render_pdf_page_to_png(
     pdf_bytes: bytes, page_index: int, width: int, height: int
 ) -> Optional[bytes]:
@@ -1423,8 +1475,6 @@ def render_merged_page_from_document_zip(
         pdf_path = matching[0] if matching else sorted(pdf_files)[0]
         pdf_bytes = pdf_path.read_bytes()
 
-        # Read cPages to find PDF page mapping
-        cpages = _read_cpages_entries(tmpdir_path)
         rm_files = _get_ordered_rm_files(tmpdir_path)
 
         if page < 1 or page > len(rm_files):
@@ -1432,10 +1482,11 @@ def render_merged_page_from_document_zip(
 
         target_rm_file = rm_files[page - 1]
 
-        # Determine which PDF page this reMarkable page maps to
-        pdf_page_index: Optional[int] = None
-        if cpages and page <= len(cpages):
-            pdf_page_index = _pdf_page_index_for_cpages_entry(cpages[page - 1])
+        # Determine which PDF page this reMarkable page maps to. Handles both the
+        # formatVersion 2 (cPages.redir) and formatVersion 1 (redirectionPageMap)
+        # layouts; the latter is used by many cloud-imported PDFs, which would
+        # otherwise be misread as user-added pages and rendered annotation-only.
+        pdf_page_index: Optional[int] = _resolve_pdf_page_index(tmpdir_path, page)
 
         if pdf_page_index is None:
             # No redirect — this page may be a user-added blank page
