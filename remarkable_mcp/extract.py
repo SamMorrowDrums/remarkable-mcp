@@ -1552,10 +1552,14 @@ def render_merged_page_from_document_zip(
         # selection is deterministic.
         pdf_files = list(tmpdir_path.glob("**/*.pdf"))
         if not pdf_files:
+            # Notebook (no PDF underlay): render the page's own strokes,
+            # selected by id so multi-page notebooks with a blank page don't
+            # shift (see _select_rm_file_for_page).
             rm_files = _get_ordered_rm_files(tmpdir_path)
-            if page < 1 or page > len(rm_files):
-                return None, f"Page {page} out of range (document has {len(rm_files)} pages)."
-            png = render_rm_file_to_png(rm_files[page - 1], background_color=background_color)
+            target = _select_rm_file_for_page(tmpdir_path, rm_files, page)
+            if target is None:
+                return None, f"Page {page} has no annotation strokes."
+            png = render_rm_file_to_png(target, background_color=background_color)
             return png, "No PDF underlay found; returned annotation-only render."
 
         content_stems = {p.stem for p in tmpdir_path.glob("*.content")}
