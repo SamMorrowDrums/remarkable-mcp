@@ -42,6 +42,31 @@ def _rm_to_svg(rm_file_path: Path, output_svg_path: Path) -> bool:
 REMARKABLE_WIDTH = 1404
 REMARKABLE_HEIGHT = 1872
 
+# reMarkable stores stroke and highlight coordinates in a fixed internal grid
+# whose resolution is the original rM1/rM2 screen pitch, 226 dpi. Current devices
+# (including the Paper Pro) normalise onto this same grid regardless of their
+# physical screen, so SceneInfo.paper_size reports (1404, 1872) accordingly and
+# an imported PDF rendered at native size maps 1 point -> 226/72 units.
+REMARKABLE_COORD_DPI = 226.0
+
+
+def _rm_units_per_point(paper_size: Optional[tuple] = None) -> float:
+    """rmscene coordinate units per PDF point, for placing annotations on a page.
+
+    Returns a constant (``REMARKABLE_COORD_DPI / 72``) that holds for every device
+    normalising onto the standard 1404x1872 grid -- verified on a reMarkable Paper
+    Pro across A4, US-Letter and Springer page sizes.
+
+    ``paper_size`` (from rmscene ``SceneInfo``) is accepted but unused for now, on
+    purpose: this function is the single seam for making the scale device-derived.
+    A device reporting a non-standard ``paper_size`` (the smaller reMarkable Move
+    reportedly normalises differently) may use a different grid; when a sample
+    from such a device is available, derive the scale here from ``paper_size``
+    instead of assuming the constant. Callers must go through this function rather
+    than hard-coding the ratio.
+    """
+    return REMARKABLE_COORD_DPI / 72.0
+
 # Standard reMarkable background color (light cream/gray)
 # Can be overridden via REMARKABLE_BACKGROUND_COLOR environment variable
 _DEFAULT_BACKGROUND_COLOR = "#FBFBFB"
@@ -1585,21 +1610,19 @@ def render_merged_page_from_document_zip(
             if target_rm_file is not None and _rm_to_svg(target_rm_file, ann_svg_path):
                 # Read the SVG and adjust viewBox to match PDF page bounds.
                 #
-                # rmscene emits stroke coordinates in the reMarkable device
-                # coordinate system (~226 dpi), NOT in PDF points: x=0 is the
-                # horizontal centre of the page and y=0 the top, and one unit is
-                # 72/226 pt. So a point on the page at (px, py) pt corresponds to
-                # rmscene ((px - W/2)/S, py/S) with S = 72/226. To map the whole
-                # page [0,W]x[0,H] pt into the output canvas we set the SVG
-                # viewBox to the rmscene rectangle that covers it:
-                #   (-W/(2S), 0, W/S, H/S).
-                # (The previous code assumed S=1, i.e. rmscene units == points,
-                # which placed strokes far outside the page and filled it black.)
-                # Validated against A4 imports on a reMarkable Paper Pro; the
-                # 226-dpi constant is the reMarkable display resolution.
+                # rmscene emits stroke/highlight coordinates in the reMarkable
+                # device coordinate grid, NOT in PDF points: x=0 is the horizontal
+                # centre of the page and y=0 the top, and one PDF point is
+                # `_rm_units_per_point()` units (see that function for the scale
+                # and how to make it device-derived). To map the whole page
+                # [0,W]x[0,H] pt into the output canvas, set the SVG viewBox to the
+                # rmscene rectangle that covers it: (-W*k/2, 0, W*k, H*k) with
+                # k = units-per-point. (The previous code assumed k=1, i.e.
+                # rmscene units == points, which placed strokes far outside the
+                # page and filled it black.)
                 svg_content = ann_svg_path.read_text()
 
-                rm_units_per_point = 226.0 / 72.0
+                rm_units_per_point = _rm_units_per_point()
                 vb_w = pdf_w_pt * rm_units_per_point
                 vb_h = pdf_h_pt * rm_units_per_point
                 svg_content = re.sub(
