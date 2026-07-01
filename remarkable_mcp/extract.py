@@ -533,6 +533,24 @@ def _v6_paths_from_blocks(blocks: list) -> Tuple[list, list]:
         if not hasattr(block, "item") or not hasattr(block.item, "value"):
             continue
         line = block.item.value
+
+        # Text highlights are GlyphRange items: they carry `rectangles`
+        # (highlight boxes over selected text) rather than stroke `points`.
+        # Emit a translucent filled rect per rectangle in the highlight colour.
+        if getattr(line, "rectangles", None):
+            hl_color = getattr(line, "color", 9)
+            hl_color = hl_color.value if hasattr(hl_color, "value") else hl_color
+            hl_fill = COLOR_MAP.get(hl_color, "#FFD700")
+            for r in line.rectangles:
+                paths.append(
+                    f'<rect x="{r.x:.1f}" y="{r.y:.1f}" '
+                    f'width="{r.w:.1f}" height="{r.h:.1f}" '
+                    f'fill="{hl_fill}" opacity="0.35" stroke="none"/>'
+                )
+                all_coords.append((r.x, r.y))
+                all_coords.append((r.x + r.w, r.y + r.h))
+            continue
+
         if not hasattr(line, "points") or not line.points:
             continue
 
