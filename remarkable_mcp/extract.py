@@ -1578,9 +1578,16 @@ def render_merged_page_from_document_zip(
 
         # Select the .rm for this page by id (see _select_rm_file_for_page). A
         # page with no strokes yields None and composites to the bare PDF page.
-        target_rm_file: Optional[Path] = _select_rm_file_for_page(
-            tmpdir_path, rm_files, page
-        )
+        target_rm_file: Optional[Path] = _select_rm_file_for_page(tmpdir_path, rm_files, page)
+
+        def annotation_only(reason: str) -> Tuple[Optional[bytes], Optional[str]]:
+            """Fallback when the PDF side of the merge fails: render just the
+            page's own strokes — or nothing, for a strokeless page (every
+            fallback path must tolerate ``target_rm_file`` being None)."""
+            if target_rm_file is None:
+                return None, f"{reason}; page has no annotation strokes."
+            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
+            return png, f"{reason}; annotation-only render."
 
         # Determine which PDF page this reMarkable page maps to. Handles both the
         # formatVersion 2 (cPages.redir) and formatVersion 1 (redirectionPageMap)
@@ -1600,8 +1607,7 @@ def render_merged_page_from_document_zip(
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             try:
                 if pdf_page_index >= len(doc):
-                    png = render_rm_file_to_png(target_rm_file, background_color=background_color)
-                    return png, "PDF page index out of range; annotation-only render."
+                    return annotation_only("PDF page index out of range")
 
                 pdf_page = doc[pdf_page_index]
                 pdf_w_pt = pdf_page.rect.width  # PDF width in points
@@ -1609,8 +1615,7 @@ def render_merged_page_from_document_zip(
             finally:
                 doc.close()
         except Exception:
-            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
-            return png, "Could not read PDF dimensions; annotation-only render."
+            return annotation_only("Could not read PDF dimensions")
 
         # Determine output canvas size
         out_w = canvas_width or int(pdf_w_pt * 2)  # 2x for decent resolution
@@ -1619,8 +1624,7 @@ def render_merged_page_from_document_zip(
         # 1. Rasterize the PDF page
         pdf_png = _render_pdf_page_to_png(pdf_bytes, pdf_page_index, out_w, out_h)
         if pdf_png is None:
-            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
-            return png, "PDF rasterization failed; annotation-only render."
+            return annotation_only("PDF rasterization failed")
 
         # 2. Render annotation layer to SVG, then to PNG with transparent background
         ann_svg_path = None
@@ -1712,8 +1716,7 @@ def render_merged_page_from_document_zip(
             return buf.getvalue(), merged_note
         except Exception:
             # Last resort: return annotation-only from already-extracted .rm file
-            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
-            return png, "Compositing failed; annotation-only render."
+            return annotation_only("Compositing failed")
 
 
 def get_document_page_count(zip_path: Path) -> int:
