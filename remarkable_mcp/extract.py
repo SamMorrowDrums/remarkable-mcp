@@ -1770,6 +1770,50 @@ def get_document_file_type(zip_path: Path) -> str:
     return ""
 
 
+def _extract_page_annotations(rm_file: Path) -> Tuple[List[str], bool]:
+    """Extract a page's text highlights and whether it has pen strokes.
+
+    reMarkable text highlights are stored as ``GlyphRange`` scene items inside the
+    page's v6 ``.rm`` file (each carries the selected ``text`` and its bounding
+    ``rectangles``); freehand ink is stored as ``Line`` items. The legacy
+    ``.highlights`` JSON scanned elsewhere does not cover current firmware, so
+    read them here.
+
+    Returns ``(highlighted_texts_in_reading_order, has_pen_strokes)``. Returns
+    ``([], False)`` if the file cannot be parsed.
+    """
+    try:
+        import rmscene
+    except Exception:
+        return [], False
+    try:
+        with rm_file.open("rb") as fh:
+            tree = rmscene.read_tree(fh)
+    except Exception:
+        return [], False
+
+    highlights: list = []
+    has_strokes = False
+    try:
+        for item in tree.walk():
+            kind = type(item).__name__
+            if kind == "Line":
+                has_strokes = True
+            elif kind == "GlyphRange":
+                text = getattr(item, "text", None)
+                if not text:
+                    continue
+                rects = getattr(item, "rectangles", None) or []
+                y = rects[0].y if rects else 0.0
+                x = rects[0].x if rects else 0.0
+                highlights.append((y, x, text))
+    except Exception:
+        pass
+
+    highlights.sort(key=lambda t: (t[0], t[1]))  # top-to-bottom, left-to-right
+    return [t[2] for t in highlights], has_strokes
+
+
 def extract_text_from_document_zip(
     zip_path: Path, include_ocr: bool = False, doc_id: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -1784,10 +1828,16 @@ def extract_text_from_document_zip(
     Returns:
         {
             "typed_text": [...],      # From rmscene parsing (list of strings)
-            "highlights": [...],       # From PDF annotations
+            "highlights": [...],       # Highlighted text (GlyphRange + legacy JSON)
             "handwritten_text": [...], # From OCR (if enabled) - one per page, in order
             "pages": int,
             "page_ids": [...],         # Page UUIDs in order
+            "annotated_pages": [       # Only pages that carry annotations
+                {"page": int,          # 1-based page number
+                 "page_id": str,
+                 "has_handwriting": bool,   # page has pen strokes
+                 "highlights": [str]}, # highlighted text on the page
+            ],
             "ocr_backend": str,        # Which OCR backend was used (if any)
         }
     """
@@ -1805,6 +1855,7 @@ def extract_text_from_document_zip(
         "handwritten_text": None,
         "pages": 0,
         "page_ids": [],
+        "annotated_pages": [],
         "ocr_backend": None,
         "tags": [],
     }
@@ -1859,6 +1910,27 @@ def extract_text_from_document_zip(
         for rm_file in rm_files:
             text_lines = extract_text_from_rm_file(rm_file)
             result["typed_text"].extend(text_lines)
+
+        # Extract per-page text highlights (GlyphRange items) and note-presence
+        # from the .rm files, indexed by real page number. This powers "show only
+        # the annotated pages / the highlighted text" without paging through the
+        # whole document. (The legacy .highlights JSON scanned below only covers
+        # older firmware exports.)
+        page_pos = {pid: i for i, pid in enumerate(page_order)}
+        for order_pos, rm_file in enumerate(rm_files):
+            page_num = page_pos.get(rm_file.stem, order_pos) + 1
+            page_highlights, has_strokes = _extract_page_annotations(rm_file)
+            if page_highlights or has_strokes:
+                result["annotated_pages"].append(
+                    {
+                        "page": page_num,
+                        "page_id": rm_file.stem,
+                        "has_handwriting": has_strokes,
+                        "highlights": page_highlights,
+                    }
+                )
+                result["highlights"].extend(page_highlights)
+        result["annotated_pages"].sort(key=lambda a: a["page"])
 
         # Extract text from .txt and .md files
         for txt_file in tmpdir_path.glob("**/*.txt"):

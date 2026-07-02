@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 from remarkable_mcp.extract import (
+    _extract_page_annotations,
     _get_ordered_rm_files,
     _resolve_pdf_page_index,
     _select_rm_file_for_page,
@@ -97,3 +98,12 @@ def test_select_rm_file_positional_without_page_order():
         rm_files = _get_ordered_rm_files(tmp)
         assert _select_rm_file_for_page(tmp, rm_files, 1) is not None
         assert _select_rm_file_for_page(tmp, rm_files, 5) is None
+
+
+def test_extract_page_annotations_handles_unparseable_file():
+    """A missing or non-.rm file yields no highlights and no strokes, not an error."""
+    with tempfile.TemporaryDirectory() as td:
+        bad = Path(td) / "not_real.rm"
+        bad.write_bytes(b"this is not a valid rm file")
+        assert _extract_page_annotations(bad) == ([], False)
+        assert _extract_page_annotations(Path(td) / "missing.rm") == ([], False)
