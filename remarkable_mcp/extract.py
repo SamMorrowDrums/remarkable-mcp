@@ -1400,13 +1400,16 @@ def _resolve_pdf_page_index(tmpdir_path: Path, page: int) -> Optional[int]:
     Returns None only when the page genuinely has no PDF underlay (a user-added
     page). This lets render_merged composite annotations onto imported PDFs that
     use either layout, instead of falling back to an annotation-only render.
+
+    When cPages entries exist they are authoritative: an entry without ``redir``
+    is a user-added page, and we must NOT fall through to a redirectionPageMap a
+    v1->v2 migrated document may still carry — its stale, order-shifted indices
+    could composite the wrong PDF page under a user-added page.
     """
-    # formatVersion 2 (cPages)
+    # formatVersion 2 (cPages) — authoritative when present
     entries = _read_cpages_entries(tmpdir_path)
     if entries and page <= len(entries):
-        idx = _pdf_page_index_for_cpages_entry(entries[page - 1])
-        if idx is not None:
-            return idx
+        return _pdf_page_index_for_cpages_entry(entries[page - 1])
 
     # formatVersion 1 (redirectionPageMap)
     rpm = _read_redirection_page_map(tmpdir_path)
