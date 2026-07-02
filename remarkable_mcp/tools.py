@@ -539,7 +539,25 @@ async def remarkable_read(
                 annotation_parts = []
                 if content.get("typed_text"):
                     annotation_parts.extend(content["typed_text"])
-                if content.get("highlights"):
+                # Per-page index of highlights / handwritten notes: surfaces only
+                # the annotated pages (and their highlighted text) so the reader
+                # need not page through the whole document to find them.
+                annotated_pages = content.get("annotated_pages") or []
+                if annotated_pages:
+                    annotation_parts.append("\n--- Annotated pages ---")
+                    for ap in annotated_pages:
+                        marks = []
+                        if ap.get("has_handwriting"):
+                            marks.append("handwritten notes")
+                        n_hl = len(ap.get("highlights") or [])
+                        if n_hl:
+                            marks.append(f"{n_hl} highlight" + ("s" if n_hl != 1 else ""))
+                        annotation_parts.append(
+                            f"Page {ap['page']}: " + (", ".join(marks) or "annotated")
+                        )
+                        for h in ap.get("highlights") or []:
+                            annotation_parts.append(f"  • {h}")
+                elif content.get("highlights"):
                     annotation_parts.append("\n--- Highlights ---")
                     annotation_parts.extend(content["highlights"])
                 if content.get("handwritten_text"):
