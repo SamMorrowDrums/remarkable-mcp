@@ -67,6 +67,7 @@ def _rm_units_per_point(paper_size: Optional[tuple] = None) -> float:
     """
     return REMARKABLE_COORD_DPI / 72.0
 
+
 # Standard reMarkable background color (light cream/gray)
 # Can be overridden via REMARKABLE_BACKGROUND_COLOR environment variable
 _DEFAULT_BACKGROUND_COLOR = "#FBFBFB"
@@ -1149,9 +1150,7 @@ def _get_page_order(tmpdir_path: Path) -> List[str]:
     return []
 
 
-def _select_rm_file_for_page(
-    tmpdir_path: Path, rm_files: List[Path], page: int
-) -> Optional[Path]:
+def _select_rm_file_for_page(tmpdir_path: Path, rm_files: List[Path], page: int) -> Optional[Path]:
     """Return the .rm stroke file for a 1-based page, matched by page id.
 
     ``_get_ordered_rm_files`` is compacted (only pages that actually have
