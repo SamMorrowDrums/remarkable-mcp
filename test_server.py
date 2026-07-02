@@ -730,6 +730,55 @@ class TestRemarkableRead:
             or ("coroutine" not in data["_error"].get("message", ""))
         ), f"Got coroutine error: {data}"
 
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.extract_text_from_document_zip")
+    @patch("remarkable_mcp.tools.get_file_type")
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_read_legacy_highlights_shown_alongside_annotated_pages(
+        self, mock_get_rmapi, mock_get_file_type, mock_extract
+    ):
+        """Legacy-JSON highlights must still be listed when annotated_pages exists.
+
+        Regression test: highlights without page attribution (older-firmware
+        .highlights JSON) were suppressed whenever the per-page annotated_pages
+        index was non-empty (e.g. a page with pen strokes but no GlyphRange).
+        """
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+
+        doc = Mock()
+        doc.VissibleName = "Annotated PDF"
+        doc.ID = "pdf-123"
+        doc.Parent = ""
+        doc.ModifiedClient = "2024-01-15T10:30:00Z"
+        doc.is_folder = False
+        doc.tags = []
+        mock_client.get_meta_items.return_value = [doc]
+        mock_client.download.return_value = b"zip-bytes-unused-by-mocked-extraction"
+
+        mock_get_file_type.return_value = "pdf"
+        mock_extract.return_value = {
+            "typed_text": [],
+            "highlights": ["A legacy highlighted sentence."],
+            "handwritten_text": None,
+            "pages": 3,
+            "page_ids": [],
+            "annotated_pages": [
+                {"page": 2, "page_id": "p2", "has_handwriting": True, "highlights": []}
+            ],
+            "ocr_backend": None,
+            "tags": [],
+        }
+
+        result = await mcp.call_tool(
+            "remarkable_read", {"document": "Annotated PDF", "content_type": "annotations"}
+        )
+        data = json.loads(result[0][0].text)
+
+        assert "_error" not in data, f"Unexpected error: {data}"
+        assert "Page 2: handwritten notes" in data["content"]
+        assert "A legacy highlighted sentence." in data["content"]
+
 
 # =============================================================================
 # Test remarkable_image Tool

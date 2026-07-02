@@ -543,6 +543,7 @@ async def remarkable_read(
                 # the annotated pages (and their highlighted text) so the reader
                 # need not page through the whole document to find them.
                 annotated_pages = content.get("annotated_pages") or []
+                shown_highlights = set()
                 if annotated_pages:
                     annotation_parts.append("\n--- Annotated pages ---")
                     for ap in annotated_pages:
@@ -557,9 +558,17 @@ async def remarkable_read(
                         )
                         for h in ap.get("highlights") or []:
                             annotation_parts.append(f"  • {h}")
-                elif content.get("highlights"):
+                            shown_highlights.add(h)
+                # Highlights not covered by the per-page index above — e.g. from
+                # the legacy .highlights JSON (older firmware), which has no page
+                # attribution. Without this, a doc whose pages carry pen strokes
+                # would suppress its legacy highlight text entirely.
+                other_highlights = [
+                    h for h in content.get("highlights") or [] if h not in shown_highlights
+                ]
+                if other_highlights:
                     annotation_parts.append("\n--- Highlights ---")
-                    annotation_parts.extend(content["highlights"])
+                    annotation_parts.extend(other_highlights)
                 if content.get("handwritten_text"):
                     annotation_parts.append("\n--- Handwritten (OCR) ---")
                     annotation_parts.extend(content["handwritten_text"])
