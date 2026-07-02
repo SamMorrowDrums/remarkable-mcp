@@ -58,6 +58,30 @@ def test_formatversion2_cpages_redir_still_works():
         assert _resolve_pdf_page_index(tmp, 2) == 1
 
 
+def test_cpages_is_authoritative_over_stale_redirection_page_map():
+    """A v2 user-added page (cPages entry without redir) must resolve to None.
+
+    A v1->v2 migrated document can retain a stale redirectionPageMap whose
+    order-shifted indices would otherwise composite a wrong PDF underlay.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _write_content(
+            tmp,
+            {
+                "cPages": {
+                    "pages": [
+                        {"id": "a", "redir": {"value": 0}},
+                        {"id": "b"},  # user-added page, no underlay
+                    ]
+                },
+                "redirectionPageMap": [0, 1],  # stale: would wrongly map page 2
+            },
+        )
+        assert _resolve_pdf_page_index(tmp, 1) == 0
+        assert _resolve_pdf_page_index(tmp, 2) is None
+
+
 def test_no_mapping_returns_none():
     """Without cPages or redirectionPageMap the page has no resolvable underlay."""
     with tempfile.TemporaryDirectory() as td:
