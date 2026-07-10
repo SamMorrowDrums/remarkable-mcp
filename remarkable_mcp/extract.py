@@ -1278,6 +1278,113 @@ def _pdf_page_index_for_cpages_entry(entry: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def _get_page_order(tmpdir_path: Path) -> List[str]:
+    """Return the ordered list of page ids from the .content file.
+
+    Handles both .content format versions:
+      * formatVersion 2: cPages.pages[].id
+      * formatVersion 1: top-level "pages" array of page-id strings
+    Returns an empty list if no page order can be determined.
+    """
+    content_file = next(tmpdir_path.glob("*.content"), None)
+    if content_file is None:
+        return []
+    try:
+        data = json.loads(content_file.read_text())
+    except Exception:
+        return []
+    cpages = data.get("cPages")
+    if isinstance(cpages, dict) and isinstance(cpages.get("pages"), list):
+        return [p.get("id") for p in cpages["pages"] if isinstance(p, dict) and p.get("id")]
+    pages = data.get("pages")
+    if isinstance(pages, list):
+        return [p for p in pages if isinstance(p, str)]
+    return []
+
+
+def _pdf_redirect_map(tmpdir_path: Path) -> List[Optional[int]]:
+    """Return a per-page list mapping each page (in page order) to its 0-based
+    PDF page index, or None for user-added pages with no PDF backing.
+
+    Handles both .content format versions:
+      * formatVersion 2: cPages.pages[].redir.value
+      * formatVersion 1: top-level "redirectionPageMap" array (value -1 marks a
+        user-added page with no PDF backing)
+
+    The formatVersion 1 shape was previously unhandled, so every page of a
+    PDF-backed v1 document was treated as a user-added page and the PDF
+    underlay was silently dropped from merged renders.
+    """
+    content_file = next(tmpdir_path.glob("*.content"), None)
+    if content_file is None:
+        return []
+    try:
+        data = json.loads(content_file.read_text())
+    except Exception:
+        return []
+    cpages = data.get("cPages")
+    if isinstance(cpages, dict) and isinstance(cpages.get("pages"), list):
+        return [
+            _pdf_page_index_for_cpages_entry(entry) if isinstance(entry, dict) else None
+            for entry in cpages["pages"]
+        ]
+    redir_map = data.get("redirectionPageMap")
+    if isinstance(redir_map, list):
+        out: List[Optional[int]] = []
+        for v in redir_map:
+            try:
+                iv = int(v)
+            except (ValueError, TypeError):
+                iv = -1
+            out.append(iv if iv >= 0 else None)
+        return out
+    return []
+
+
+# reMarkable renders a PDF underlay at physical size into its device pixel grid,
+# and v6 strokes are stored in those device pixels. So the scale that maps stroke
+# units to PDF points is 72 / panel_DPI, and it depends only on the panel — which
+# is identified by SceneInfo.paper_size (the panel's pixel resolution). The whole
+# lineup sits in a ~226-229 DPI band, so the values below vary by only ~1.5%.
+#
+# Keyed on (paper_w, paper_h) in device px -> PDF points per stroke unit:
+#   * (1404, 1872) rM1 / rM2 (~226 DPI): calibrated against a device PDF export.
+#   * (1620, 2160) Paper Pro (~229 DPI): estimated from spec DPI (UNVALIDATED).
+_DEVICE_POINTS_PER_UNIT = {
+    (1404, 1872): 0.3177,
+    (1620, 2160): 0.3144,
+}
+# Fallback for an unrecognised panel: assume an rM2-class scale. Because the DPI
+# spread is tiny this is within ~1% of any current device.
+REMARKABLE_PDF_POINTS_PER_UNIT = 0.3177
+
+
+def _points_per_unit(paper_size: Optional[Tuple[float, float]]) -> float:
+    """PDF points per stroke unit for the panel described by ``paper_size``
+    (device pixel resolution from SceneInfo). Falls back to an rM2-class scale
+    for unknown panels."""
+    if paper_size:
+        key = (int(round(paper_size[0])), int(round(paper_size[1])))
+        if key in _DEVICE_POINTS_PER_UNIT:
+            return _DEVICE_POINTS_PER_UNIT[key]
+    return REMARKABLE_PDF_POINTS_PER_UNIT
+
+
+def _annotation_page_viewbox(
+    pdf_w_pt: float, pdf_h_pt: float, points_per_unit: float
+) -> Tuple[float, float, float, float]:
+    """viewBox (x, y, w, h) in stroke coordinates that registers the annotation
+    layer onto a PDF page of the given point size.
+
+    ``points_per_unit`` is the panel scale (see :func:`_points_per_unit`). The
+    stroke space is centred on the page in x (x=0 -> page centre) with y=0 at the
+    page top, so the returned box is ``(-w/2, 0, w, h)``.
+    """
+    view_w = pdf_w_pt / points_per_unit
+    view_h = pdf_h_pt / points_per_unit
+    return (-view_w / 2.0, 0.0, view_w, view_h)
+
+
 def _render_pdf_page_to_png(
     pdf_bytes: bytes, page_index: int, width: int, height: int
 ) -> Optional[bytes]:
@@ -1423,22 +1530,40 @@ def render_merged_page_from_document_zip(
         pdf_path = matching[0] if matching else sorted(pdf_files)[0]
         pdf_bytes = pdf_path.read_bytes()
 
-        # Read cPages to find PDF page mapping
-        cpages = _read_cpages_entries(tmpdir_path)
-        rm_files = _get_ordered_rm_files(tmpdir_path)
+        # Build a page-aligned view of the document. The page->PDF redirect map
+        # and the per-page .rm files are both indexed by the full page list (in
+        # page order). Indexing this way (rather than by a compacted list of
+        # only the pages that happen to have strokes) keeps blank annotation
+        # pages aligned to the correct PDF page instead of shifting every
+        # subsequent page.
+        page_ids = _get_page_order(tmpdir_path)
+        redirect_map = _pdf_redirect_map(tmpdir_path)
+        total_pages = max(len(page_ids), len(redirect_map))
 
-        if page < 1 or page > len(rm_files):
-            return None, f"Page {page} out of range (document has {len(rm_files)} pages)."
+        if total_pages == 0:
+            # Unknown layout — fall back to the raw ordered .rm files.
+            rm_files = _get_ordered_rm_files(tmpdir_path)
+            total_pages = len(rm_files)
+            if page < 1 or page > total_pages:
+                return None, f"Page {page} out of range (document has {total_pages} pages)."
+            target_rm_file: Optional[Path] = rm_files[page - 1]
+        else:
+            if page < 1 or page > total_pages:
+                return None, f"Page {page} out of range (document has {total_pages} pages)."
+            rm_by_id = {p.stem: p for p in tmpdir_path.glob("**/*.rm")}
+            page_id = page_ids[page - 1] if page - 1 < len(page_ids) else None
+            target_rm_file = rm_by_id.get(page_id) if page_id else None
 
-        target_rm_file = rm_files[page - 1]
-
-        # Determine which PDF page this reMarkable page maps to
+        # Determine which PDF page this reMarkable page maps to (handles both
+        # .content format versions via _pdf_redirect_map).
         pdf_page_index: Optional[int] = None
-        if cpages and page <= len(cpages):
-            pdf_page_index = _pdf_page_index_for_cpages_entry(cpages[page - 1])
+        if redirect_map and page <= len(redirect_map):
+            pdf_page_index = redirect_map[page - 1]
 
         if pdf_page_index is None:
-            # No redirect — this page may be a user-added blank page
+            # Genuinely a user-added page with no PDF backing.
+            if target_rm_file is None:
+                return None, "Page has neither a PDF underlay nor an annotation layer."
             png = render_rm_file_to_png(target_rm_file, background_color=background_color)
             return png, "Page has no PDF underlay (user-added page); annotation-only render."
 
@@ -1477,26 +1602,52 @@ def render_merged_page_from_document_zip(
             with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
                 ann_svg_path = Path(tmp_svg.name)
 
-            if _rm_to_svg(target_rm_file, ann_svg_path):
-                # Read the SVG and adjust viewBox to match PDF page bounds.
+            if target_rm_file is not None and _rm_to_svg(target_rm_file, ann_svg_path):
+                # Register the annotation layer to the PDF page.
                 #
-                # rmscene's v6 renderer emits stroke coordinates with the
-                # origin at the top of the page and x=0 in the horizontal
-                # center (so x ranges roughly from -W/2 to +W/2). Setting the
-                # viewBox to (-W_pt/2, 0, W_pt, H_pt) maps that coordinate
-                # system to the PDF page bounds so annotations align. If the
-                # upstream coordinate convention changes, this alignment will
-                # need to be revisited.
+                # rmscene emits v6 stroke coordinates in the reMarkable device
+                # space (x=0 at the page's horizontal centre, y=0 at the top),
+                # but crops the SVG viewBox to the ink bounding box. Replace that
+                # viewBox with the device-space rectangle the PDF page occupies
+                # (see _annotation_page_viewbox / REMARKABLE_PDF_POINTS_PER_UNIT)
+                # so strokes land on the page at the right position and scale.
+                # The earlier code forced the viewBox to PDF *points*, which
+                # mis-scaled the ink by ~3x (stroke units != points).
                 svg_content = ann_svg_path.read_text()
 
+                # Resolve the panel scale from this page's SceneInfo.paper_size
+                # (device pixel resolution), so the mapping is correct across
+                # reMarkable models rather than hard-coded to one panel.
+                _blocks = _v6_blocks(target_rm_file)
+                _paper = _v6_paper_size(_blocks) if _blocks else None
+                _ppu = _points_per_unit(_paper)
+                vb_x, vb_y, vb_w, vb_h = _annotation_page_viewbox(
+                    pdf_w_pt, pdf_h_pt, _ppu
+                )
                 svg_content = re.sub(
                     r'viewBox="[^"]*"',
-                    f'viewBox="{-pdf_w_pt / 2:.1f} 0 {pdf_w_pt:.1f} {pdf_h_pt:.1f}"',
+                    f'viewBox="{vb_x:.1f} {vb_y:.1f} {vb_w:.1f} {vb_h:.1f}"',
                     svg_content,
+                    count=1,
                 )
-                # Also set explicit width/height to match output canvas
-                svg_content = re.sub(r'width="[^"]*"', f'width="{out_w}"', svg_content)
-                svg_content = re.sub(r'height="[^"]*"', f'height="{out_h}"', svg_content)
+                # Also set explicit width/height on the <svg> root to match the
+                # output canvas. Scope each substitution to the opening <svg>
+                # tag: a bare width="..." / height="..." regex also matches
+                # stroke-width="..." on every path, rewriting it to the full
+                # canvas dimension (~1404px) and flooding the page with solid
+                # black ink. Anchoring to the <svg> tag (count=1) avoids that.
+                svg_content = re.sub(
+                    r'(<svg\b[^>]*?)\swidth="[^"]*"',
+                    rf'\1 width="{out_w}"',
+                    svg_content,
+                    count=1,
+                )
+                svg_content = re.sub(
+                    r'(<svg\b[^>]*?)\sheight="[^"]*"',
+                    rf'\1 height="{out_h}"',
+                    svg_content,
+                    count=1,
+                )
 
                 # Render SVG to PNG with transparent background
                 import cairosvg
