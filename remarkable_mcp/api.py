@@ -23,6 +23,14 @@ REMARKABLE_USE_USB_WEB = os.environ.get("REMARKABLE_USE_USB_WEB", "").lower() in
     "true",
     "yes",
 )
+# Local-directory transport: read the reMarkable desktop app's sync folder (or
+# any xochitl-style directory) straight from disk. Enabled by the mode flag or
+# by pointing REMARKABLE_LOCAL_DIR at a directory.
+REMARKABLE_USE_LOCAL_DIR = os.environ.get("REMARKABLE_USE_LOCAL_DIR", "").lower() in (
+    "1",
+    "true",
+    "yes",
+) or bool(os.environ.get("REMARKABLE_LOCAL_DIR"))
 # When a device transport (USB web / SSH) is selected but the tablet is not
 # reachable at startup, automatically fall back to cloud mode if a cloud token
 # is configured. This lets the *same* configuration work whether or not the
@@ -135,29 +143,52 @@ def get_rmapi():
     Get or initialize the reMarkable API client.
 
     Priority order:
-    1. USB web interface (if REMARKABLE_USE_USB_WEB=1)
-    2. SSH (if REMARKABLE_USE_SSH=1)
-    3. Cloud API (default, requires token)
+    1. Local directory (if REMARKABLE_USE_LOCAL_DIR=1 or REMARKABLE_LOCAL_DIR is set)
+    2. USB web interface (if REMARKABLE_USE_USB_WEB=1)
+    3. SSH (if REMARKABLE_USE_SSH=1)
+    4. Cloud API (default, requires token)
 
-    When a device transport (USB/SSH) is selected but the tablet is unreachable
+    When a device transport (local dir / USB / SSH) is selected but unreachable
     at startup, this falls back to cloud mode if a cloud token is configured
     (unless REMARKABLE_DISABLE_CLOUD_FALLBACK is set), so the same configuration
     works with or without the physical device connected.
 
-    Returns RemarkableClient, SSHClient, or USBWebClient (all have compatible interfaces).
+    Returns RemarkableClient, SSHClient, USBWebClient, or LocalDirClient
+    (all have compatible interfaces).
     """
     global _device_client, _fell_back_to_cloud
 
-    # Device transports (USB web / SSH) — probe once, cache the resolution, and
-    # optionally fall back to cloud if the device is unreachable.
-    if REMARKABLE_USE_USB_WEB or REMARKABLE_USE_SSH:
+    # Device transports (local dir / USB web / SSH) — probe once, cache the
+    # resolution, and optionally fall back to cloud if unreachable.
+    if REMARKABLE_USE_LOCAL_DIR or REMARKABLE_USE_USB_WEB or REMARKABLE_USE_SSH:
         with _device_resolve_lock:
             if _fell_back_to_cloud:
                 return _get_cloud_client()
             if _device_client is not None:
                 return _device_client
 
-            if REMARKABLE_USE_USB_WEB:
+            if REMARKABLE_USE_LOCAL_DIR:
+                from remarkable_mcp.local_dir import create_local_dir_client
+
+                mode_label = "Local directory"
+                try:
+                    client = create_local_dir_client()
+                except RuntimeError:
+                    # No usable local directory found. Fall back to cloud when
+                    # allowed (mirrors the unreachable-device behaviour below);
+                    # otherwise surface the resolution error directly.
+                    if not REMARKABLE_DISABLE_CLOUD_FALLBACK and _is_cloud_token_available():
+                        logger.warning(
+                            "%s is not available; falling back to cloud mode "
+                            "because a cloud token is configured. Set "
+                            "REMARKABLE_DISABLE_CLOUD_FALLBACK=1 to disable "
+                            "this fallback.",
+                            mode_label,
+                        )
+                        _fell_back_to_cloud = True
+                        return _get_cloud_client()
+                    raise
+            elif REMARKABLE_USE_USB_WEB:
                 from remarkable_mcp.usb_web import create_usb_web_client
 
                 client = create_usb_web_client()
@@ -193,7 +224,7 @@ def get_rmapi():
 
 
 def get_active_transport() -> str:
-    """Return the transport actually in use ("cloud", "ssh", or "usb-web").
+    """Return the transport actually in use ("cloud", "ssh", "usb-web", or "local-dir").
 
     Reflects the resolution performed by get_rmapi(): if a device transport was
     selected but the tablet was unreachable and we fell back to cloud, this
@@ -203,6 +234,8 @@ def get_active_transport() -> str:
     """
     if _fell_back_to_cloud:
         return "cloud"
+    if REMARKABLE_USE_LOCAL_DIR:
+        return "local-dir"
     if REMARKABLE_USE_USB_WEB:
         return "usb-web"
     if REMARKABLE_USE_SSH:

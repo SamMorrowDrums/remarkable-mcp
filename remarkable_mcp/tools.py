@@ -1308,6 +1308,7 @@ async def remarkable_status() -> str:
     import os
 
     from remarkable_mcp.api import (
+        REMARKABLE_USE_LOCAL_DIR,
         REMARKABLE_USE_SSH,
         REMARKABLE_USE_USB_WEB,
         get_active_transport,
@@ -1315,7 +1316,15 @@ async def remarkable_status() -> str:
     from remarkable_mcp.write_tools import write_enabled
 
     # Determine the *selected* transport from configuration (pre-fallback).
-    if REMARKABLE_USE_USB_WEB:
+    if REMARKABLE_USE_LOCAL_DIR:
+        from remarkable_mcp.local_dir import find_default_local_dir
+
+        selected_transport = "local-dir"
+        local_dir = os.environ.get("REMARKABLE_LOCAL_DIR") or str(
+            find_default_local_dir() or "(no directory found)"
+        )
+        connection_info = f"local directory at {local_dir}"
+    elif REMARKABLE_USE_USB_WEB:
         from remarkable_mcp.usb_web import DEFAULT_USB_HOST
 
         selected_transport = "usb-web"
@@ -1362,6 +1371,17 @@ async def remarkable_status() -> str:
             "read": True,
             "render": True,
             "upload": True,
+            "mkdir": False,
+            "move": False,
+            "rename": False,
+            "delete": False,
+        },
+        # Local directory is strictly read-only: the folder is the desktop
+        # app's private sync cache, so direct writes would bypass sync.
+        "local-dir": {
+            "read": True,
+            "render": True,
+            "upload": False,
             "mkdir": False,
             "move": False,
             "rename": False,
@@ -1481,6 +1501,15 @@ async def remarkable_status() -> str:
                 "1) Your reMarkable is connected via USB\n"
                 "2) USB web interface is enabled (Settings → Storage)\n"
                 "3) The device is on and unlocked"
+            )
+        elif transport == "local-dir":
+            hint = (
+                "Local data directory not usable. Make sure:\n"
+                "1) The reMarkable desktop app is installed and signed in "
+                "(it creates and syncs the folder), or\n"
+                "2) REMARKABLE_LOCAL_DIR points to a directory containing "
+                "xochitl-style data (*.metadata files)\n"
+                "Keep the desktop app running so the folder stays in sync."
             )
         else:
             hint = (

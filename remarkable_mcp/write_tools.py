@@ -61,7 +61,14 @@ def read_only_enabled() -> bool:
 
 
 def write_enabled() -> bool:
-    """Write tools are enabled by default; disabled only in read-only mode."""
+    """Write tools are enabled by default; disabled only in read-only mode.
+
+    The local-directory transport is unconditionally read-only: the directory
+    is the desktop app's private sync cache, and writing to it directly would
+    bypass sync and could corrupt the app's state.
+    """
+    if _is_local_dir_mode():
+        return False
     return not read_only_enabled()
 
 
@@ -103,9 +110,18 @@ def _is_usb_web_mode() -> bool:
     )
 
 
+def _is_local_dir_mode() -> bool:
+    """Check if the local-directory transport is active."""
+    return os.environ.get("REMARKABLE_USE_LOCAL_DIR", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    ) or bool(os.environ.get("REMARKABLE_LOCAL_DIR"))
+
+
 def _is_cloud_mode() -> bool:
-    """Check if cloud transport is active (the default when SSH/USB are off)."""
-    return not _is_ssh_mode() and not _is_usb_web_mode()
+    """Check if cloud transport is active (the default when other modes are off)."""
+    return not _is_ssh_mode() and not _is_usb_web_mode() and not _is_local_dir_mode()
 
 
 def _require_managed_write_mode() -> Optional[str]:

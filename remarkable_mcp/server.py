@@ -65,6 +65,11 @@ def _build_instructions() -> str:
         "true",
         "yes",
     )
+    local_dir_mode = os.environ.get("REMARKABLE_USE_LOCAL_DIR", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    ) or bool(os.environ.get("REMARKABLE_LOCAL_DIR"))
     has_google_vision = bool(os.environ.get("GOOGLE_VISION_API_KEY"))
     ocr_backend = os.environ.get("REMARKABLE_OCR_BACKEND", "auto").lower()
 
@@ -73,7 +78,9 @@ def _build_instructions() -> str:
         "true",
         "yes",
     )
-    write_mode = not read_only_mode
+    # Local-directory mode is unconditionally read-only (the folder is the
+    # desktop app's private sync cache).
+    write_mode = not read_only_mode and not local_dir_mode
 
     read_only_note = "" if write_mode else " All operations are read-only."
 
@@ -128,7 +135,23 @@ Documents are registered as resources for direct access:
     )
 
     # Add transport-specific instructions
-    if ssh_mode:
+    if local_dir_mode:
+        instructions += """
+## Local Directory Mode (Active)
+
+Reading from a local reMarkable data directory (typically the official
+desktop app's sync folder). Fully offline and device-free:
+- **Raw file access**: Use `content_type="raw"` to get original PDF/EPUB text
+- **Read-only**: the folder is the desktop app's sync cache, so write tools
+  are disabled in this mode. Content freshness depends on the desktop app
+  syncing (keep it running/signed in).
+
+### Content Types for remarkable_read
+- `"text"` (default) - Full content: raw PDF/EPUB text + annotations
+- `"raw"` - Only original PDF/EPUB text (no annotations)
+- `"annotations"` - Only typed text, highlights, and OCR content
+"""
+    elif ssh_mode:
         instructions += """
 ## SSH Mode (Active)
 
