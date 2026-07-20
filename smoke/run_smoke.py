@@ -6,11 +6,12 @@ the protocol (stdio, via the official ``mcp`` client SDK -- no AI, no models, no
 mocks) and exercises EVERY available tool in EVERY available transport, in the
 order:
 
-    cloud  ->  usb-web  ->  ssh
+    local  ->  cloud  ->  usb-web  ->  ssh
 
-Why that order matters: pushing files over SSH can reset the USB web interface,
-so SSH (the only mode that writes to the device filesystem) runs LAST, after the
-USB-web checks are done.
+Why that order matters: local is read-only and side-effect-free so it runs
+first; pushing files over SSH can reset the USB web interface, so SSH (the only
+mode that writes to the device filesystem) runs LAST, after the USB-web checks
+are done.
 
 The server HIDES tools a transport cannot support (e.g. mkdir/move/rename/delete
 are not registered over USB web; remarkable_author is SSH-only). The harness is
@@ -117,6 +118,15 @@ WRITE_TOOLS = {
 # hatch. usb/ssh disable cloud fallback so a dead device cannot silently pass via
 # cloud.
 MODES = {
+    "local": {
+        "transport": "local-dir",
+        "args": ["--local-dir"],
+        "env": {
+            "REMARKABLE_USE_LOCAL_DIR": "1",
+            "REMARKABLE_DISABLE_CLOUD_FALLBACK": "1",
+        },
+        "probe_port": None,
+    },
     "cloud": {
         "transport": "cloud",
         "args": [],
@@ -176,6 +186,16 @@ def _tcp_open(host: str, port: int, timeout: float = 2.0) -> bool:
 def _mode_prescreen(mode: str) -> tuple[bool, str]:
     """Cheap reachability check before spawning the server (avoids long hangs)."""
     spec = MODES[mode]
+    if mode == "local":
+        from remarkable_mcp.local_dir import check_local_dir_available
+
+        base_dir = os.environ.get("REMARKABLE_LOCAL_DIR")
+        if check_local_dir_available(base_dir):
+            return True, "local data directory present"
+        return False, (
+            "no local data directory found (install/sign in to the reMarkable "
+            "desktop app, or set REMARKABLE_LOCAL_DIR)"
+        )
     if mode == "cloud":
         if _cloud_token_present():
             return True, "cloud token present"
@@ -706,8 +726,8 @@ def main():
     )
     parser.add_argument(
         "--modes",
-        default="cloud,usb,ssh",
-        help="Comma-separated subset of modes in run order (default: cloud,usb,ssh)",
+        default="local,cloud,usb,ssh",
+        help="Comma-separated subset of modes in run order (default: local,cloud,usb,ssh)",
     )
     parser.add_argument(
         "--read-only",
@@ -716,12 +736,14 @@ def main():
     )
     args = parser.parse_args()
 
-    order = ["cloud", "usb", "ssh"]
+    # local runs first: it is read-only and side-effect-free. SSH still runs
+    # last because its writes can reset the USB web interface.
+    order = ["local", "cloud", "usb", "ssh"]
     requested = [m.strip() for m in args.modes.split(",") if m.strip()]
     unknown = [m for m in requested if m not in MODES]
     if unknown:
         parser.error(f"unknown mode(s): {unknown}. Choose from {list(MODES)}")
-    # Always honour cloud -> usb -> ssh ordering regardless of input order.
+    # Always honour local -> cloud -> usb -> ssh ordering regardless of input order.
     args.modes = [m for m in order if m in requested]
 
     if not FIXTURE_PDF.exists():

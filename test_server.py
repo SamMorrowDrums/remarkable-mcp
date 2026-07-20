@@ -300,8 +300,8 @@ class TestRemarkableStatus:
         assert "capabilities_by_transport" in data
 
         matrix = data["capabilities_by_transport"]
-        # All three transports are described.
-        assert set(matrix) == {"cloud", "ssh", "usb-web"}
+        # All four transports are described.
+        assert set(matrix) == {"cloud", "ssh", "usb-web", "local-dir"}
         # Read/render are universal.
         for caps in matrix.values():
             assert caps["read"] is True
@@ -311,6 +311,10 @@ class TestRemarkableStatus:
             assert all(matrix[mode][op] for op in ("upload", "mkdir", "move", "rename", "delete"))
         assert matrix["usb-web"]["upload"] is True
         assert not any(matrix["usb-web"][op] for op in ("mkdir", "move", "rename", "delete"))
+        # Local directory is strictly read-only.
+        assert not any(
+            matrix["local-dir"][op] for op in ("upload", "mkdir", "move", "rename", "delete")
+        )
 
         # Effective capabilities for the active transport always cover read/render.
         assert data["capabilities"]["read"] is True

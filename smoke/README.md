@@ -11,10 +11,11 @@ work, tool by tool?"*
 ## Running it
 
 ```bash
-# All modes this machine can reach (cloud, then usb-web, then ssh)
+# All modes this machine can reach (local, then cloud, then usb-web, then ssh)
 uv run python smoke/run_smoke.py
 
 # Just one mode
+uv run python smoke/run_smoke.py --modes local
 uv run python smoke/run_smoke.py --modes cloud
 uv run python smoke/run_smoke.py --modes usb
 uv run python smoke/run_smoke.py --modes ssh
@@ -23,9 +24,9 @@ uv run python smoke/run_smoke.py --modes ssh
 uv run python smoke/run_smoke.py --read-only
 ```
 
-Modes run in the order **cloud → usb-web → ssh** on purpose: pushing files over
-SSH can reset the USB web interface, so the only filesystem-writing transport
-runs last.
+Modes run in the order **local → cloud → usb-web → ssh** on purpose: local is
+read-only and side-effect-free so it goes first, and pushing files over SSH can
+reset the USB web interface, so the only filesystem-writing transport runs last.
 
 ## Reading the result
 
@@ -48,17 +49,19 @@ tool visibility changes.
 
 ## Per-mode expectations
 
-| Tool | cloud | usb-web | ssh |
-| ---- | :---: | :-----: | :-: |
-| `remarkable_status` / `browse` / `recent` / `search` / `read` / `image` / `canvas` | PASS | PASS | PASS |
-| `remarkable_upload` | PASS | PASS | PASS |
-| `remarkable_mkdir` / `rename` / `move` / `delete` | PASS | **N/A** | PASS |
-| `remarkable_author` | **N/A** | **N/A** | PASS |
+| Tool | local | cloud | usb-web | ssh |
+| ---- | :---: | :---: | :-----: | :-: |
+| `remarkable_status` / `browse` / `recent` / `search` / `read` / `image` / `canvas` | PASS | PASS | PASS | PASS |
+| `remarkable_upload` | **N/A** | PASS | PASS | PASS |
+| `remarkable_mkdir` / `rename` / `move` / `delete` | **N/A** | PASS | **N/A** | PASS |
+| `remarkable_author` | **N/A** | **N/A** | **N/A** | PASS |
 
 USB web is read + render + upload-to-root only — the device firmware HTTP server
 exposes no folder/move/rename/delete endpoints, so those tools are not registered
-in that mode (shown as N/A). `remarkable_author` requires native `.rm` write-back
-and is SSH-only today.
+in that mode (shown as N/A). Local directory mode is strictly read-only (the
+folder is the desktop app's private sync cache), so no write tool registers
+there. `remarkable_author` requires native `.rm` write-back and is SSH-only
+today.
 
 ### Upload is verified end-to-end (cloud/ssh)
 

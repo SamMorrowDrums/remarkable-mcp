@@ -101,6 +101,55 @@ See [SSH Setup Guide](docs/ssh-setup.md) for detailed instructions.
 
 ---
 
+### 💻 Local Directory Mode (Desktop App)
+
+Read the official **reMarkable desktop app's** sync folder straight from disk — fully offline, no cable, no cloud round-trip, and the tablet doesn't even need to be on. The desktop app keeps the folder synced whenever it is running. Strictly read-only.
+
+<details>
+<summary>📋 Local Directory Configuration</summary>
+
+Add to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--local-dir"]
+    }
+  }
+}
+```
+
+With no path, the desktop app's data folder is auto-detected:
+
+- **macOS (current app):** `~/Library/Containers/com.remarkable.desktop/Data/Library/Application Support/remarkable/desktop`
+- **macOS (legacy app):** `~/Library/Application Support/remarkable/desktop`
+- **Windows:** `%APPDATA%\remarkable\desktop`
+- **Linux:** `~/.local/share/remarkable/desktop`
+
+Or point at any xochitl-style directory (e.g. a tablet backup):
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--local-dir", "/path/to/xochitl-data"]
+    }
+  }
+}
+```
+
+**Notes:**
+- Content freshness depends on the desktop app syncing — keep it running and signed in
+- This mode is read-only by design: the folder is the desktop app's private sync cache, and writing to it directly would bypass sync and could corrupt the app's state
+- If the directory can't be found and a cloud token is configured, the server falls back to cloud mode (same behaviour as USB/SSH)
+
+</details>
+
+---
+
 ### ☁️ Cloud Mode (Wireless)
 
 Wireless access with **no device connection required** — your reMarkable syncs to the cloud and the MCP reads from there, so it works from anywhere. Requires a reMarkable Connect subscription.
@@ -182,21 +231,25 @@ AI assistants use the tools to read documents, search content, and more:
 
 All three modes share the same read, render, and upload tools. **Cloud and SSH additionally support full library management** — create folders, move, rename, and delete (all enabled by default) — so capability is near-identical and you can genuinely pick whichever matches how your tablet is connected:
 
+- **💻 Local Directory** — *device-free AND offline.* Reads the official desktop app's sync folder straight from disk — no cable, no cloud round-trip, no subscription beyond what the app itself needs, and the tablet can be off. Read/render only (the folder is the app's private sync cache, so writes are disabled by design). Best when the desktop app is already part of your workflow.
 - **☁️ Cloud** — *device-free, works from anywhere.* Reads your library straight from reMarkable's cloud over Wi‑Fi with a Connect subscription — no cable, no developer mode. Full read/render plus full write (upload, create folder, move, rename, delete → trash). Parallel fetching and an on-disk blob cache make it fast after the first sync. Best for remote/headless setups or when you don't want to plug in.
 - **🔌 USB Web Interface** — *best when the tablet is plugged in.* Enable the web interface in Storage Settings — no subscription, no developer mode. Full read/render plus upload (to your root folder). The tablet's USB web firmware exposes no folder/move/rename/delete endpoints, so for those over a cable use SSH.
 - **⚡ SSH** — *for power users who want filesystem-level access.* Requires developer mode over USB. Full read/render plus full write including folder create/move/rename/delete, straight from the tablet filesystem.
 
-| Mode | Setup | Subscription | Offline | Read + render | Raw PDF/EPUB | Upload | Folder ops¹ |
-|------|-------|--------------|---------|---------------|--------------|--------|-------------|
-| **☁️ Cloud** | One-time code | Connect | ❌ | ✅ | ✅ PDF/EPUB | ✅ | ✅ |
-| **🔌 USB Web** | Enable in Settings | Not required | ✅ | ✅ | ✅ PDF | ✅ (to root) | ❌ |
-| **⚡ SSH** | Developer mode | Not required | ✅ | ✅ | ✅ PDF/EPUB | ✅ | ✅ |
+| Mode | Setup | Subscription | Offline | Tablet needed | Read + render | Raw PDF/EPUB | Upload | Folder ops¹ |
+|------|-------|--------------|---------|---------------|---------------|--------------|--------|-------------|
+| **💻 Local Dir** | Desktop app installed | Not required² | ✅ | ❌ | ✅ | ✅ PDF/EPUB | ❌ | ❌ |
+| **☁️ Cloud** | One-time code | Connect | ❌ | ❌ | ✅ | ✅ PDF/EPUB | ✅ | ✅ |
+| **🔌 USB Web** | Enable in Settings | Not required | ✅ | ✅ | ✅ | ✅ PDF | ✅ (to root) | ❌ |
+| **⚡ SSH** | Developer mode | Not required | ✅ | ✅ | ✅ | ✅ PDF/EPUB | ✅ | ✅ |
 
 ¹ Folder ops = create folder / move / rename / delete. Upload and folder ops are enabled by default; pass `--read-only` to expose a read-only server. Deletes move items to the trash and prompt for confirmation when your client supports elicitation, and are refused without it unless `REMARKABLE_SKIP_CONFIRM=1` is set.
 
+² The desktop app itself signs in to the reMarkable cloud to sync; local directory mode just reads whatever the app has already synced to disk.
+
 ### Automatic cloud fallback
 
-If you select a device transport (`--usb` or `--ssh`) but the tablet isn't reachable at startup **and** a cloud token is configured (`REMARKABLE_TOKEN` or `~/.rmapi`), the server automatically falls back to cloud mode and logs a warning. This means a single configuration works whether or not the tablet is plugged in — plug in for fast local access, unplug to keep working over the cloud. `remarkable_status` reports the effective transport and a `fell_back_to_cloud` flag when this happens.
+If you select a device transport (`--usb`, `--ssh`, or `--local-dir`) but it isn't reachable at startup **and** a cloud token is configured (`REMARKABLE_TOKEN` or `~/.rmapi`), the server automatically falls back to cloud mode and logs a warning. This means a single configuration works whether or not the tablet is plugged in — plug in for fast local access, unplug to keep working over the cloud. `remarkable_status` reports the effective transport and a `fell_back_to_cloud` flag when this happens.
 
 Pass `--no-cloud-fallback` (or set `REMARKABLE_DISABLE_CLOUD_FALLBACK=1`) to disable this and fail instead when the device is unreachable.
 
