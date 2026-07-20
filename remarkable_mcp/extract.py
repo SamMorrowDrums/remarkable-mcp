@@ -280,25 +280,26 @@ def extract_text_from_rm_file(rm_file_path: Path) -> List[str]:
     try:
         from rmscene import read_blocks
         from rmscene.scene_items import Text
-        from rmscene.scene_tree import SceneTree
+        from rmscene.text import TextDocument
 
         with open(rm_file_path, "rb") as f:
-            tree = SceneTree()
-            for block in read_blocks(f):
-                tree.add_block(block)
+            blocks = list(read_blocks(f))
 
-        text_lines = []
+        # The page's typed text lives on the RootTextBlock, not among the
+        # root group's children (those are the ink layers), so scan the raw
+        # blocks the same way the renderer does.
+        text_item = next(
+            (b.value for b in blocks if isinstance(getattr(b, "value", None), Text)),
+            None,
+        )
+        if text_item is None:
+            return []
 
-        # Extract text from the scene tree
-        for item in tree.root.children.values():
-            if hasattr(item, "value") and isinstance(item.value, Text):
-                text_obj = item.value
-                if hasattr(text_obj, "items"):
-                    for text_item in text_obj.items:
-                        if hasattr(text_item, "value") and text_item.value:
-                            text_lines.append(str(text_item.value))
-
-        return text_lines
+        # TextDocument resolves the CRDT character sequence into ordered,
+        # styled paragraphs; iterating Text.items directly yields CRDT ids
+        # and fragments in insertion order, not readable lines.
+        doc = TextDocument.from_scene_item(text_item)
+        return [line for line in (str(para).strip() for para in doc.contents) if line]
 
     except ImportError:
         return []  # rmscene not available
@@ -505,8 +506,75 @@ def _v6_paper_size(blocks: list) -> Tuple[float, float]:
     return float(REMARKABLE_WIDTH), float(REMARKABLE_HEIGHT)
 
 
-def _v6_paths_from_blocks(blocks: list) -> Tuple[list, list]:
-    """Build SVG ``<path>`` strings + a flat coordinate list from v6 blocks."""
+def _v6_group_offsets(blocks: list, anchor_pos: dict) -> dict:
+    """Map group node ``CrdtId``s to cumulative ``(dx, dy)`` anchor offsets.
+
+    In the v6 format a group of strokes can be anchored to a typed-text
+    character (``Group.anchor_id``): its ink is stored relative to that anchor
+    and the device translates it to the anchored line's Y as text reflows.
+    ``anchor_pos`` comes from :func:`_v6_text_elements_with_bounds`. Offsets
+    accumulate up the parent chain so groups nested under an anchored group
+    inherit its translation. Returns ``{}`` when there is nothing to anchor.
+    """
+    if not anchor_pos:
+        return {}
+
+    parents: dict = {}
+    own: dict = {}
+    for block in blocks:
+        # SceneTreeBlock links a node to its parent.
+        tree_id = getattr(block, "tree_id", None)
+        if tree_id is not None and hasattr(block, "parent_id"):
+            parents[tree_id] = block.parent_id
+        # TreeNodeBlock carries the group's anchor attributes.
+        group = getattr(block, "group", None)
+        if group is None:
+            continue
+        anchor_id = getattr(group, "anchor_id", None)
+        if anchor_id is None:
+            continue
+        anchor_key = getattr(anchor_id, "value", None)
+        if anchor_key not in anchor_pos:
+            continue
+        origin_x = getattr(group, "anchor_origin_x", None)
+        dx = float(origin_x.value) if origin_x is not None else 0.0
+        own[group.node_id] = (dx, float(anchor_pos[anchor_key]))
+
+    if not own:
+        return {}
+
+    offsets: dict = {}
+
+    def resolve(node_id) -> Tuple[float, float]:
+        if node_id in offsets:
+            return offsets[node_id]
+        dx = dy = 0.0
+        cur = node_id
+        seen = set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            if cur in own:
+                odx, ody = own[cur]
+                dx += odx
+                dy += ody
+            cur = parents.get(cur)
+        offsets[node_id] = (dx, dy)
+        return offsets[node_id]
+
+    for node_id in set(parents) | set(own):
+        resolve(node_id)
+    return offsets
+
+
+def _v6_paths_from_blocks(blocks: list, anchor_pos: Optional[dict] = None) -> Tuple[list, list]:
+    """Build SVG ``<path>`` strings + a flat coordinate list from v6 blocks.
+
+    ``anchor_pos`` (from :func:`_v6_text_elements_with_bounds`) enables
+    text-anchored ink translation: strokes whose parent group is anchored to a
+    typed-text line are shifted to that line's position, matching where the
+    device draws them. Without it strokes render at their stored coordinates,
+    which for anchored groups is on top of the typed text block.
+    """
     # Integer pen/color values (rmscene exposes ints on blocks).
     HIGHLIGHTER_PENS = {5, 18}  # HIGHLIGHTER_1, HIGHLIGHTER_2
     ERASER_PENS = {6, 8}  # ERASER, ERASER_AREA
@@ -527,6 +595,8 @@ def _v6_paths_from_blocks(blocks: list) -> Tuple[list, list]:
         13: "#FFD700",  # YELLOW_2
     }
 
+    group_offsets = _v6_group_offsets(blocks, anchor_pos) if anchor_pos else {}
+
     paths: list = []
     all_coords: list = []
     for block in blocks:
@@ -535,6 +605,7 @@ def _v6_paths_from_blocks(blocks: list) -> Tuple[list, list]:
         line = block.item.value
         if not hasattr(line, "points") or not line.points:
             continue
+        dx, dy = group_offsets.get(getattr(block, "parent_id", None), (0.0, 0.0))
 
         tool = line.tool if hasattr(line, "tool") else None
         color = line.color if hasattr(line, "color") else 0
@@ -565,9 +636,9 @@ def _v6_paths_from_blocks(blocks: list) -> Tuple[list, list]:
             stroke_width = max(0.5, min(avg_width * 0.8, 5.0))
             opacity = ""
 
-        d = f"M {line.points[0].x:.1f} {line.points[0].y:.1f}"
-        d += "".join(f" L {p.x:.1f} {p.y:.1f}" for p in line.points[1:])
-        all_coords.extend((p.x, p.y) for p in line.points)
+        d = f"M {line.points[0].x + dx:.1f} {line.points[0].y + dy:.1f}"
+        d += "".join(f" L {p.x + dx:.1f} {p.y + dy:.1f}" for p in line.points[1:])
+        all_coords.extend((p.x + dx, p.y + dy) for p in line.points)
 
         paths.append(
             f'<path d="{d}" stroke="{stroke_color}" '
@@ -634,33 +705,46 @@ def _v6_text_svg_elements(blocks: list) -> list:
     return _v6_text_elements_with_bounds(blocks)[0]
 
 
-def _v6_text_elements_with_bounds(blocks: list) -> Tuple[list, list]:
-    """Build SVG ``<text>`` strings plus their bounding coords for typed text.
+# Special anchor CrdtIds the device uses for ink groups pinned to the page
+# itself rather than to a typed character: (0, 281474976710654) anchors at the
+# top of the text block, (0, 281474976710655) below its last line.
+_ANCHOR_TEXT_TOP = (0, 281474976710654)
+_ANCHOR_TEXT_BOTTOM = (0, 281474976710655)
 
-    Returns ``(elements, coords)`` where ``coords`` is a flat list of ``(x, y)``
-    extent points (in the page's stroke/screen units, center-origin X) so a
-    content-cropped render can size its viewBox to include the text. Returns
-    ``([], [])`` when the page has no typed text (the common case for
-    handwritten notebooks) or when rmscene's text helpers are unavailable.
+
+def _v6_text_elements_with_bounds(blocks: list) -> Tuple[list, list, dict]:
+    """Build SVG ``<text>`` strings, bounding coords and anchor map for typed text.
+
+    Returns ``(elements, coords, anchor_pos)``. ``coords`` is a flat list of
+    ``(x, y)`` extent points (in the page's stroke/screen units, center-origin
+    X) so a content-cropped render can size its viewBox to include the text.
+    ``anchor_pos`` maps text-character ``CrdtId``s (plus the special
+    top/bottom-of-text ids) to the page-space Y of the line holding that
+    character: ink groups anchored to a character must be translated by that Y
+    (see :func:`_v6_paths_from_blocks`), which is how the device keeps
+    handwriting positioned relative to text as the typed block reflows.
+    Returns ``([], [], {})`` when the page has no typed text (the common case
+    for handwritten notebooks) or when rmscene's text helpers are unavailable.
     """
     try:
         from rmscene.scene_items import ParagraphStyle, Text
+        from rmscene.tagged_block_common import CrdtId
         from rmscene.text import TextDocument
     except ImportError:
-        return [], []
+        return [], [], {}
 
     text_item = next(
         (b.value for b in blocks if isinstance(getattr(b, "value", None), Text)),
         None,
     )
     if text_item is None:
-        return [], []
+        return [], [], {}
 
     # Blank pages we synthesize carry an empty RootTextBlock; skip them so we
     # neither emit empty <text> nodes nor trigger rmscene's empty-item warning.
     try:
         if not any(isinstance(v, str) and v.strip() for v in text_item.items.values()):
-            return [], []
+            return [], [], {}
     except Exception:
         pass
 
@@ -681,7 +765,7 @@ def _v6_text_elements_with_bounds(blocks: list) -> Tuple[list, list]:
     try:
         doc = TextDocument.from_scene_item(text_item)
     except Exception:
-        return [], []
+        return [], [], {}
 
     pos_x = float(getattr(text_item, "pos_x", 0.0) or 0.0)
     pos_y = float(getattr(text_item, "pos_y", 0.0) or 0.0)
@@ -695,12 +779,25 @@ def _v6_text_elements_with_bounds(blocks: list) -> Tuple[list, list]:
 
     elements: list = []
     coords: list = []
+    anchor_pos: dict = {}
     y_offset = _TEXT_TOP_Y * scale
+    anchor_pos[CrdtId(*_ANCHOR_TEXT_TOP)] = pos_y + y_offset
     for para in doc.contents:
         style = para.style.value if getattr(para, "style", None) is not None else None
         line_height = line_heights.get(style, _TEXT_DEFAULT_LINE_HEIGHT) * scale
         size = font_sizes.get(style, _TEXT_DEFAULT_FONT_SIZE) * scale
         text = str(para).strip()
+        # Every character in this paragraph anchors ink at the paragraph's own
+        # Y (the running offset before this paragraph consumes its lines), the
+        # same reference point the device and the rmc exporter use.
+        para_anchor_y = pos_y + y_offset
+        try:
+            anchor_pos[para.start_id] = para_anchor_y
+            for subpara in para.contents:
+                for char_id in getattr(subpara, "i", []) or []:
+                    anchor_pos[char_id] = para_anchor_y
+        except Exception:
+            pass
         if not text:
             # A blank paragraph still consumes a line (e.g. spacing under a title).
             y_offset += line_height
@@ -725,7 +822,8 @@ def _v6_text_elements_with_bounds(blocks: list) -> Tuple[list, list]:
                 est_width = min(est_width, box_width)
             coords.append((pos_x, baseline - size))
             coords.append((pos_x + est_width, baseline + size * 0.3))
-    return elements, coords
+    anchor_pos[CrdtId(*_ANCHOR_TEXT_BOTTOM)] = pos_y + y_offset
+    return elements, coords, anchor_pos
 
 
 def _render_rm_v6_to_svg(rm_file_path: Path) -> Optional[str]:
@@ -741,8 +839,8 @@ def _render_rm_v6_to_svg(rm_file_path: Path) -> Optional[str]:
     if blocks is None:
         return None
     try:
-        paths, all_coords = _v6_paths_from_blocks(blocks)
-        text_elements, text_coords = _v6_text_elements_with_bounds(blocks)
+        text_elements, text_coords, anchor_pos = _v6_text_elements_with_bounds(blocks)
+        paths, all_coords = _v6_paths_from_blocks(blocks, anchor_pos)
         # Typed text is drawn under strokes (handwriting layers on top), and its
         # extent is folded into the crop so a text-only page still renders.
         return _svg_from_paths(text_elements + paths, all_coords + text_coords)
@@ -924,8 +1022,8 @@ def render_rm_file_full_page_png(
     if blocks is None:
         return None
     try:
-        paths, _ = _v6_paths_from_blocks(blocks)
-        text_elements = _v6_text_svg_elements(blocks)
+        text_elements, _, anchor_pos = _v6_text_elements_with_bounds(blocks)
+        paths, _ = _v6_paths_from_blocks(blocks, anchor_pos)
         paper_w, paper_h = _v6_paper_size(blocks)
     except Exception:
         return None

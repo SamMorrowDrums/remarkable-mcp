@@ -4787,3 +4787,201 @@ class TestGetDocumentFileType:
             assert get_document_file_type(zpath) == ""
         finally:
             zpath.unlink(missing_ok=True)
+
+
+def _make_v6_anchored_rm_bytes():
+    """Build a v6 page with typed text plus a stroke group anchored to a character.
+
+    Returns ``(rm_bytes, anchor_char_id, raw_points)`` where the single stroke's
+    group is anchored to the first character of the SECOND paragraph with
+    ``anchor_origin_x=25.0``, and ``raw_points`` are the stroke's stored
+    coordinates (i.e. pre-translation).
+    """
+    import io
+
+    from rmscene import scene_items as si
+    from rmscene import simple_text_document, write_blocks
+    from rmscene.crdt_sequence import CrdtSequenceItem
+    from rmscene.scene_items import LwwValue
+    from rmscene.scene_stream import SceneLineItemBlock, SceneTreeBlock, TreeNodeBlock
+    from rmscene.tagged_block_common import CrdtId
+    from rmscene.text import TextDocument
+
+    blocks = list(simple_text_document("Title line\nBody line"))
+
+    text = next(b.value for b in blocks if isinstance(getattr(b, "value", None), si.Text))
+    doc = TextDocument.from_scene_item(text)
+    anchor_char = doc.contents[1].contents[0].i[0]
+
+    # Parent the anchored group under an existing drawable group node.
+    layer_node = next(
+        b.group.node_id
+        for b in blocks
+        if getattr(b, "group", None) is not None and b.group.node_id != CrdtId(0, 1)
+    )
+
+    raw_points = [(-50.0, 10.0), (0.0, 20.0), (50.0, 30.0)]
+    line = si.Line(
+        color=si.PenColor.BLACK,
+        tool=si.Pen.BALLPOINT_1,
+        points=[
+            si.Point(x=x, y=y, speed=0, direction=0, width=2, pressure=0) for x, y in raw_points
+        ],
+        thickness_scale=1.0,
+        starting_length=0.0,
+    )
+    anchored_id = CrdtId(0, 900)
+    blocks += [
+        SceneTreeBlock(
+            tree_id=anchored_id,
+            node_id=CrdtId(0, 0),
+            is_update=True,
+            parent_id=layer_node,
+        ),
+        TreeNodeBlock(
+            group=si.Group(
+                node_id=anchored_id,
+                anchor_id=LwwValue(timestamp=CrdtId(0, 30), value=anchor_char),
+                anchor_type=LwwValue(timestamp=CrdtId(0, 31), value=2),
+                anchor_threshold=LwwValue(timestamp=CrdtId(0, 32), value=100.0),
+                anchor_origin_x=LwwValue(timestamp=CrdtId(0, 33), value=25.0),
+            )
+        ),
+        SceneLineItemBlock(
+            parent_id=anchored_id,
+            item=CrdtSequenceItem(
+                item_id=CrdtId(0, 901),
+                left_id=CrdtId(0, 0),
+                right_id=CrdtId(0, 0),
+                deleted_length=0,
+                value=line,
+            ),
+        ),
+    ]
+    buf = io.BytesIO()
+    write_blocks(buf, blocks)
+    return buf.getvalue(), anchor_char, raw_points
+
+
+class TestTextAnchoredInk:
+    """Ink groups anchored to typed text render at the anchored line's position."""
+
+    def _blocks(self, data: bytes):
+        import tempfile
+
+        from remarkable_mcp.extract import _v6_blocks
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as tmp:
+            tmp.write(data)
+            path = Path(tmp.name)
+        try:
+            return _v6_blocks(path)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_text_layout_exposes_anchor_positions(self):
+        from rmscene.tagged_block_common import CrdtId
+
+        from remarkable_mcp.extract import (
+            _ANCHOR_TEXT_BOTTOM,
+            _ANCHOR_TEXT_TOP,
+            _v6_text_elements_with_bounds,
+        )
+
+        data, anchor_char, _ = _make_v6_anchored_rm_bytes()
+        elements, _, anchor_pos = _v6_text_elements_with_bounds(self._blocks(data))
+
+        assert elements, "typed text should render"
+        assert anchor_char in anchor_pos
+        top = anchor_pos[CrdtId(*_ANCHOR_TEXT_TOP)]
+        bottom = anchor_pos[CrdtId(*_ANCHOR_TEXT_BOTTOM)]
+        # The second paragraph's characters anchor strictly between the top of
+        # the text block and below its last line.
+        assert top < anchor_pos[anchor_char] < bottom
+
+    def test_anchored_stroke_is_translated(self):
+        from remarkable_mcp.extract import (
+            _v6_paths_from_blocks,
+            _v6_text_elements_with_bounds,
+        )
+
+        data, anchor_char, raw_points = _make_v6_anchored_rm_bytes()
+        blocks = self._blocks(data)
+        _, _, anchor_pos = _v6_text_elements_with_bounds(blocks)
+
+        unshifted, _ = _v6_paths_from_blocks(blocks)
+        shifted, shifted_coords = _v6_paths_from_blocks(blocks, anchor_pos)
+
+        assert len(unshifted) == len(shifted) == 1
+        expected_dy = anchor_pos[anchor_char]
+        x0, y0 = raw_points[0]
+        assert f"M {x0:.1f} {y0:.1f}" in unshifted[0]
+        assert f"M {x0 + 25.0:.1f} {y0 + expected_dy:.1f}" in shifted[0]
+        # The crop-box coordinates shift with the ink.
+        assert shifted_coords[0] == (x0 + 25.0, y0 + expected_dy)
+
+    def test_full_render_places_ink_below_text(self):
+        import tempfile
+
+        from remarkable_mcp.extract import _render_rm_v6_to_svg
+
+        data, _, raw_points = _make_v6_anchored_rm_bytes()
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as tmp:
+            tmp.write(data)
+            path = Path(tmp.name)
+        try:
+            svg = _render_rm_v6_to_svg(path)
+        finally:
+            path.unlink(missing_ok=True)
+
+        assert svg is not None
+        # The stroke's raw stored Y must not appear: it renders translated.
+        assert f"M {raw_points[0][0]:.1f} {raw_points[0][1]:.1f}" not in svg
+        assert "<text " in svg and "<path " in svg
+
+    def test_unanchored_stroke_unchanged_when_anchor_map_present(self):
+        import tempfile
+
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import (
+            _v6_blocks,
+            _v6_paths_from_blocks,
+            _v6_text_elements_with_bounds,
+        )
+        from remarkable_mcp.strokes import append_strokes
+
+        data = append_strokes(
+            nb.page_rm_bytes("Hello world"),
+            [{"points": [[0.1, 0.1], [0.2, 0.2]]}],
+        )
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as tmp:
+            tmp.write(data)
+            path = Path(tmp.name)
+        try:
+            blocks = _v6_blocks(path)
+        finally:
+            path.unlink(missing_ok=True)
+
+        _, _, anchor_pos = _v6_text_elements_with_bounds(blocks)
+        assert anchor_pos, "text page should produce an anchor map"
+        plain, _ = _v6_paths_from_blocks(blocks)
+        with_map, _ = _v6_paths_from_blocks(blocks, anchor_pos)
+        # A stroke on the plain drawable layer has no anchored ancestor: the
+        # anchor map must not move it.
+        assert plain == with_map
+
+
+class TestTypedTextExtraction:
+    def test_extract_text_from_rm_file_reads_typed_paragraphs(self):
+        import tempfile
+
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp.extract import extract_text_from_rm_file
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as tmp:
+            tmp.write(nb.page_rm_bytes("Hello world\nSecond line"))
+            path = Path(tmp.name)
+        try:
+            assert extract_text_from_rm_file(path) == ["Hello world", "Second line"]
+        finally:
+            path.unlink(missing_ok=True)
