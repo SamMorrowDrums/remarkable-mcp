@@ -22,6 +22,18 @@ Whether you're researching, writing, or developing ideas, remarkable-mcp lets yo
 
 ## Quick Install
 
+> **Prerequisite — `uv`:** every install command below runs the server with `uvx`, which ships with [uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+# MacOS
+```brew install uv``` 
+
+# Windows
+```winget install astral-sh.uv````
+
+# Stand-alone Installer
+[Stand-alone Installer](https://docs.astral.sh/uv/getting-started/installation/)
+
+
 ### 🔌 USB Web Interface (Recommended)
 
 Connect via USB and enable the web interface in your tablet's Storage Settings.
@@ -117,15 +129,32 @@ Go to [my.remarkable.com/device/desktop/connect](https://my.remarkable.com/devic
 #### 2. Convert to Token
 
 ```bash
-uvx remarkable-mcp --register YOUR_CODE
+uvx remarkable-mcp --register YOUR_ONE_TIME_TOKEN
 ```
+
+The token is saved to `~/.rmapi`, and the server finds it there automatically — the minimal config in the next step needs no token entry. Set the environment variable `REMARKABLE_TOKEN` only when the server runs on a machine without that file (one that never ran `--register`).
 
 #### 3. Install
 
 [![Install Cloud Mode in VS Code](https://img.shields.io/badge/VS_Code-Install_Cloud_Mode-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22token%22%2C%22description%22%3A%22reMarkable%20API%20token%22%2C%22password%22%3Atrue%7D%2C%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%5D%2C%22env%22%3A%7B%22REMARKABLE_TOKEN%22%3A%22%24%7Binput%3Atoken%7D%22%2C%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D)
 [![Install Cloud Mode in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Cloud_Mode-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22token%22%2C%22description%22%3A%22reMarkable%20API%20token%22%2C%22password%22%3Atrue%7D%2C%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%5D%2C%22env%22%3A%7B%22REMARKABLE_TOKEN%22%3A%22%24%7Binput%3Atoken%7D%22%2C%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D&quality=insiders)
 
-Or configure manually in `.vscode/mcp.json`:
+Or configure manually. Minimal config — works in **any MCP client** (Claude Desktop, Kiro, Cursor, etc.), token read from `~/.rmapi`:
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp"]
+    }
+  }
+}
+```
+
+> Adjust the outer key to your client's schema (`servers` in VS Code's `.vscode/mcp.json`, `mcpServers` in Claude Desktop and most other clients).
+
+To store the token in the config instead, set it in `env`. The example below uses VS Code's `inputs` prompt syntax; in any other client, replace the `${input:...}` placeholders with the actual values:
 
 ```json
 {
