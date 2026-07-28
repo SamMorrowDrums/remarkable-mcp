@@ -159,11 +159,16 @@ class SSHClient:
             ssh_args = ["sshpass", "-p", self.password] + ssh_args
 
         try:
+            # stdin must be detached: without it, ssh inherits the MCP server's
+            # stdin (the live JSON-RPC pipe). On Windows (msys/Git ssh.exe) the
+            # child blocks on that pipe and never exits, so every SSH call hits
+            # the timeout even though the remote command finished in <2s.
             result = subprocess.run(
                 ssh_args,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                stdin=subprocess.DEVNULL,
             )
             if result.returncode != 0:
                 raise RuntimeError(f"SSH command failed: {result.stderr}")
@@ -207,10 +212,13 @@ class SSHClient:
             ssh_args = ["sshpass", "-p", self.password] + ssh_args
 
         try:
+            # See _ssh_command: detach stdin so ssh cannot block on the MCP
+            # server's JSON-RPC pipe (hangs on Windows msys/Git ssh.exe).
             result = subprocess.run(
                 ssh_args,
                 capture_output=True,
                 timeout=timeout,
+                stdin=subprocess.DEVNULL,
             )
             if result.returncode != 0:
                 raise RuntimeError(f"SSH cat failed: {result.stderr.decode()}")
