@@ -1,0 +1,32 @@
+# Caddy reverse proxy for a self-hosted remarkable-mcp.
+#
+# Caddy obtains and renews the TLS certificate automatically, so there is no
+# certbot step. Replace the domain with your own, then:
+#
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+#
+# The MCP service itself listens only on 127.0.0.1:8080 — this is the single
+# door to it from the internet.
+
+rm.example.org {
+	# The MCP endpoint and every OAuth route (/authorize, /token, /register,
+	# /login, /.well-known/*) are served by the same backend.
+	reverse_proxy 127.0.0.1:8080
+
+	encode gzip
+
+	header {
+		# The login form and OAuth pages are the only HTML served here.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/remarkable-mcp.log
+		format json
+	}
+}

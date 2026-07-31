@@ -1,0 +1,54 @@
+# systemd unit for a self-hosted remarkable-mcp over HTTP.
+#
+# Install:
+#   sudo cp deploy/remarkable-mcp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now remarkable-mcp
+#
+# Secrets live in /etc/remarkable-mcp.env (chmod 600, root-owned), NOT here:
+# this file is world-readable, that one is not.
+
+[Unit]
+Description=reMarkable MCP server (HTTP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=remarkable
+Group=remarkable
+WorkingDirectory=/opt/remarkable-mcp
+
+# RMMCP_PUBLIC_URL, RMMCP_PASSPHRASE and (optionally) REMARKABLE_TOKEN.
+EnvironmentFile=/etc/remarkable-mcp.env
+
+ExecStart=/usr/local/bin/uv run --directory /opt/remarkable-mcp python deploy/http_server.py
+
+Restart=always
+RestartSec=5
+
+# Hardening. The service needs outbound HTTPS to the reMarkable cloud and write
+# access to its own state directory — nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+# State: OAuth records (~/.remarkable-mcp), the reMarkable token and blob cache.
+ReadWritePaths=/var/lib/remarkable-mcp
+Environment=HOME=/var/lib/remarkable-mcp
+Environment=RMMCP_STATE_DIR=/var/lib/remarkable-mcp/auth
+Environment=REMARKABLE_CACHE_DIR=/var/lib/remarkable-mcp/cache
+Environment=RMMCP_HOST=127.0.0.1
+Environment=RMMCP_PORT=8080
+
+[Install]
+WantedBy=multi-user.target
