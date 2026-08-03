@@ -253,6 +253,8 @@ If you select a device transport (`--usb`, `--ssh`, or `--local-dir`) but it isn
 
 Pass `--no-cloud-fallback` (or set `REMARKABLE_DISABLE_CLOUD_FALLBACK=1`) to disable this and fail instead when the device is unreachable.
 
+> **Troubleshooting:** the transport is resolved once and cached for the MCP server's lifetime. If the server fell back to cloud (for example, the desktop app only started syncing after the server launched), **restart the MCP server** to pick up the local directory again — `remarkable_status` shows the active transport and a `fell_back_to_cloud` flag so you can tell when this has happened.
+
 **📖 Detailed Setup Guides:**
 - [USB Web Interface Setup](docs/usb-web-setup.md) — **recommended** — simple setup, full feature support
 - [SSH Setup Guide](docs/ssh-setup.md) — for advanced users who need filesystem access
