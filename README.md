@@ -1,5 +1,7 @@
 # reMarkable MCP Server
 
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.SamMorrowDrums%2Fremarkable.svg)](https://mcptoplist.com/server/io.github.SamMorrowDrums%2Fremarkable)
+
 Unlock the full potential of your reMarkable tablet as a **second brain** for AI assistants. This MCP server lets Claude, VS Code Copilot, and other AI tools read, search, and traverse your entire reMarkable library — including handwritten notes via OCR.
 
 <!-- mcp-name: io.github.SamMorrowDrums/remarkable -->
