@@ -152,6 +152,7 @@ def _upload_file_bytes(ssh_client: SSHClient, local_path: str, remote_path: str)
 
     ssh_args = [
         "ssh",
+        *ssh_client._auth_ssh_options(),
         "-o",
         "ConnectTimeout=5",
         "-o",
@@ -162,10 +163,7 @@ def _upload_file_bytes(ssh_client: SSHClient, local_path: str, remote_path: str)
         f"cat > '{remote_path}'",
     ]
 
-    if not ssh_client.password:
-        ssh_args.insert(1, "-o")
-        ssh_args.insert(2, "BatchMode=yes")
-    else:
+    if ssh_client.password:
         ssh_args = ["sshpass", "-p", ssh_client.password] + ssh_args
 
     with open(local_path, "rb") as f:
