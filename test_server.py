@@ -3613,6 +3613,59 @@ class TestSSHKeyAuth:
         assert "IdentitiesOnly=yes" in argv
         assert "BatchMode=yes" in argv
 
+    def test_upload_file_bytes_pins_identity(self, monkeypatch, tmp_path):
+        import subprocess as subprocess_mod
+
+        from remarkable_mcp.ssh import SSHClient
+        from remarkable_mcp.write_tools import _upload_file_bytes
+
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            return Mock(returncode=0, stdout=b"", stderr=b"")
+
+        monkeypatch.setattr(subprocess_mod, "run", fake_run)
+        local = tmp_path / "page.rm"
+        local.write_bytes(b"data")
+
+        client = SSHClient(key_path="/keys/rm_ed25519")
+        _upload_file_bytes(client, str(local), "/home/root/remote.rm")
+
+        argv = captured["args"]
+        assert "sshpass" not in argv
+        assert "-i" in argv
+        assert "/keys/rm_ed25519" in argv
+        assert "IdentitiesOnly=yes" in argv
+        assert "BatchMode=yes" in argv
+        # Identity must be supplied before the destination/command.
+        assert argv.index("/keys/rm_ed25519") < argv.index("cat > '/home/root/remote.rm'")
+
+    def test_upload_file_bytes_password_uses_sshpass(self, monkeypatch, tmp_path):
+        import subprocess as subprocess_mod
+
+        from remarkable_mcp.ssh import SSHClient
+        from remarkable_mcp.write_tools import _upload_file_bytes
+
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            return Mock(returncode=0, stdout=b"", stderr=b"")
+
+        monkeypatch.setattr(subprocess_mod, "run", fake_run)
+        local = tmp_path / "page.rm"
+        local.write_bytes(b"data")
+
+        client = SSHClient(password="secret")
+        _upload_file_bytes(client, str(local), "/home/root/remote.rm")
+
+        argv = captured["args"]
+        assert argv[:3] == ["sshpass", "-p", "secret"]
+        # Password auth must not force BatchMode (it would block the password).
+        assert "BatchMode=yes" not in argv
+        assert "IdentitiesOnly=yes" not in argv
+
     def test_create_ssh_client_reads_key_env(self, monkeypatch):
         from remarkable_mcp.ssh import create_ssh_client
 
