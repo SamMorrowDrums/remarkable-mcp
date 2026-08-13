@@ -29,6 +29,7 @@ dependencies = [
     "pymupdf>=1.26.7",
     "ebooklib>=0.18",
     "beautifulsoup4>=4.12.0",
+    "markdown-it-py>=4.0.0",
 ]
 
 [project.optional-dependencies]

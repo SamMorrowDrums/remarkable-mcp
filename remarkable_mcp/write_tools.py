@@ -325,7 +325,22 @@ def _write_remote_bytes(ssh_client: SSHClient, remote_path: str, data: bytes) ->
         os.unlink(tmp_path)
 
 
-def _upload_via_usb_web(local_path: str) -> dict:
+def _upload_filename(local_path: str, document_name: Optional[str] = None) -> str:
+    """Return the multipart filename used by USB web uploads."""
+    local_filename = os.path.basename(local_path)
+    if not document_name or not document_name.strip():
+        return local_filename
+
+    requested = os.path.basename(document_name.strip().replace("\\", "/"))
+    if not requested:
+        return local_filename
+    extension = os.path.splitext(local_filename)[1]
+    if extension and not requested.lower().endswith(extension.lower()):
+        requested += extension
+    return requested
+
+
+def _upload_via_usb_web(local_path: str, document_name: Optional[str] = None) -> dict:
     """Upload a file to the tablet via USB web interface POST /upload.
 
     Returns dict with upload result info.
@@ -338,7 +353,7 @@ def _upload_via_usb_web(local_path: str) -> dict:
     url = f"{host}/upload"
 
     with open(local_path, "rb") as f:
-        filename = os.path.basename(local_path)
+        filename = _upload_filename(local_path, document_name)
         files = {"file": (filename, f)}
         try:
             response = requests.post(url, files=files, timeout=120)
@@ -1018,8 +1033,8 @@ def register_write_tools():
         are supported. Works in all three transports:
         - Cloud: uploaded via the sync protocol; supports parent_folder + document_name
         - SSH: transferred over SSH, metadata created; supports parent_folder + document_name
-        - USB web: uploaded via POST /upload; lands at the root (the firmware's
-          upload endpoint has no folder or rename field)
+        - USB web: uploaded via POST /upload; lands at the root (the multipart
+          filename carries document_name because the endpoint has no rename field)
 
         Requires write mode (the default; disabled with --read-only).
         </instructions>
@@ -1028,7 +1043,7 @@ def register_write_tools():
         - parent_folder: Destination folder path on tablet (default: root "/").
           Honored in cloud and SSH modes; ignored by the USB web interface.
         - document_name: Display name on tablet (default: filename without
-          extension). Honored in cloud and SSH modes; ignored by the USB web interface.
+          extension). Honored in every mode; USB web uses it as the uploaded filename.
         - defer_restart: SSH only. When True, skip the xochitl restart that
           normally makes the upload visible. Use this for every upload in a
           batch, then call remarkable_refresh() ONCE at the end. Each restart
@@ -1104,7 +1119,7 @@ def register_write_tools():
 
                 # USB web mode: simple HTTP upload
                 if _is_usb_web_mode():
-                    _upload_via_usb_web(file_path)
+                    _upload_via_usb_web(file_path, document_name)
 
                     name = document_name or os.path.splitext(os.path.basename(file_path))[0]
 
@@ -1213,6 +1228,76 @@ def register_write_tools():
                 )
 
         return await asyncio.to_thread(_impl)
+
+    @mcp.tool(annotations=UPLOAD_ANNOTATIONS)
+    async def remarkable_markdown_to_pdf(
+        markdown: str,
+        document_name: str = "Markdown",
+        parent_folder: str = "/",
+        defer_restart: bool = False,
+    ) -> str:
+        """
+        <usecase>Render Markdown text as a PDF and upload it to the reMarkable tablet.</usecase>
+        <instructions>
+        Use this when the user wants notes, reports, summaries, or other Markdown
+        content written back to the tablet without first creating a local file.
+        Headings, lists, tables, links, blockquotes, and code blocks are rendered
+        into a paginated A4 PDF. Raw HTML is escaped and image assets are omitted
+        so rendering never reads local files or fetches remote content.
+
+        Works in all three transports:
+        - Cloud: sync upload with parent_folder and document_name
+        - SSH: filesystem upload with parent_folder and document_name
+        - USB web: root upload whose multipart filename is document_name + ".pdf"
+
+        Requires write mode (the default; disabled with --read-only).
+        </instructions>
+        <parameters>
+        - markdown: Markdown source text. Must not be empty.
+        - document_name: Display name on the tablet (default: "Markdown").
+        - parent_folder: Destination folder (default: root "/"). USB web always
+          uploads to root because its firmware has no folder parameter.
+        - defer_restart: SSH only. When True, skip the xochitl restart and call
+          remarkable_refresh() once after the batch. Forwarded exactly like
+          remarkable_upload; ignored in cloud and USB web modes.
+        </parameters>
+        <examples>
+        - remarkable_markdown_to_pdf("# Meeting Notes\\n\\n- Follow up with Sam")
+        - remarkable_markdown_to_pdf(
+            "# Q4 Report\\n\\nRevenue increased **20%**.",
+            document_name="Q4 Report",
+            parent_folder="/Reports",
+          )
+        - remarkable_markdown_to_pdf(
+            "# Batch item", document_name="Item 1", defer_restart=True
+          )
+          remarkable_refresh()
+        </examples>
+        """
+        from remarkable_mcp.markdown_pdf import render_markdown_pdf
+
+        try:
+            pdf_bytes = await asyncio.to_thread(render_markdown_pdf, markdown)
+        except Exception as e:
+            return make_error(
+                error_type="render_failed",
+                message=f"Failed to render Markdown as PDF: {e}",
+                suggestion="Provide non-empty Markdown text and try again.",
+            )
+
+        import tempfile
+
+        filename = _upload_filename("document.pdf", document_name)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = os.path.join(temp_dir, filename)
+            with open(pdf_path, "wb") as pdf_file:
+                pdf_file.write(pdf_bytes)
+            return await remarkable_upload(
+                pdf_path,
+                parent_folder=parent_folder,
+                document_name=document_name,
+                defer_restart=defer_restart,
+            )
 
     if _is_ssh_mode() or _is_cloud_mode():
 

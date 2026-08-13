@@ -14,9 +14,34 @@ Usage:
 """
 
 import argparse
+import ipaddress
 import json
 import os
 import sys
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return whether an HTTP bind host is limited to this machine."""
+    normalized = host.strip().strip("[]")
+    if normalized.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _warn_for_http_binding(host: str) -> None:
+    """Warn prominently when unauthenticated HTTP is exposed off-host."""
+    if not _is_loopback_host(host):
+        print(
+            "WARNING: remarkable-mcp Streamable HTTP has no authentication and "
+            f"is binding to non-loopback address {host!r}. Any network client "
+            "that can reach this port may invoke enabled tools, including writes. "
+            "Use 127.0.0.1 with a local OpenWebUI instance or put an authenticated "
+            "reverse proxy in front of the server.",
+            file=sys.stderr,
+        )
 
 
 def main():
@@ -34,6 +59,9 @@ Examples:
 
   # Run as a read-only server (no upload/mkdir/move/rename/delete)
   uvx remarkable-mcp --read-only
+
+  # Run Streamable HTTP for a local OpenWebUI instance
+  uvx remarkable-mcp --http
 
   # Run with token from environment
   REMARKABLE_TOKEN="your-token" uvx remarkable-mcp
@@ -66,6 +94,11 @@ SSH Environment Variables:
 Security Note:
   For better security, set up SSH key authentication instead of using
   a password. See: https://github.com/SamMorrowDrums/remarkable-mcp/blob/main/docs/ssh-setup.md
+
+Streamable HTTP Security:
+  HTTP has no built-in authentication and binds to 127.0.0.1 by default. Keep
+  it on loopback for a local OpenWebUI instance. Non-loopback bindings expose
+  every enabled MCP tool and print a prominent warning at startup.
 """,
     )
     parser.add_argument(
@@ -120,7 +153,30 @@ Security Note:
             "configuration works with or without the device connected."
         ),
     )
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help="Serve MCP over Streamable HTTP for a local OpenWebUI instance",
+    )
+    parser.add_argument(
+        "--host",
+        help=(
+            "Streamable HTTP bind address (default: REMARKABLE_MCP_HOST or "
+            "127.0.0.1). Non-loopback addresses are unauthenticated and unsafe "
+            "unless protected by a reverse proxy."
+        ),
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        help="Streamable HTTP port (default: REMARKABLE_MCP_PORT or 8000)",
+    )
     args = parser.parse_args()
+
+    if not args.http and (args.host is not None or args.port is not None):
+        parser.error("--host and --port require --http")
+    if args.port is not None and not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
 
     if args.register:
         # Registration mode - convert one-time code to token
@@ -153,35 +209,39 @@ Security Note:
         except Exception as e:
             print(f"❌ Registration failed: {e}", file=sys.stderr)
             sys.exit(1)
-    elif args.usb:
-        # USB web mode - set environment variable and run server
-        os.environ["REMARKABLE_USE_USB_WEB"] = "1"
-        if args.read_only:
-            os.environ["REMARKABLE_READ_ONLY"] = "1"
-        if args.no_cloud_fallback:
-            os.environ["REMARKABLE_DISABLE_CLOUD_FALLBACK"] = "1"
-        from remarkable_mcp.server import run
-
-        run()
-    elif args.ssh:
-        # SSH mode - set environment variable and run server
-        os.environ["REMARKABLE_USE_SSH"] = "1"
-        if args.ssh_key:
-            os.environ["REMARKABLE_SSH_KEY"] = args.ssh_key
-        if args.read_only:
-            os.environ["REMARKABLE_READ_ONLY"] = "1"
-        if args.no_cloud_fallback:
-            os.environ["REMARKABLE_DISABLE_CLOUD_FALLBACK"] = "1"
-        from remarkable_mcp.server import run
-
-        run()
     else:
-        # Cloud mode (default) - write-capable via the sync protocol
+        if args.usb:
+            # USB web mode - set environment variable and run server
+            os.environ["REMARKABLE_USE_USB_WEB"] = "1"
+        elif args.ssh:
+            # SSH mode - set environment variable and run server
+            os.environ["REMARKABLE_USE_SSH"] = "1"
+            if args.ssh_key:
+                os.environ["REMARKABLE_SSH_KEY"] = args.ssh_key
+
         if args.read_only:
             os.environ["REMARKABLE_READ_ONLY"] = "1"
+        if args.no_cloud_fallback and (args.usb or args.ssh):
+            os.environ["REMARKABLE_DISABLE_CLOUD_FALLBACK"] = "1"
+
         from remarkable_mcp.server import run
 
-        run()
+        if args.http:
+            host = args.host or os.environ.get("REMARKABLE_MCP_HOST", "127.0.0.1")
+            try:
+                port = (
+                    args.port
+                    if args.port is not None
+                    else int(os.environ.get("REMARKABLE_MCP_PORT", "8000"))
+                )
+            except ValueError:
+                parser.error("REMARKABLE_MCP_PORT must be an integer")
+            if not 1 <= port <= 65535:
+                parser.error("REMARKABLE_MCP_PORT must be between 1 and 65535")
+            _warn_for_http_binding(host)
+            run(transport="streamable-http", host=host, port=port)
+        else:
+            run()
 
 
 if __name__ == "__main__":
