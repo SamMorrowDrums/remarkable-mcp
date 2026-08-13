@@ -22,6 +22,38 @@ Whether you're researching, writing, or developing ideas, remarkable-mcp lets yo
 
 ## Quick Install
 
+### Prerequisite: install `uv`
+
+The commands below use `uvx`, which is included with [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
+
+#### macOS and Linux
+
+Use the [official standalone installer](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer):
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Or install with Homebrew:
+
+```bash
+brew install uv
+```
+
+#### Windows
+
+Use the [official standalone installer](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer) from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Or install with WinGet:
+
+```powershell
+winget install --id=astral-sh.uv -e
+```
+
 ### 🔌 USB Web Interface (Recommended)
 
 Connect via USB and enable the web interface in your tablet's Storage Settings.
@@ -120,12 +152,29 @@ Go to [my.remarkable.com/device/desktop/connect](https://my.remarkable.com/devic
 uvx remarkable-mcp --register YOUR_CODE
 ```
 
+Registration saves the token to `~/.rmapi`. When your MCP client runs the server as the same user on the same machine, remarkable-mcp reads that file automatically, so you do not need to put a token in the client configuration. Set `REMARKABLE_TOKEN` only when `~/.rmapi` is unavailable, such as when the server runs under another user or on another machine.
+
 #### 3. Install
 
 [![Install Cloud Mode in VS Code](https://img.shields.io/badge/VS_Code-Install_Cloud_Mode-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22token%22%2C%22description%22%3A%22reMarkable%20API%20token%22%2C%22password%22%3Atrue%7D%2C%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%5D%2C%22env%22%3A%7B%22REMARKABLE_TOKEN%22%3A%22%24%7Binput%3Atoken%7D%22%2C%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D)
 [![Install Cloud Mode in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Cloud_Mode-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22token%22%2C%22description%22%3A%22reMarkable%20API%20token%22%2C%22password%22%3Atrue%7D%2C%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%5D%2C%22env%22%3A%7B%22REMARKABLE_TOKEN%22%3A%22%24%7Binput%3Atoken%7D%22%2C%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D&quality=insiders)
 
-Or configure manually in `.vscode/mcp.json`:
+##### Minimal client-neutral server definition
+
+Add this server definition using the MCP configuration UI or wrapper required by your client:
+
+```json
+{
+  "command": "uvx",
+  "args": ["remarkable-mcp"]
+}
+```
+
+No `env` entry is needed when the server can read the token from `~/.rmapi`.
+
+##### VS Code
+
+VS Code's `.vscode/mcp.json` uses a top-level `servers` object. It also supports a top-level `inputs` array and `${input:...}` placeholders for values that VS Code should prompt for:
 
 ```json
 {
@@ -155,6 +204,23 @@ Or configure manually in `.vscode/mcp.json`:
   }
 }
 ```
+
+##### Claude Desktop and other clients
+
+Claude Desktop and many other MCP clients use a top-level `mcpServers` object and literal values in `env`; they do not use VS Code's `inputs` array. With the token available in `~/.rmapi`, the minimal configuration is:
+
+```json
+{
+  "mcpServers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp"]
+    }
+  }
+}
+```
+
+If the token file is unavailable, add `"env": {"REMARKABLE_TOKEN": "your-token"}` to the `remarkable` server entry. Consult your client's documentation if it uses a different outer key or secret-storage mechanism.
 
 </details>
 
