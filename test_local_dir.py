@@ -204,6 +204,10 @@ class TestDirectoryResolution:
         client = create_local_dir_client(str(xochitl_dir))
         assert client.base_dir == xochitl_dir
 
+    def test_invalid_explicit_arg_raises(self, tmp_path):
+        with pytest.raises(RuntimeError, match="not usable"):
+            create_local_dir_client(str(tmp_path / "missing"))
+
     def test_env_path(self, xochitl_dir, monkeypatch):
         monkeypatch.setenv("REMARKABLE_LOCAL_DIR", str(xochitl_dir))
         client = create_local_dir_client()
@@ -281,6 +285,27 @@ class TestTransportSelection:
         with pytest.raises(RuntimeError):
             api.get_rmapi()
 
+    def test_invalid_explicit_dir_no_fallback_raises(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("REMARKABLE_LOCAL_DIR", str(tmp_path / "missing"))
+        monkeypatch.setattr(api, "REMARKABLE_USE_LOCAL_DIR", True)
+        monkeypatch.setattr(api, "REMARKABLE_DISABLE_CLOUD_FALLBACK", True)
+        with pytest.raises(RuntimeError, match="not usable"):
+            api.get_rmapi()
+
+    def test_cloud_fallback_preserves_local_read_only_mode(self, monkeypatch, tmp_path):
+        from remarkable_mcp import write_tools
+
+        monkeypatch.setenv("REMARKABLE_LOCAL_DIR", str(tmp_path / "missing"))
+        monkeypatch.setattr(api, "REMARKABLE_USE_LOCAL_DIR", True)
+        monkeypatch.setattr(api, "REMARKABLE_DISABLE_CLOUD_FALLBACK", False)
+        monkeypatch.setattr(api, "_is_cloud_token_available", lambda: True)
+        monkeypatch.setattr(api, "_get_cloud_client", lambda: object())
+
+        api.get_rmapi()
+
+        assert api.get_active_transport() == "cloud"
+        assert write_tools.write_enabled() is False
+
 
 # =============================================================================
 # Read-only guarantee
@@ -309,3 +334,21 @@ class TestReadOnlyGuarantee:
         monkeypatch.delenv("REMARKABLE_LOCAL_DIR", raising=False)
         monkeypatch.delenv("REMARKABLE_READ_ONLY", raising=False)
         assert write_tools.write_enabled() is True
+
+    @pytest.mark.asyncio
+    async def test_status_explains_local_dir_read_only(self, client, monkeypatch):
+        from remarkable_mcp import tools
+
+        monkeypatch.setenv("REMARKABLE_USE_LOCAL_DIR", "1")
+        monkeypatch.delenv("REMARKABLE_READ_ONLY", raising=False)
+        monkeypatch.setattr(api, "REMARKABLE_USE_LOCAL_DIR", True)
+        monkeypatch.setattr(api, "REMARKABLE_USE_USB_WEB", False)
+        monkeypatch.setattr(api, "REMARKABLE_USE_SSH", False)
+        monkeypatch.setattr(tools, "get_rmapi", lambda: client)
+
+        result = await tools.remarkable_status()
+        data = json.loads(result)
+
+        assert data["transport"] == "local-dir"
+        assert data["write_enabled"] is False
+        assert "strictly read-only" in data["_hint"]

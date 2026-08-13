@@ -1287,9 +1287,10 @@ async def remarkable_status() -> str:
     """
     <usecase>Check connection status, active transport, and write capabilities.</usecase>
     <instructions>
-    Returns authentication status, the active transport (cloud, ssh, or usb-web),
-    the document count, and a capability matrix describing what each transport can
-    do. Use this to verify your connection, choose a transport, or troubleshoot.
+    Returns authentication status, the active transport (cloud, local-dir, ssh, or
+    usb-web), the document count, and a capability matrix describing what each
+    transport can do. Use this to verify your connection, choose a transport, or
+    troubleshoot.
 
     Capability notes:
     - Cloud (default): full read/render/upload/mkdir/move/rename/delete — no device
@@ -1298,6 +1299,8 @@ async def remarkable_status() -> str:
     - USB web: read, render, and upload (to root) only — the tablet's USB web
       interface firmware exposes no folder/move/rename/delete endpoints. For full
       write parity over a USB cable, use SSH mode pointed at the USB IP.
+    - Local directory: fully offline read/render access to the desktop app's sync
+      cache. Strictly read-only to avoid corrupting app-managed state.
     Write tools (upload/mkdir/move/rename/delete) are enabled by default; run
     with --read-only (or REMARKABLE_READ_ONLY=1) to expose a read-only server.
     </instructions>
@@ -1398,7 +1401,7 @@ async def remarkable_status() -> str:
         fell_back = transport != selected_transport
         if fell_back:
             connection_info = (
-                f"cloud (fell back from {selected_transport}: device unreachable, "
+                f"cloud (fell back from {selected_transport}: transport unavailable, "
                 "cloud token configured)"
             )
 
@@ -1444,7 +1447,7 @@ async def remarkable_status() -> str:
         hint_parts = [f"Connected successfully via {transport}. Found {doc_count} documents."]
         if fell_back:
             hint_parts.append(
-                f"Note: {selected_transport} was selected but not reachable, so it "
+                f"Note: {selected_transport} was selected but unavailable, so it "
                 "fell back to cloud (a cloud token is configured). Set "
                 "REMARKABLE_DISABLE_CLOUD_FALLBACK=1 to disable this."
             )
@@ -1460,6 +1463,11 @@ async def remarkable_status() -> str:
                 hint_parts.append(
                     "Write is enabled: upload, mkdir, move, rename, and delete are available."
                 )
+        elif selected_transport == "local-dir":
+            hint_parts.append(
+                "Write tools are disabled because the local-directory transport "
+                "is strictly read-only."
+            )
         else:
             hint_parts.append(
                 "Read-only mode is active (--read-only / REMARKABLE_READ_ONLY=1). "

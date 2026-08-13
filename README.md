@@ -144,7 +144,7 @@ Or point at any xochitl-style directory (e.g. a tablet backup):
 **Notes:**
 - Content freshness depends on the desktop app syncing — keep it running and signed in
 - This mode is read-only by design: the folder is the desktop app's private sync cache, and writing to it directly would bypass sync and could corrupt the app's state
-- If the directory can't be found and a cloud token is configured, the server falls back to cloud mode (same behaviour as USB/SSH)
+- If the directory can't be found and a cloud token is configured, the server falls back to cloud mode for read access (the server remains read-only because it was launched in local-directory mode)
 
 </details>
 
@@ -229,7 +229,7 @@ AI assistants use the tools to read documents, search content, and more:
 
 ## Connection Modes
 
-All three modes share the same read, render, and upload tools. **Cloud and SSH additionally support full library management** — create folders, move, rename, and delete (all enabled by default) — so capability is near-identical and you can genuinely pick whichever matches how your tablet is connected:
+All four modes support reading and rendering. **Cloud and SSH support full library management**, USB web supports upload-to-root, and local-directory mode is strictly read-only:
 
 - **💻 Local Directory** — *device-free AND offline.* Reads the official desktop app's sync folder straight from disk — no cable, no cloud round-trip, no subscription beyond what the app itself needs, and the tablet can be off. Read/render only (the folder is the app's private sync cache, so writes are disabled by design). Best when the desktop app is already part of your workflow.
 - **☁️ Cloud** — *device-free, works from anywhere.* Reads your library straight from reMarkable's cloud over Wi‑Fi with a Connect subscription — no cable, no developer mode. Full read/render plus full write (upload, create folder, move, rename, delete → trash). Parallel fetching and an on-disk blob cache make it fast after the first sync. Best for remote/headless setups or when you don't want to plug in.
@@ -249,7 +249,7 @@ All three modes share the same read, render, and upload tools. **Cloud and SSH a
 
 ### Automatic cloud fallback
 
-If you select a device transport (`--usb`, `--ssh`, or `--local-dir`) but it isn't reachable at startup **and** a cloud token is configured (`REMARKABLE_TOKEN` or `~/.rmapi`), the server automatically falls back to cloud mode and logs a warning. This means a single configuration works whether or not the tablet is plugged in — plug in for fast local access, unplug to keep working over the cloud. `remarkable_status` reports the effective transport and a `fell_back_to_cloud` flag when this happens.
+If you select a device transport (`--usb`, `--ssh`, or `--local-dir`) but it isn't reachable at startup **and** a cloud token is configured (`REMARKABLE_TOKEN` or `~/.rmapi`), the server automatically falls back to cloud mode and logs a warning. This means a single configuration works whether or not the tablet is plugged in — plug in for fast local access, unplug to keep working over the cloud. A server launched with `--local-dir` remains read-only after fallback, preserving that mode's safety contract. `remarkable_status` reports the effective transport and a `fell_back_to_cloud` flag when this happens.
 
 Pass `--no-cloud-fallback` (or set `REMARKABLE_DISABLE_CLOUD_FALLBACK=1`) to disable this and fail instead when the device is unreachable.
 
@@ -298,7 +298,7 @@ Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remark
 | `remarkable_status` | Check connection status and the per-transport capability matrix |
 | `remarkable_image` | Get PNG/SVG images of pages (supports OCR via sampling) |
 
-These six tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`, `remarkable_refresh`, and `remarkable_author` for native ink/notebooks) are enabled by default — pass `--read-only` to disable them — see [Write Tools](#write-tools-cloud-ssh--usb-web). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
+These six tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`, `remarkable_refresh`, and `remarkable_author` for native ink/notebooks) are enabled by default on transports that support them — pass `--read-only` to disable them — see [Write Tools](#write-tools-by-transport). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
 
 📖 **[Full Tools Documentation](docs/tools.md)**
 
@@ -463,37 +463,40 @@ When `REMARKABLE_OCR_BACKEND=auto` (default):
 
 ---
 
-## SSH vs USB Web vs Cloud Comparison
+## Transport Comparison
 
-| Feature | SSH Mode | USB Web | Cloud API |
-|---------|----------|---------|-----------|
-| Speed | ⚡ 10-100x faster | ⚡ Fast | ⚡ Fast (parallel + cached) |
-| Offline | ✅ Yes | ✅ Yes | ❌ No |
-| Subscription | ✅ Not required | ✅ Not required | ❌ Connect required |
-| Raw files | ✅ PDFs, EPUBs | ✅ PDFs | ✅ PDFs, EPUBs |
-| Upload | ✅ (default) | ✅ (default) | ✅ (default) |
-| mkdir/move/rename/delete | ✅ (default) | ❌ | ✅ (default) |
-| Setup | Developer mode | Enable in Settings | One-time code |
+| Feature | Local Directory | SSH Mode | USB Web | Cloud API |
+|---------|-----------------|----------|---------|-----------|
+| Speed | ⚡ Local disk | ⚡ 10-100x faster | ⚡ Fast | ⚡ Fast (parallel + cached) |
+| Offline | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No |
+| Tablet needed | ❌ No | ✅ Yes | ✅ Yes | ❌ No |
+| Subscription | ✅ Not required¹ | ✅ Not required | ✅ Not required | ❌ Connect required |
+| Raw files | ✅ PDFs, EPUBs | ✅ PDFs, EPUBs | ✅ PDFs | ✅ PDFs, EPUBs |
+| Upload | ❌ | ✅ (default) | ✅ (default) | ✅ (default) |
+| mkdir/move/rename/delete | ❌ | ✅ (default) | ❌ | ✅ (default) |
+| Setup | Desktop app | Developer mode | Enable in Settings | One-time code |
+
+¹ The desktop app signs in to sync; this transport reads its existing local cache.
 
 📖 **[SSH Setup Guide](docs/ssh-setup.md)**
 
 ---
 
-## Write Tools (Cloud, SSH & USB Web)
+## Write Tools by Transport
 
-Write tools let you upload, organize, and manage documents on your reMarkable. **Enabled by default.** Cloud and SSH modes support the full set; USB web supports upload only (its firmware exposes no folder operations). Pass `--read-only` to expose a read-only server.
+Write tools let you upload, organize, and manage documents on your reMarkable. **Enabled by default on write-capable transports.** Cloud and SSH modes support the full set; USB web supports upload only (its firmware exposes no folder operations); local-directory mode is always read-only. Pass `--read-only` to expose a read-only server elsewhere.
 
-| Feature | Cloud Mode | SSH Mode | USB Web Mode |
-|---------|:----------:|:--------:|:------------:|
-| Upload | ✅ | ✅ | ✅ (to root) |
-| Mkdir | ✅ | ✅ | ❌ |
-| Move | ✅ | ✅ | ❌ |
-| Rename | ✅ | ✅ | ❌ |
-| Delete | ✅ (→ trash) | ✅ | ❌ |
+| Feature | Local Directory | Cloud Mode | SSH Mode | USB Web Mode |
+|---------|:---------------:|:----------:|:--------:|:------------:|
+| Upload | ❌ | ✅ | ✅ | ✅ (to root) |
+| Mkdir | ❌ | ✅ | ✅ | ❌ |
+| Move | ❌ | ✅ | ✅ | ❌ |
+| Rename | ❌ | ✅ | ✅ | ❌ |
+| Delete | ❌ | ✅ (→ trash) | ✅ | ❌ |
 
 ### Disabling Write Tools (read-only mode)
 
-Write tools are on by default in every mode. To run a read-only server, add the `--read-only` flag:
+Write tools are on by default in each write-capable mode. Local-directory mode is always read-only. To make another transport read-only, add the `--read-only` flag:
 
 ```json
 {
@@ -533,7 +536,7 @@ Or set the environment variable:
 
 | Tool | Description |
 |------|-------------|
-| `remarkable_upload(file_path, parent_folder, document_name, defer_restart)` | Upload a PDF or EPUB file (all modes; USB web ignores folder/name and uploads to root) |
+| `remarkable_upload(file_path, parent_folder, document_name, defer_restart)` | Upload a PDF or EPUB file (cloud, SSH, and USB web; USB web ignores folder/name and uploads to root) |
 | `remarkable_mkdir(folder_name, parent, defer_restart)` | Create a new folder (cloud and SSH) |
 | `remarkable_move(document, dest_folder, defer_restart)` | Move a document or folder (cloud and SSH) |
 | `remarkable_rename(document, new_name, defer_restart)` | Rename a document or folder (cloud and SSH) |
@@ -543,7 +546,7 @@ Or set the environment variable:
 
 ### Safety
 
-- **Upload registers in all modes** — cloud, SSH, and USB web.
+- **Upload registers in cloud, SSH, and USB web mode** — local-directory mode never exposes write tools.
 - **mkdir, move, rename, delete register in cloud and SSH modes only** — they are not exposed on USB web (the tablet's USB web firmware has no folder/move/rename/delete endpoints), keeping the tool list scoped to what the active transport actually supports.
 - **Delete prompts for confirmation when possible** — if the client supports MCP elicitation, `remarkable_delete` asks the user to confirm before deleting. If the client can't show a prompt, the delete is **refused** (not performed) unless `REMARKABLE_SKIP_CONFIRM=1` is set — so write-on-by-default can't silently delete from clients that lack elicitation. In cloud mode delete moves the item to the trash (recoverable from your device); set `REMARKABLE_SKIP_CONFIRM=1` to allow deletes without a prompt in automated setups. All write tools carry `ToolAnnotations(readOnlyHint=False)` (and `destructiveHint=True` for delete) so an agent harness can gate writes at the MCP layer.
 - After each write operation in SSH mode, the tablet UI (`xochitl`) restarts automatically to reflect changes; the call waits for it to come back before returning so the next write doesn't race a restarting daemon. For bulk operations, pass `defer_restart=True` to each write — or set `REMARKABLE_DEFER_RESTART=1` — and call `remarkable_refresh()` once at the end, so the batch triggers a single restart instead of one per write (each restart forces a full document-store rescan).

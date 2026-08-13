@@ -294,8 +294,8 @@ async def lifespan(app: FastMCP) -> AsyncIterator[None]:
 
         task = asyncio.create_task(_ssh_background_load())
     else:
-        # Cloud/USB mode: load in background to not block startup
-        logger.info("Cloud/USB mode: starting background loader...")
+        # Cloud/USB/local-directory mode: load in background to not block startup
+        logger.info("Cloud/USB/local-directory mode: starting background loader...")
         task = start_background_loader()
 
     try:
@@ -316,10 +316,11 @@ from remarkable_mcp import (  # noqa: E402
 )
 
 # Conditionally register write tools when enabled.
-# Write works in all three transports: cloud (default), SSH, and USB web.
+# Write works in three transports: cloud (default), SSH, and USB web.
 # Cloud and SSH support the full set (upload/mkdir/move/rename/delete); the USB
 # web interface only supports upload, so only that tool registers in USB mode
-# (see the per-tool gating in write_tools.register_write_tools).
+# (see the per-tool gating in write_tools.register_write_tools). Local-directory
+# mode is strictly read-only and registers no write tools.
 from remarkable_mcp import write_tools as _write_tools  # noqa: E402
 
 if _write_tools.write_enabled():

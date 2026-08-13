@@ -136,10 +136,9 @@ Security Note:
         "--no-cloud-fallback",
         action="store_true",
         help=(
-            "Disable the automatic cloud fallback. By default, if --usb/--ssh is "
-            "selected but the tablet is unreachable at startup and a cloud token "
-            "is configured, the server falls back to cloud mode so the same "
-            "configuration works with or without the device connected."
+            "Disable the automatic cloud fallback. By default, if --local-dir, "
+            "--usb, or --ssh is selected but unavailable at startup and a cloud "
+            "token is configured, the server falls back to cloud mode."
         ),
     )
     args = parser.parse_args()

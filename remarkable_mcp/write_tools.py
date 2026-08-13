@@ -1,6 +1,8 @@
 """
 Write tools for reMarkable tablet via cloud, SSH, or USB web interface.
 
+The local-directory transport is always read-only and never registers these tools.
+
 These tools are enabled by default. Disable them (expose a read-only server) via:
 - CLI flag: remarkable-mcp --read-only  (works in any transport)
 - Environment variable: REMARKABLE_READ_ONLY=1
@@ -75,9 +77,10 @@ def write_enabled() -> bool:
 def _require_write_transport() -> Optional[str]:
     """Return an error string if writes are disabled, else None.
 
-    Upload works in all three transports (cloud, SSH, USB web). Write tools are
-    not registered when REMARKABLE_READ_ONLY is set, so this is mostly a
-    defensive check that returns a clear error if writes are somehow disabled.
+    Upload works in the three write-capable transports (cloud, SSH, USB web).
+    Write tools are not registered in read-only or local-directory mode, so this
+    is mostly a defensive check that returns a clear error if writes are somehow
+    disabled.
     """
     if not write_enabled():
         return make_error(
@@ -127,8 +130,8 @@ def _is_cloud_mode() -> bool:
 def _require_managed_write_mode() -> Optional[str]:
     """Return an error string unless in a mode that supports folder operations.
 
-    mkdir, move, rename and delete work in cloud and SSH modes. USB web
-    mode only supports uploads, so it is rejected here with guidance.
+    mkdir, move, rename and delete work in cloud and SSH modes. USB web only
+    supports uploads, while local-directory mode is read-only.
     """
     if _is_cloud_mode() or _is_ssh_mode():
         return None
@@ -137,7 +140,7 @@ def _require_managed_write_mode() -> Optional[str]:
         message="This operation isn't available in USB web mode",
         suggestion=(
             "mkdir, move, rename and delete work in cloud mode (the "
-            "default) and SSH mode. Upload works in all three modes.\n"
+            "default) and SSH mode. USB web supports upload only.\n"
             "Run with: remarkable-mcp  (cloud)  or  remarkable-mcp --ssh"
         ),
     )

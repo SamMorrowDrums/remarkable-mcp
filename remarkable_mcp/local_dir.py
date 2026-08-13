@@ -240,7 +240,14 @@ def create_local_dir_client(base_dir: Optional[str] = None) -> LocalDirClient:
     """
     resolved = base_dir or os.environ.get("REMARKABLE_LOCAL_DIR")
     if resolved and resolved.lower() not in ("1", "true", "yes", "auto"):
-        return LocalDirClient(resolved)
+        client = LocalDirClient(resolved)
+        if client.check_connection():
+            return client
+        raise RuntimeError(
+            f"Local reMarkable data directory is not usable: {client.base_dir}. "
+            "The directory must exist and contain xochitl-style document data "
+            "(*.metadata files)."
+        )
 
     detected = find_default_local_dir()
     if detected is None:
