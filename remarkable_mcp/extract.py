@@ -42,30 +42,69 @@ def _rm_to_svg(rm_file_path: Path, output_svg_path: Path) -> bool:
 REMARKABLE_WIDTH = 1404
 REMARKABLE_HEIGHT = 1872
 
-# reMarkable stores stroke and highlight coordinates in a fixed internal grid
-# whose resolution is the original rM1/rM2 screen pitch, 226 dpi. Current devices
-# (including the Paper Pro) normalise onto this same grid regardless of their
-# physical screen, so SceneInfo.paper_size reports (1404, 1872) accordingly and
-# an imported PDF rendered at native size maps 1 point -> 226/72 units.
-REMARKABLE_COORD_DPI = 226.0
+# PDF points per stroke unit, keyed by the per-page SceneInfo.paper_size grid.
+# The 1404x1872 value was calibrated against a device PDF export. The Paper Pro
+# value follows its panel DPI and remains a best-effort calibration until a
+# ground-truth export reporting that grid is available. Devices that normalize
+# Paper Pro scenes to 1404x1872 continue to use the calibrated value.
+_DEVICE_POINTS_PER_UNIT = {
+    (1404, 1872): 0.3177,
+    (1620, 2160): 0.3144,
+}
+REMARKABLE_PDF_POINTS_PER_UNIT = 0.3177
 
 
-def _rm_units_per_point(paper_size: Optional[tuple] = None) -> float:
-    """rmscene coordinate units per PDF point, for placing annotations on a page.
+def _points_per_unit(paper_size: Optional[Tuple[float, float]]) -> float:
+    """Return PDF points per stroke unit for a SceneInfo paper grid."""
+    if paper_size:
+        key = (int(round(paper_size[0])), int(round(paper_size[1])))
+        if key in _DEVICE_POINTS_PER_UNIT:
+            return _DEVICE_POINTS_PER_UNIT[key]
+    return REMARKABLE_PDF_POINTS_PER_UNIT
 
-    Returns a constant (``REMARKABLE_COORD_DPI / 72``) that holds for every device
-    normalising onto the standard 1404x1872 grid -- verified on a reMarkable Paper
-    Pro across A4, US-Letter and Springer page sizes.
 
-    ``paper_size`` (from rmscene ``SceneInfo``) is accepted but unused for now, on
-    purpose: this function is the single seam for making the scale device-derived.
-    A device reporting a non-standard ``paper_size`` (the smaller reMarkable Move
-    reportedly normalises differently) may use a different grid; when a sample
-    from such a device is available, derive the scale here from ``paper_size``
-    instead of assuming the constant. Callers must go through this function rather
-    than hard-coding the ratio.
-    """
-    return REMARKABLE_COORD_DPI / 72.0
+def _annotation_page_viewbox(
+    pdf_w_pt: float,
+    pdf_h_pt: float,
+    points_per_unit: float,
+    *,
+    centered_x: bool = True,
+) -> Tuple[float, float, float, float]:
+    """Return the stroke-space rectangle occupied by a PDF page."""
+    view_w = pdf_w_pt / points_per_unit
+    view_h = pdf_h_pt / points_per_unit
+    view_x = -view_w / 2.0 if centered_x else 0.0
+    return view_x, 0.0, view_w, view_h
+
+
+def _rewrite_svg_root(
+    svg_content: str,
+    *,
+    viewbox: Tuple[float, float, float, float],
+    width: int,
+    height: int,
+) -> str:
+    """Rewrite only root SVG geometry, leaving path stroke widths untouched."""
+    import re
+
+    root_match = re.search(r"<svg\b[^>]*>", svg_content, re.IGNORECASE)
+    if root_match is None:
+        return svg_content
+
+    root = root_match.group(0)
+    values = {
+        "viewBox": " ".join(f"{value:.2f}" for value in viewbox),
+        "width": str(width),
+        "height": str(height),
+    }
+    for name, value in values.items():
+        pattern = rf'(?<![-\w]){name}="[^"]*"'
+        if re.search(pattern, root):
+            root = re.sub(pattern, f'{name}="{value}"', root, count=1)
+        else:
+            root = root[:-1] + f' {name}="{value}">'
+
+    return svg_content[: root_match.start()] + root + svg_content[root_match.end() :]
 
 
 # Standard reMarkable background color (light cream/gray)
@@ -629,6 +668,7 @@ def _v6_paths_from_blocks(blocks: list, anchor_pos: Optional[dict] = None) -> Tu
         if not hasattr(block, "item") or not hasattr(block.item, "value"):
             continue
         line = block.item.value
+        dx, dy = group_offsets.get(getattr(block, "parent_id", None), (0.0, 0.0))
 
         # Text highlights are GlyphRange items: they carry `rectangles`
         # (highlight boxes over selected text) rather than stroke `points`.
@@ -639,17 +679,16 @@ def _v6_paths_from_blocks(blocks: list, anchor_pos: Optional[dict] = None) -> Tu
             hl_fill = COLOR_MAP.get(hl_color, "#FFD700")
             for r in line.rectangles:
                 paths.append(
-                    f'<rect x="{r.x:.1f}" y="{r.y:.1f}" '
+                    f'<rect x="{r.x + dx:.1f}" y="{r.y + dy:.1f}" '
                     f'width="{r.w:.1f}" height="{r.h:.1f}" '
                     f'fill="{hl_fill}" opacity="0.35" stroke="none"/>'
                 )
-                all_coords.append((r.x, r.y))
-                all_coords.append((r.x + r.w, r.y + r.h))
+                all_coords.append((r.x + dx, r.y + dy))
+                all_coords.append((r.x + dx + r.w, r.y + dy + r.h))
             continue
 
         if not hasattr(line, "points") or not line.points:
             continue
-        dx, dy = group_offsets.get(getattr(block, "parent_id", None), (0.0, 0.0))
 
         tool = line.tool if hasattr(line, "tool") else None
         color = line.color if hasattr(line, "color") else 0
@@ -1370,22 +1409,18 @@ def render_page_full_page_from_document_zip(
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(tmpdir_path)
 
-        rm_glob = list(tmpdir_path.glob("**/*.rm"))
+        rm_files = _get_ordered_rm_files(tmpdir_path)
+        page_order = _get_page_order(tmpdir_path)
 
-        entries = _read_cpages_entries(tmpdir_path)
-        page_ids = [e.get("id") for e in entries if isinstance(e, dict) and e.get("id")]
-
-        if page_ids:
-            if page < 1 or page > len(page_ids):
+        if page_order:
+            if page < 1 or page > len(page_order):
                 return None
-            page_id = page_ids[page - 1]
-            rm_file = next((p for p in rm_glob if p.stem == page_id), None)
+            rm_file = _select_rm_file_for_page(tmpdir_path, rm_files, page)
         else:
-            # No cPages metadata: fall back to filesystem/page order of .rm files.
-            ordered = _get_ordered_rm_files(tmpdir_path)
-            if page < 1 or page > len(ordered):
+            # No page metadata: fall back to filesystem order of .rm files.
+            if page < 1 or page > len(rm_files):
                 return None
-            rm_file = ordered[page - 1]
+            rm_file = rm_files[page - 1]
 
         if rm_file is not None and rm_file.exists():
             return render_rm_file_full_page_png(rm_file, background_color=background_color)
@@ -1394,7 +1429,7 @@ def render_page_full_page_from_document_zip(
         # render a blank full page at the document's paper size so the viewer
         # still shows it. (The write tool will return no_page_layer until the
         # page has a drawable layer / has been added via remarkable_add_page.)
-        paper_w, paper_h = _document_paper_size(rm_glob)
+        paper_w, paper_h = _document_paper_size(rm_files)
         svg = _svg_full_page([], paper_w, paper_h)
         scale = FULL_PAGE_TARGET_LONG_EDGE / max(paper_w, paper_h)
         png = _svg_string_to_png(
@@ -1505,15 +1540,27 @@ def _resolve_pdf_page_index(tmpdir_path: Path, page: int) -> Optional[int]:
     """
     # formatVersion 2 (cPages) — authoritative when present
     entries = _read_cpages_entries(tmpdir_path)
-    if entries and page <= len(entries):
-        return _pdf_page_index_for_cpages_entry(entries[page - 1])
+    if entries:
+        if 1 <= page <= len(entries):
+            return _pdf_page_index_for_cpages_entry(entries[page - 1])
+        return None
 
     # formatVersion 1 (redirectionPageMap)
     rpm = _read_redirection_page_map(tmpdir_path)
-    if rpm and page <= len(rpm):
-        val = rpm[page - 1]
-        if isinstance(val, int) and val >= 0:
-            return val
+    if rpm:
+        if 1 <= page <= len(rpm):
+            val = rpm[page - 1]
+            if isinstance(val, int) and val >= 0:
+                return val
+        return None
+
+    # Some formatVersion 1 documents (including files uploaded by this server)
+    # contain a flat page-id list but omit redirectionPageMap. With no explicit
+    # user-added-page markers, the source PDF order is the only authoritative
+    # mapping and is therefore identity.
+    page_order = _get_page_order(tmpdir_path)
+    if page_order and 1 <= page <= len(page_order):
+        return page - 1
 
     return None
 
@@ -1604,6 +1651,42 @@ def render_tablet_pdf_page_to_png(
         doc.close()
 
 
+def render_mapped_pdf_page_from_document_zip(
+    zip_path: Path, page: int = 1, target_long_edge: int = 2048
+) -> Tuple[Optional[bytes], bool]:
+    """Render a source-PDF underlay using the document's authoritative page map.
+
+    Returns ``(png, has_source_pdf)``. A source PDF with ``png=None`` means the
+    requested page has no mapped underlay (for example, a user-added page), so
+    callers must not substitute the same ordinal from a native PDF export.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(tmpdir_path)
+        except Exception:
+            return None, False
+
+        pdf_files = list(tmpdir_path.glob("**/*.pdf"))
+        if not pdf_files:
+            return None, False
+
+        pdf_page_index = _resolve_pdf_page_index(tmpdir_path, page)
+        if pdf_page_index is None:
+            return None, True
+
+        content_stems = {path.stem for path in tmpdir_path.glob("*.content")}
+        matching = [path for path in pdf_files if path.stem in content_stems]
+        pdf_path = matching[0] if matching else sorted(pdf_files)[0]
+        png = render_tablet_pdf_page_to_png(
+            pdf_path.read_bytes(),
+            page=pdf_page_index + 1,
+            target_long_edge=target_long_edge,
+        )
+        return png, True
+
+
 def render_merged_page_from_document_zip(
     zip_path: Path,
     page: int = 1,
@@ -1631,7 +1714,6 @@ def render_merged_page_from_document_zip(
         or None. Returns (None, error_note) on failure.
     """
     import io
-    import re
 
     import fitz
     from PIL import Image as PILImage
@@ -1746,25 +1828,20 @@ def render_merged_page_from_document_zip(
                 # page and filled it black.)
                 svg_content = ann_svg_path.read_text()
 
-                rm_units_per_point = _rm_units_per_point()
-                vb_w = pdf_w_pt * rm_units_per_point
-                vb_h = pdf_h_pt * rm_units_per_point
-                svg_content = re.sub(
-                    r'viewBox="[^"]*"',
-                    f'viewBox="{-vb_w / 2:.2f} 0 {vb_w:.2f} {vb_h:.2f}"',
+                blocks = _v6_blocks(target_rm_file)
+                paper_size = _v6_paper_size(blocks) if blocks is not None else None
+                points_per_unit = _points_per_unit(paper_size)
+                viewbox = _annotation_page_viewbox(
+                    pdf_w_pt,
+                    pdf_h_pt,
+                    points_per_unit,
+                    centered_x=blocks is not None,
+                )
+                svg_content = _rewrite_svg_root(
                     svg_content,
-                )
-                # Also set explicit width/height to match output canvas. Only
-                # the root <svg> element's attributes (the first occurrence), and
-                # a negative lookbehind so we never rewrite `stroke-width="..."`
-                # (a plain `width="[^"]*"` also matches inside `stroke-width`,
-                # which blows every stroke up to `out_w` units wide and fills the
-                # page solid black).
-                svg_content = re.sub(
-                    r'(?<![-\w])width="[^"]*"', f'width="{out_w}"', svg_content, count=1
-                )
-                svg_content = re.sub(
-                    r'(?<![-\w])height="[^"]*"', f'height="{out_h}"', svg_content, count=1
+                    viewbox=viewbox,
+                    width=out_w,
+                    height=out_h,
                 )
 
                 # Render SVG to PNG with transparent background
@@ -2005,9 +2082,11 @@ def extract_text_from_document_zip(
                 if rm_file not in ordered_rm_files:
                     ordered_rm_files.append(rm_file)
             rm_files = ordered_rm_files
+            result["page_ids"] = page_order
+        else:
             result["page_ids"] = [f.stem for f in rm_files]
 
-        result["pages"] = len(rm_files)
+        result["pages"] = len(page_order) or len(rm_files)
 
         # Extract typed text from .rm files using rmscene
         for rm_file in rm_files:

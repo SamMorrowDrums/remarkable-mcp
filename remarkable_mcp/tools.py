@@ -43,6 +43,7 @@ from remarkable_mcp.extract import (
     get_cached_ocr_result,
     get_cached_page_ocr,
     get_document_page_count,
+    render_mapped_pdf_page_from_document_zip,
     render_merged_page_from_document_zip,
     render_page_from_document_zip,
     render_page_from_document_zip_svg,
@@ -1814,12 +1815,17 @@ async def remarkable_image(
                 # returns None and this safely no-ops. Credit: ljdutel (#95).
                 rendered_via_pdf = False
                 if png_data is None:
-                    pdf_bytes = await run_blocking(download_raw_file, client, target_doc, "pdf")
-                    if pdf_bytes:
-                        png_data = await run_blocking(
-                            render_tablet_pdf_page_to_png, pdf_bytes, page
-                        )
-                        rendered_via_pdf = png_data is not None
+                    png_data, has_source_pdf = await run_blocking(
+                        render_mapped_pdf_page_from_document_zip, tmp_path, page
+                    )
+                    rendered_via_pdf = png_data is not None
+                    if png_data is None and not has_source_pdf:
+                        pdf_bytes = await run_blocking(download_raw_file, client, target_doc, "pdf")
+                        if pdf_bytes:
+                            png_data = await run_blocking(
+                                render_tablet_pdf_page_to_png, pdf_bytes, page
+                            )
+                            rendered_via_pdf = png_data is not None
 
                 # Blank-page fallback: the stroke renderer returns None for a
                 # notebook page with no drawable strokes (e.g. a freshly-created
