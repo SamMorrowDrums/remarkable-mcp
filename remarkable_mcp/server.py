@@ -153,10 +153,14 @@ Write operations are enabled. These tools modify your tablet's filesystem:
 - `remarkable_move(document, dest_folder)` - Move a document/folder
 - `remarkable_rename(document, new_name)` - Rename a document/folder
 - `remarkable_delete(document)` - Delete a document/folder (destructive)
+- `remarkable_refresh()` - Restart xochitl once to apply writes deferred with `defer_restart=True`
 
 ### Safety
 - **Delete is destructive** and immediate — the MCP client should confirm with the user first
-- After each write operation, the tablet UI restarts automatically
+- After each write operation, the tablet UI restarts automatically (the call waits for it
+  to settle). For batches, pass `defer_restart=True` to each write (or set
+  `REMARKABLE_DEFER_RESTART=1`) and call `remarkable_refresh()` once at the end, to restart
+  a single time instead of once per write
 - Use `remarkable_browse()` to verify changes after write operations
 - Run with `--read-only` to disable all write tools
 """
