@@ -65,6 +65,11 @@ def _build_instructions() -> str:
         "true",
         "yes",
     )
+    local_dir_mode = os.environ.get("REMARKABLE_USE_LOCAL_DIR", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    ) or bool(os.environ.get("REMARKABLE_LOCAL_DIR"))
     has_google_vision = bool(os.environ.get("GOOGLE_VISION_API_KEY"))
     ocr_backend = os.environ.get("REMARKABLE_OCR_BACKEND", "auto").lower()
 
@@ -73,7 +78,9 @@ def _build_instructions() -> str:
         "true",
         "yes",
     )
-    write_mode = not read_only_mode
+    # Local-directory mode is unconditionally read-only (the folder is the
+    # desktop app's private sync cache).
+    write_mode = not read_only_mode and not local_dir_mode
 
     read_only_note = "" if write_mode else " All operations are read-only."
 
@@ -128,7 +135,23 @@ Documents are registered as resources for direct access:
     )
 
     # Add transport-specific instructions
-    if ssh_mode:
+    if local_dir_mode:
+        instructions += """
+## Local Directory Mode (Active)
+
+Reading from a local reMarkable data directory (typically the official
+desktop app's sync folder). Fully offline and device-free:
+- **Raw file access**: Use `content_type="raw"` to get original PDF/EPUB text
+- **Read-only**: the folder is the desktop app's sync cache, so write tools
+  are disabled in this mode. Content freshness depends on the desktop app
+  syncing (keep it running/signed in).
+
+### Content Types for remarkable_read
+- `"text"` (default) - Full content: raw PDF/EPUB text + annotations
+- `"raw"` - Only original PDF/EPUB text (no annotations)
+- `"annotations"` - Only typed text, highlights, and OCR content
+"""
+    elif ssh_mode:
         instructions += """
 ## SSH Mode (Active)
 
@@ -277,8 +300,8 @@ async def lifespan(app: FastMCP) -> AsyncIterator[None]:
 
         task = asyncio.create_task(_ssh_background_load())
     else:
-        # Cloud/USB mode: load in background to not block startup
-        logger.info("Cloud/USB mode: starting background loader...")
+        # Cloud/USB/local-directory mode: load in background to not block startup
+        logger.info("Cloud/USB/local-directory mode: starting background loader...")
         task = start_background_loader()
 
     try:
@@ -299,10 +322,11 @@ from remarkable_mcp import (  # noqa: E402
 )
 
 # Conditionally register write tools when enabled.
-# Write works in all three transports: cloud (default), SSH, and USB web.
+# Write works in three transports: cloud (default), SSH, and USB web.
 # Cloud and SSH support the full set (upload/mkdir/move/rename/delete); the USB
 # web interface only supports upload, so only that tool registers in USB mode
-# (see the per-tool gating in write_tools.register_write_tools).
+# (see the per-tool gating in write_tools.register_write_tools). Local-directory
+# mode is strictly read-only and registers no write tools.
 from remarkable_mcp import write_tools as _write_tools  # noqa: E402
 
 if _write_tools.write_enabled():

@@ -74,6 +74,12 @@ Examples:
   # Run with SSH transport (direct USB connection, requires dev mode)
   uvx remarkable-mcp --ssh
 
+  # Read the reMarkable desktop app's local sync folder (offline, read-only)
+  uvx remarkable-mcp --local-dir
+
+  # Same, with an explicit xochitl-style directory
+  uvx remarkable-mcp --local-dir /path/to/remarkable/desktop
+
   # SSH with custom host (e.g., using SSH config)
   REMARKABLE_SSH_HOST="remarkable" uvx remarkable-mcp --ssh
 
@@ -83,6 +89,11 @@ Examples:
 USB Web Interface Environment Variables:
   REMARKABLE_USB_HOST      USB web interface host (default: http://10.11.99.1)
   REMARKABLE_USB_TIMEOUT   Request timeout in seconds (default: 10)
+
+Local Directory Environment Variables:
+  REMARKABLE_USE_LOCAL_DIR Enable the local directory transport (1/true/yes)
+  REMARKABLE_LOCAL_DIR     Data directory path (default: auto-detect the
+                           reMarkable desktop app's sync folder)
 
 SSH Environment Variables:
   REMARKABLE_SSH_HOST      SSH host (default: 10.11.99.1 for USB)
@@ -129,6 +140,17 @@ Streamable HTTP Security:
         action="store_true",
         help="Use USB web interface (connect via USB cable, enable in Storage Settings)",
     )
+    parser.add_argument(
+        "--local-dir",
+        nargs="?",
+        const="auto",
+        metavar="PATH",
+        help=(
+            "Read from a local reMarkable data directory (read-only). With no "
+            "PATH, auto-detects the official desktop app's sync folder. Fully "
+            "offline and device-free; the desktop app keeps the folder synced."
+        ),
+    )
     write_group = parser.add_mutually_exclusive_group()
     write_group.add_argument(
         "--write",
@@ -151,10 +173,9 @@ Streamable HTTP Security:
         "--no-cloud-fallback",
         action="store_true",
         help=(
-            "Disable the automatic cloud fallback. By default, if --usb/--ssh is "
-            "selected but the tablet is unreachable at startup and a cloud token "
-            "is configured, the server falls back to cloud mode so the same "
-            "configuration works with or without the device connected."
+            "Disable the automatic cloud fallback. By default, if --local-dir, "
+            "--usb, or --ssh is selected but unavailable at startup and a cloud "
+            "token is configured, the server falls back to cloud mode."
         ),
     )
     parser.add_argument(
@@ -214,7 +235,12 @@ Streamable HTTP Security:
             print(f"❌ Registration failed: {e}", file=sys.stderr)
             sys.exit(1)
     else:
-        if args.usb:
+        if args.local_dir:
+            # Local directory mode - read-only access to a local data directory
+            os.environ["REMARKABLE_USE_LOCAL_DIR"] = "1"
+            if args.local_dir != "auto":
+                os.environ["REMARKABLE_LOCAL_DIR"] = args.local_dir
+        elif args.usb:
             # USB web mode - set environment variable and run server
             os.environ["REMARKABLE_USE_USB_WEB"] = "1"
         elif args.ssh:
@@ -225,7 +251,7 @@ Streamable HTTP Security:
 
         if args.read_only:
             os.environ["REMARKABLE_READ_ONLY"] = "1"
-        if args.no_cloud_fallback and (args.usb or args.ssh):
+        if args.no_cloud_fallback and (args.local_dir or args.usb or args.ssh):
             os.environ["REMARKABLE_DISABLE_CLOUD_FALLBACK"] = "1"
 
         from remarkable_mcp.server import run
