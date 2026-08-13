@@ -1389,7 +1389,7 @@ requires-dist = [
     { name = "cairosvg", specifier = ">=2.9.0" },
     { name = "ebooklib", specifier = ">=0.18" },
     { name = "google-cloud-vision", marker = "extra == 'ocr'", specifier = ">=3.0.0" },
-    { name = "mcp", specifier = ">=1.27.0" },
+    { name = "mcp", specifier = ">=1.27.0,<2.0.0" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "pymupdf", specifier = ">=1.26.7" },
     { name = "pytesseract", specifier = ">=0.3.10" },
