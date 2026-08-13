@@ -31,15 +31,17 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-def _warn_for_http_binding(host: str) -> None:
+def _warn_for_http_binding(host: str, port: int) -> None:
     """Warn prominently when unauthenticated HTTP is exposed off-host."""
     if not _is_loopback_host(host):
         print(
             "WARNING: remarkable-mcp Streamable HTTP has no authentication and "
             f"is binding to non-loopback address {host!r}. Any network client "
             "that can reach this port may invoke enabled tools, including writes. "
-            "Use 127.0.0.1 with a local OpenWebUI instance or put an authenticated "
-            "reverse proxy in front of the server.",
+            "Prefer 127.0.0.1 with a local OpenWebUI instance. An authenticated "
+            "reverse proxy must also rewrite Host to "
+            f"'127.0.0.1:{port}' and clear the Origin header to satisfy FastMCP's "
+            "DNS-rebinding protection; see the README example.",
             file=sys.stderr,
         )
 
@@ -98,7 +100,9 @@ Security Note:
 Streamable HTTP Security:
   HTTP has no built-in authentication and binds to 127.0.0.1 by default. Keep
   it on loopback for a local OpenWebUI instance. Non-loopback bindings expose
-  every enabled MCP tool and print a prominent warning at startup.
+  every enabled MCP tool and print a prominent warning at startup. A reverse
+  proxy must authenticate requests, rewrite Host to the loopback upstream, and
+  clear Origin; see the README example.
 """,
     )
     parser.add_argument(
@@ -163,7 +167,7 @@ Streamable HTTP Security:
         help=(
             "Streamable HTTP bind address (default: REMARKABLE_MCP_HOST or "
             "127.0.0.1). Non-loopback addresses are unauthenticated and unsafe "
-            "unless protected by a reverse proxy."
+            "unless protected by a correctly configured reverse proxy; see README."
         ),
     )
     parser.add_argument(
@@ -238,7 +242,7 @@ Streamable HTTP Security:
                 parser.error("REMARKABLE_MCP_PORT must be an integer")
             if not 1 <= port <= 65535:
                 parser.error("REMARKABLE_MCP_PORT must be between 1 and 65535")
-            _warn_for_http_binding(host)
+            _warn_for_http_binding(host, port)
             run(transport="streamable-http", host=host, port=port)
         else:
             run()

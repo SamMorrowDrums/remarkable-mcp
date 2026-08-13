@@ -233,8 +233,37 @@ The bind address and port can also be set with `--host` / `--port` or
 > `127.0.0.1` by default and is intended for a local OpenWebUI instance. A
 > non-loopback bind such as `--host 0.0.0.0` exposes every enabled tool,
 > including write tools, to any client that can reach the port. The server
-> prints a prominent startup warning in that configuration. Use an
-> authenticated reverse proxy if remote access is required.
+> prints a prominent startup warning in that configuration.
+
+### Remote access through an authenticated reverse proxy
+
+Keep remarkable-mcp on its default loopback bind and put the proxy on the same
+host. FastMCP's DNS-rebinding protection only permits loopback `Host` and
+`Origin` values by default. A proxy that forwards its public hostname unchanged
+will therefore receive **421 Misdirected Request**; a public browser `Origin`
+will receive **403 Forbidden**.
+
+The proxy must authenticate requests, rewrite `Host` to the loopback upstream,
+and clear `Origin`. For example, with nginx and an existing htpasswd file:
+
+```nginx
+location /mcp {
+    auth_basic "reMarkable MCP";
+    auth_basic_user_file /etc/nginx/remarkable-mcp.htpasswd;
+
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+
+    # Required by FastMCP's default DNS-rebinding protection.
+    proxy_set_header Host 127.0.0.1:8000;
+    proxy_set_header Origin "";
+}
+```
+
+Do not expose the upstream port directly. Configure OpenWebUI with the
+authenticated proxy URL, such as `https://mcp.example.com/mcp`.
 
 For NixOS, `remarkable-mcp-bridge.nix` provides a systemd module with the same
 loopback default:

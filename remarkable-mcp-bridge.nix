@@ -36,7 +36,11 @@ in
     host = lib.mkOption {
       type = lib.types.str;
       default = "127.0.0.1";
-      description = "Streamable HTTP bind address. Keep this on loopback unless proxied with auth.";
+      description = ''
+        Streamable HTTP bind address. Keep this on loopback. A reverse proxy
+        must authenticate requests, rewrite Host to the loopback upstream, and
+        clear Origin; see the README.
+      '';
     };
 
     port = lib.mkOption {
@@ -61,7 +65,9 @@ in
   config = lib.mkIf cfg.enable {
     warnings = lib.optional (!(builtins.elem cfg.host loopbackHosts)) ''
       services.remarkable-mcp.host is non-loopback. Streamable HTTP has no
-      authentication, so protect this endpoint with an authenticated reverse proxy.
+      authentication. Prefer the loopback default; an authenticated reverse
+      proxy must also rewrite Host to 127.0.0.1:${toString cfg.port} and clear
+      Origin to satisfy FastMCP's DNS-rebinding protection.
     '';
 
     users.groups = lib.mkIf cfg.createUser {

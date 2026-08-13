@@ -88,8 +88,6 @@ def _build_instructions() -> str:
 - `remarkable_recent(limit)` - Get recently modified documents
 - `remarkable_status()` - Check connection and diagnose issues
 - `remarkable_image(document, page, include_ocr)` - Get a PNG image with optional OCR
-- `remarkable_markdown_to_pdf(markdown, document_name, parent_folder)` - Render
-  Markdown as a PDF and upload it
 
 ## Recommended Workflows
 
@@ -107,10 +105,6 @@ Use `remarkable_image` when you need visual context:
 
 Example: `remarkable_image("UI Mockup", page=1)` returns a PNG image
 Example: `remarkable_image("Notes", include_ocr=True)` returns image with extracted text
-
-### Sending Markdown to the Tablet
-Use `remarkable_markdown_to_pdf(markdown, document_name, parent_folder)` when
-the user wants notes, reports, or summaries delivered as a readable PDF.
 
 ### For Large Documents
 Use pagination to avoid overwhelming context. The response includes:

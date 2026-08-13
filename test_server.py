@@ -4480,6 +4480,24 @@ class TestCLIFlags:
         assert "WARNING" in warning
         assert "no authentication" in warning
         assert "including writes" in warning
+        assert "rewrite Host to '127.0.0.1:9000'" in warning
+        assert "clear the Origin header" in warning
+
+    def test_default_transport_security_requires_proxy_header_rewrite(self):
+        from mcp.server.transport_security import TransportSecurityMiddleware
+
+        middleware = TransportSecurityMiddleware(mcp.settings.transport_security)
+        assert middleware._validate_host("mcp.example.com") is False
+        assert middleware._validate_host("127.0.0.1:8000") is True
+        assert middleware._validate_origin("https://openwebui.example.com") is False
+        assert middleware._validate_origin(None) is True
+
+    def test_read_only_instructions_do_not_advertise_markdown_writeback(self):
+        from remarkable_mcp.server import _build_instructions
+
+        with patch.dict(os.environ, {"REMARKABLE_READ_ONLY": "1"}):
+            instructions = _build_instructions()
+        assert "remarkable_markdown_to_pdf" not in instructions
 
     def test_http_preserves_explicit_ssh_key(self):
         from remarkable_mcp import cli
