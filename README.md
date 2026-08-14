@@ -11,6 +11,7 @@ OpenWebUI, and other compatible tools.
 - Search names, tags, and extracted text.
 - Read typed text, PDF and EPUB text, highlights, and annotations.
 - Render notebooks and annotated PDFs as PNG or SVG.
+- Export one document as a complete PDF or sectioned Markdown resource.
 - Run handwriting OCR through Google Vision or Tesseract.
 - Upload files and manage folders in supported transports.
 - Render Markdown as PDF and upload it to the tablet.
@@ -271,7 +272,7 @@ AI assistants use the tools to read documents, search content, and more:
 
 ## Connection Modes
 
-All modes support reading and rendering. Cloud and SSH support full library
+All modes support reading, rendering, and single-document export. Cloud and SSH support full library
 management. USB web supports upload but does not accept a destination folder.
 Local directory mode is
 read-only.
@@ -425,8 +426,12 @@ Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remark
 | `remarkable_recent` | Get recently modified documents |
 | `remarkable_status` | Check connection status and the per-transport capability matrix |
 | `remarkable_image` | Get PNG/SVG images of pages with optional OCR |
+| `remarkable_export` | Export one document as a temporary PDF or Markdown resource |
 
-These six tools are read-only and return structured JSON with next-step hints.
+The read/search/render tools are read-only. `remarkable_export` never changes the
+tablet, but it writes a bounded temporary file on the MCP server host and therefore
+declares `readOnlyHint=false`. Export links expire after 15 minutes and the server
+retains at most eight at a time.
 Supported transports also register write tools by default; pass `--read-only` to
 disable them. See [Write Tools](#write-tools-by-transport). Clients that support
 [MCP Apps](#interactive-canvas-app-mcp-apps) can also open `remarkable_canvas`.
@@ -446,6 +451,9 @@ disable them. See [Write Tools](#write-tools-by-transport). Clients that support
   `total_pages: null` and `total_pages_known: false`.
 - PNG images of PDF-backed pages merge the source page and annotations
   automatically; pass `render_merged=False` for the annotation layer alone.
+- PDF exports preserve physical page order and merge mapped source underlays with
+  annotations by default. Markdown exports keep fixed source/typed/annotation/
+  highlight/OCR sections without guessing document structure.
 - OCR uses Google Vision when configured and otherwise runs locally with Tesseract.
 - Browse and search accept tag filters.
 
@@ -497,6 +505,15 @@ remarkable_image("Logo Sketch", background="#00000000")
 
 # Compatibility mode: return resource URI instead of embedded resource
 remarkable_image("Diagram", compatibility=True)
+
+# Export a complete PDF through a temporary MCP ResourceLink
+remarkable_export("Meeting Notes")
+
+# Export honest, sectioned Markdown with opt-in OCR
+remarkable_export("Journal", output_format="markdown", include_ocr=True)
+
+# Export only full-page annotation layers when archive data is available
+remarkable_export("Research Paper", pdf_mode="annotations")
 ```
 
 > **Note:** PNG rendering uses PyMuPDF for both notebook SVGs and PDF pages, so
@@ -518,9 +535,15 @@ Documents are automatically registered as MCP resources:
 | `remarkableraw:///{path}.epub.txt` | Extracted text from the original EPUB |
 | `remarkableimg:///{path}.page-{N}.png` | PNG image of page N (notebooks only) |
 | `remarkablesvg:///{path}.page-{N}.svg` | SVG vector image of page N (notebooks only) |
+| `remarkableexport:///{format}/{id}` | Temporary generated PDF or Markdown export |
 
 Trashed documents are excluded from tool, canvas, and resource lookup, so a
 trashed item cannot shadow a live document with the same name.
+
+`remarkable_export` returns a `ResourceLink` instead of embedding potentially
+large file content in the tool response. The server stores the file in a private
+temporary directory for 15 minutes, retains at most eight exports, and removes
+managed exports at shutdown. Fetch and save the linked resource for durable use.
 
 [Full resources reference](docs/resources.md)
 

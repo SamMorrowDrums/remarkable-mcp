@@ -1,5 +1,6 @@
 """MCP SDK v2 protocol-era compatibility tests."""
 
+import base64
 import json
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -69,6 +70,17 @@ async def test_one_server_serves_modern_and_legacy_catalogs():
             modern_merge_schema = modern_image.input_schema["properties"]["render_merged"]
             assert modern_merge_schema == legacy_image.input_schema["properties"]["render_merged"]
             assert modern_merge_schema["default"] is None
+            modern_export = next(
+                tool for tool in modern_tools.tools if tool.name == "remarkable_export"
+            )
+            legacy_export = next(
+                tool for tool in legacy_tools.tools if tool.name == "remarkable_export"
+            )
+            assert modern_export.input_schema == legacy_export.input_schema
+            assert modern_export.input_schema["properties"]["output_format"]["default"] == "pdf"
+            assert modern_export.input_schema["properties"]["pdf_mode"]["default"] == "merged"
+            assert modern_export.annotations.read_only_hint is False
+            assert legacy_export.annotations.read_only_hint is False
 
             modern_prompts = await modern.list_prompts()
             legacy_prompts = await legacy.list_prompts()
@@ -82,6 +94,26 @@ async def test_one_server_serves_modern_and_legacy_catalogs():
             resource = await modern.read_resource(CANVAS_RESOURCE_URI)
             assert resource.contents[0].mime_type == "text/html;profile=mcp-app"
             assert "<!doctype html>" in resource.contents[0].text
+            modern_templates = await modern.list_resource_templates()
+            legacy_templates = await legacy.list_resource_templates()
+            modern_export_templates = {
+                str(template.uri_template)
+                for template in modern_templates.resource_templates
+                if str(template.uri_template).startswith("remarkableexport:")
+            }
+            legacy_export_templates = {
+                str(template.uri_template)
+                for template in legacy_templates.resource_templates
+                if str(template.uri_template).startswith("remarkableexport:")
+            }
+            assert (
+                modern_export_templates
+                == legacy_export_templates
+                == {
+                    "remarkableexport:///pdf/{export_id}",
+                    "remarkableexport:///markdown/{export_id}",
+                }
+            )
 
             modern_status, legacy_status = (
                 await modern.call_tool("remarkable_status", {}),
@@ -89,6 +121,49 @@ async def test_one_server_serves_modern_and_legacy_catalogs():
             )
             assert json.loads(modern_status.content[0].text)["transport"] == "cloud"
             assert json.loads(legacy_status.content[0].text)["transport"] == "cloud"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "expected_version"),
+    [("auto", "2026-07-28"), ("legacy", "2025-11-25")],
+)
+async def test_export_resource_link_works_in_both_protocol_eras(mode, expected_version):
+    """Large export content stays behind a ResourceLink in both SDK2 modes."""
+    import fitz
+    from mcp import types
+
+    from remarkable_mcp.export_resources import export_store
+
+    document = _document("Protocol Export")
+    api_client = Mock()
+    api_client.get_meta_items.return_value = [document]
+    pdf = fitz.open()
+    pdf.new_page(width=200, height=300).insert_text((20, 30), "protocol export")
+    api_client.download.return_value = pdf.tobytes()
+    pdf.close()
+
+    loader_start, loader_stop = _without_background_loader()
+    export_store.cleanup()
+    with (
+        loader_start,
+        loader_stop,
+        patch("remarkable_mcp.tools.get_rmapi", return_value=api_client),
+        patch("remarkable_mcp.tools.get_file_type", return_value="pdf"),
+    ):
+        async with Client(mcp, mode=mode) as client:
+            assert client.protocol_version == expected_version
+            result = await client.call_tool(
+                "remarkable_export",
+                {"document": document.VissibleName, "output_format": "pdf"},
+            )
+            link = next(
+                content for content in result.content if isinstance(content, types.ResourceLink)
+            )
+            assert "base64" not in result.content[0].text.lower()
+            resource = await client.read_resource(link.uri)
+            assert resource.contents[0].mime_type == "application/pdf"
+            assert base64.b64decode(resource.contents[0].blob).startswith(b"%PDF")
 
 
 @pytest.mark.asyncio

@@ -1,9 +1,9 @@
 """
 MCP Tools for reMarkable tablet access.
 
-All tools in this module are read-only and idempotent - they only retrieve
-data from your reMarkable (via whichever transport is active: cloud, SSH, or
-USB web) and do not modify any documents.
+Tools in this module never modify the reMarkable library. Most are read-only
+and idempotent; ``remarkable_export`` additionally creates a bounded temporary
+file on the MCP server host and returns it as a resource link.
 """
 
 import base64
@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import tempfile
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -18,6 +19,7 @@ from typing import List, Literal, Optional
 from mcp.types import (
     BlobResourceContents,
     EmbeddedResource,
+    ResourceLink,
     TextContent,
     TextResourceContents,
     ToolAnnotations,
@@ -33,6 +35,15 @@ from remarkable_mcp.api import (
     get_rmapi,
 )
 from remarkable_mcp.concurrency import run_blocking
+from remarkable_mcp.export_resources import PublishedExport, export_store
+from remarkable_mcp.exporters import (
+    ExportBuildResult,
+    ExportMetadata,
+    PdfMode,
+    write_archive_pdf_export,
+    write_markdown_export,
+    write_native_pdf_export,
+)
 from remarkable_mcp.extract import (
     extract_text_from_document_zip,
     extract_text_from_epub,
@@ -170,6 +181,14 @@ STATUS_ANNOTATIONS = ToolAnnotations(
 IMAGE_ANNOTATIONS = ToolAnnotations(
     title="Get reMarkable Page Image",
     **_BASE_ANNOTATIONS,
+)
+
+EXPORT_ANNOTATIONS = ToolAnnotations(
+    title="Export reMarkable Document",
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=False,
 )
 
 # Default page size for pagination (characters) - used for PDFs/EPUBs
@@ -1426,13 +1445,15 @@ async def remarkable_status() -> str:
     troubleshoot.
 
     Capability notes:
-    - Cloud (default): full read/render/upload/mkdir/move/rename/delete — no device
+    - Export is available in every transport and creates only a bounded temporary
+      local resource; it never modifies the tablet.
+    - Cloud (default): full read/render/export/upload/mkdir/move/rename/delete — no device
       needed, works from anywhere your token is valid.
     - SSH: full capabilities over a local/USB connection to the tablet.
-    - USB web: read, render, and upload (to root) only — the tablet's USB web
+    - USB web: read, render, export, and upload (to root) only — the tablet's USB web
       interface firmware exposes no folder/move/rename/delete endpoints. For full
       write parity over a USB cable, use SSH mode pointed at the USB IP.
-    - Local directory: fully offline read/render access to the desktop app's sync
+    - Local directory: fully offline read/render/export access to the desktop app's sync
       cache. Strictly read-only to avoid corrupting app-managed state.
     Write tools (upload/mkdir/move/rename/delete) are enabled by default; run
     with --read-only (or REMARKABLE_READ_ONLY=1) to expose a read-only server.
@@ -1483,11 +1504,12 @@ async def remarkable_status() -> str:
         connection_info = "environment variable" if REMARKABLE_TOKEN else "file (~/.rmapi)"
 
     # What each transport is capable of (independent of read-only mode).
-    # read/render are always available; the booleans below are the write surface.
+    # Read/render/export are always available; the remaining booleans are writes.
     capability_matrix = {
         "cloud": {
             "read": True,
             "render": True,
+            "export": True,
             "upload": True,
             "mkdir": True,
             "move": True,
@@ -1497,6 +1519,7 @@ async def remarkable_status() -> str:
         "ssh": {
             "read": True,
             "render": True,
+            "export": True,
             "upload": True,
             "mkdir": True,
             "move": True,
@@ -1506,6 +1529,7 @@ async def remarkable_status() -> str:
         "usb-web": {
             "read": True,
             "render": True,
+            "export": True,
             "upload": True,
             "mkdir": False,
             "move": False,
@@ -1517,6 +1541,7 @@ async def remarkable_status() -> str:
         "local-dir": {
             "read": True,
             "render": True,
+            "export": True,
             "upload": False,
             "mkdir": False,
             "move": False,
@@ -1556,7 +1581,7 @@ async def remarkable_status() -> str:
         # when not in read-only mode.
         transport_caps = capability_matrix[transport]
         effective_caps = {
-            cap: (supported if cap in ("read", "render") else supported and writes_on)
+            cap: (supported if cap in ("read", "render", "export") else supported and writes_on)
             for cap, supported in transport_caps.items()
         }
 
@@ -1581,6 +1606,9 @@ async def remarkable_status() -> str:
             result["root_path"] = root
 
         hint_parts = [f"Connected successfully via {transport}. Found {doc_count} documents."]
+        hint_parts.append(
+            "Single-document PDF/Markdown export is available and does not modify the tablet."
+        )
         if fell_back:
             hint_parts.append(
                 f"Note: {selected_transport} was selected but unavailable, so it "
@@ -2106,3 +2134,411 @@ async def remarkable_image(
             message=str(e),
             suggestion="Check remarkable_status() to verify your connection.",
         )
+
+
+@dataclass(frozen=True)
+class _DocumentExportResult:
+    build: ExportBuildResult
+    metadata: ExportMetadata
+    representation: str
+    pdf_mode: PdfMode | None = None
+
+
+class _ExportRequestError(Exception):
+    def __init__(self, error_type: str, message: str, suggestion: str):
+        super().__init__(message)
+        self.error_type = error_type
+        self.message = message
+        self.suggestion = suggestion
+
+
+def _extract_source_text_from_bytes(data: bytes, source_type: str) -> str:
+    suffix = f".{source_type}"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(data)
+        path = Path(tmp.name)
+    try:
+        if source_type == "pdf":
+            return extract_text_from_pdf(path)
+        if source_type == "epub":
+            return extract_text_from_epub(path)
+        raise ValueError(f"Unsupported source type: {source_type}")
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def _publish_document_export(
+    client,
+    target_doc,
+    metadata: ExportMetadata,
+    *,
+    output_format: Literal["pdf", "markdown"],
+    pdf_mode: PdfMode,
+    include_ocr: bool,
+    background_color: str,
+) -> PublishedExport[_DocumentExportResult]:
+    """Download, build, and publish one export without touching tablet state."""
+
+    def writer(destination: Path) -> _DocumentExportResult:
+        raw_doc = client.download(target_doc)
+        if not raw_doc:
+            raise _ExportRequestError(
+                "document_download_failed",
+                "The transport returned an empty document payload.",
+                "Retry the export or use remarkable_status() to check the connection.",
+            )
+
+        if _is_pdf_payload(raw_doc):
+            page_count = _count_pdf_pages(raw_doc)
+            resolved = replace(metadata, page_count=page_count)
+            if output_format == "pdf":
+                if pdf_mode == "annotations":
+                    raise _ExportRequestError(
+                        "annotation_only_not_available",
+                        (
+                            "Annotation-only PDF export is unavailable because this "
+                            "transport returned a flattened native PDF."
+                        ),
+                        (
+                            "Use pdf_mode='merged', or connect through cloud/SSH, local-dir, "
+                            "or newer USB firmware that exposes an rmdoc archive."
+                        ),
+                    )
+                build = write_native_pdf_export(raw_doc, destination, resolved)
+                return _DocumentExportResult(
+                    build=build,
+                    metadata=resolved,
+                    representation="tablet_pdf",
+                    pdf_mode=pdf_mode,
+                )
+
+            source_text = _extract_source_text_from_bytes(raw_doc, "pdf")
+            warnings = [
+                (
+                    "This transport returned a flattened native PDF. Source/visible text "
+                    "was preserved, but separate typed, annotation, highlight, and OCR "
+                    "layers were unavailable."
+                )
+            ]
+            build = write_markdown_export(
+                destination,
+                resolved,
+                source_text=source_text,
+                extraction=None,
+                include_ocr=include_ocr,
+                warnings=warnings,
+            )
+            return _DocumentExportResult(
+                build=build,
+                metadata=resolved,
+                representation="tablet_pdf",
+            )
+
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(raw_doc)
+            archive_path = Path(tmp.name)
+
+        try:
+            try:
+                page_count = get_document_page_count(archive_path)
+                archive_type = get_document_file_type(archive_path) or metadata.source_type
+            except Exception as exc:
+                raise _ExportRequestError(
+                    "invalid_document_archive",
+                    f"The downloaded document archive could not be read: {exc}",
+                    "Retry the export. If it persists, try another transport.",
+                ) from exc
+
+            resolved = replace(
+                metadata,
+                source_type=archive_type or "notebook",
+                page_count=page_count if page_count > 0 else None,
+            )
+
+            if output_format == "pdf":
+                # USB web can expose a firmware-rendered PDF for notebooks and
+                # EPUBs. Prefer it in merged mode because it includes source
+                # underlays that the local archive cannot reconstruct.
+                if pdf_mode == "merged" and resolved.source_type != "pdf":
+                    native_pdf = download_raw_file(client, target_doc, "pdf")
+                    if _is_pdf_payload(native_pdf):
+                        native_pages = _count_pdf_pages(native_pdf)
+                        native_metadata = replace(resolved, page_count=native_pages)
+                        build = write_native_pdf_export(native_pdf, destination, native_metadata)
+                        return _DocumentExportResult(
+                            build=build,
+                            metadata=native_metadata,
+                            representation="tablet_pdf",
+                            pdf_mode=pdf_mode,
+                        )
+
+                if resolved.page_count is None and resolved.source_type == "pdf":
+                    source_pdf = download_raw_file(client, target_doc, "pdf")
+                    if _is_pdf_payload(source_pdf):
+                        resolved = replace(resolved, page_count=_count_pdf_pages(source_pdf))
+
+                if resolved.page_count is None:
+                    raise _ExportRequestError(
+                        "page_count_unavailable",
+                        "The physical page count could not be determined for this document.",
+                        (
+                            "Retry with another transport. PDF export cannot preserve page "
+                            "order safely without a physical page count."
+                        ),
+                    )
+
+                build = write_archive_pdf_export(
+                    archive_path,
+                    destination,
+                    resolved,
+                    pdf_mode=pdf_mode,
+                    background_color=background_color,
+                )
+                return _DocumentExportResult(
+                    build=build,
+                    metadata=resolved,
+                    representation="document_archive",
+                    pdf_mode=pdf_mode,
+                )
+
+            warnings: list[str] = []
+            extraction = None
+            try:
+                extraction = extract_text_from_document_zip(
+                    archive_path,
+                    include_ocr=include_ocr,
+                    doc_id=resolved.document_id,
+                )
+                if resolved.page_count is None:
+                    extracted_pages = int(extraction.get("pages") or 0)
+                    if extracted_pages > 0:
+                        resolved = replace(resolved, page_count=extracted_pages)
+            except Exception as exc:
+                warnings.append(f"Annotation extraction failed: {exc}")
+
+            source_text = None
+            if resolved.source_type in ("pdf", "epub"):
+                source_data = download_raw_file(client, target_doc, resolved.source_type)
+                if source_data:
+                    try:
+                        source_text = _extract_source_text_from_bytes(
+                            source_data,
+                            resolved.source_type,
+                        )
+                    except Exception as exc:
+                        warnings.append(
+                            f"{resolved.source_type.upper()} source text extraction failed: {exc}"
+                        )
+                else:
+                    warnings.append(
+                        f"Original {resolved.source_type.upper()} source data was unavailable."
+                    )
+
+            if extraction is None and source_text is None:
+                raise _ExportRequestError(
+                    "no_exportable_content",
+                    "Neither source text nor annotation content could be extracted.",
+                    "Retry with another transport or verify the document opens on the tablet.",
+                )
+
+            build = write_markdown_export(
+                destination,
+                resolved,
+                source_text=source_text,
+                extraction=extraction,
+                include_ocr=include_ocr,
+                warnings=warnings,
+            )
+            return _DocumentExportResult(
+                build=build,
+                metadata=resolved,
+                representation="document_archive",
+            )
+        finally:
+            archive_path.unlink(missing_ok=True)
+
+    extension = "pdf" if output_format == "pdf" else "md"
+    source_name = metadata.title
+    for source_suffix in (".pdf", ".epub"):
+        if source_name.lower().endswith(source_suffix):
+            source_name = source_name[: -len(source_suffix)]
+            break
+    return export_store.publish(
+        filename=f"{source_name}.{extension}",
+        output_format=output_format,
+        writer=writer,
+    )
+
+
+@mcp.tool(annotations=EXPORT_ANNOTATIONS)
+async def remarkable_export(
+    document: str,
+    output_format: Literal["pdf", "markdown"] = "pdf",
+    pdf_mode: Literal["merged", "annotations"] = "merged",
+    include_ocr: bool = False,
+):
+    """
+    <usecase>Export one reMarkable document as a reusable PDF or Markdown file.</usecase>
+    <instructions>
+    Exports a single document without modifying the tablet or its library.
+
+    The generated file is written to a server-managed temporary directory and
+    returned as an MCP ResourceLink. The tool response stays small: it never embeds
+    the PDF/Markdown as base64 and never writes to an arbitrary host path. The
+    resource expires after 15 minutes and may be evicted earlier when more than
+    eight exports are retained. Fetch and save the linked resource for durable use.
+
+    PDF behavior:
+    - `pdf_mode="merged"` (default) preserves complete physical pages, combining
+      mapped PDF underlays and reMarkable annotations.
+    - `pdf_mode="annotations"` exports full-page annotation layers only when the
+      transport provides a document archive.
+    - Pages remain in physical device order. A render failure produces a labeled
+      placeholder at that ordinal and a partial-export warning; pages are not skipped.
+
+    Markdown behavior:
+    - Preserves basic source metadata and fixed source text, typed text, annotation,
+      highlight, and OCR sections.
+    - OCR is opt-in and uses the same configured/cached OCR path as remarkable_read.
+    - Extracted text is kept verbatim; the exporter does not invent headings, lists,
+      links, or page attribution it cannot prove.
+    </instructions>
+    <parameters>
+    - document: Document name or path (use remarkable_browse to find documents).
+    - output_format: "pdf" (default) or "markdown".
+    - pdf_mode: PDF-only mode, "merged" (default) or "annotations".
+    - include_ocr: Enable existing handwriting OCR for Markdown (default: False).
+    </parameters>
+    <examples>
+    - remarkable_export("Meeting Notes")
+    - remarkable_export("Research Paper", output_format="pdf", pdf_mode="annotations")
+    - remarkable_export("Journal", output_format="markdown", include_ocr=True)
+    </examples>
+    """
+    if output_format == "markdown" and pdf_mode != "merged":
+        return make_error(
+            error_type="invalid_export_options",
+            message="pdf_mode applies only to PDF exports.",
+            suggestion="Use pdf_mode='merged' for Markdown, or choose output_format='pdf'.",
+        )
+    if output_format == "pdf" and include_ocr:
+        return make_error(
+            error_type="invalid_export_options",
+            message="include_ocr applies only to Markdown exports.",
+            suggestion="Set include_ocr=False, or choose output_format='markdown'.",
+        )
+
+    try:
+        client = await run_blocking(get_rmapi)
+        collection = await run_blocking(client.get_meta_items)
+        items_by_id = get_items_by_id(collection)
+        target_doc = _find_target_document(collection, items_by_id, document)
+        if target_doc is None:
+            root = _get_root_path()
+            candidates = [
+                item
+                for item in collection
+                if not item.is_folder
+                and not _is_cloud_archived(item)
+                and _is_within_root(get_item_path(item, items_by_id), root)
+            ]
+            similar = find_similar_documents(document, candidates)
+            return make_error(
+                error_type="document_not_found",
+                message=f"Document not found: '{document}'",
+                suggestion="Use remarkable_browse() to find the exact document name or path.",
+                did_you_mean=similar if similar else None,
+            )
+
+        full_path = get_item_path(target_doc, items_by_id)
+        display_path = _apply_root_filter(full_path)
+        source_type = await run_blocking(get_file_type, client, target_doc)
+        metadata = ExportMetadata(
+            document_id=target_doc.ID,
+            title=target_doc.VissibleName,
+            path=display_path,
+            source_type=source_type,
+            page_count=None,
+            modified=getattr(target_doc, "ModifiedClient", None),
+            tags=tuple(getattr(target_doc, "tags", None) or ()),
+        )
+        background = await run_blocking(get_background_color)
+        published = await run_blocking(
+            _publish_document_export,
+            client,
+            target_doc,
+            metadata,
+            output_format=output_format,
+            pdf_mode=pdf_mode,
+            include_ocr=include_ocr,
+            background_color=background,
+        )
+    except _ExportRequestError as exc:
+        return make_error(
+            error_type=exc.error_type,
+            message=exc.message,
+            suggestion=exc.suggestion,
+        )
+    except Exception as exc:
+        return make_error(
+            error_type="export_failed",
+            message=str(exc),
+            suggestion=(
+                "Retry the export, or use remarkable_status() to verify the active transport."
+            ),
+        )
+
+    resource = published.resource
+    result = published.result
+    build = result.build
+    response = {
+        "document": result.metadata.title,
+        "document_id": result.metadata.document_id,
+        "path": result.metadata.path,
+        "source_type": result.metadata.source_type,
+        "format": output_format,
+        "mime_type": resource.mime_type,
+        "filename": resource.filename,
+        "size": resource.size,
+        "pages": build.pages,
+        "status": build.status,
+        "failed_pages": list(build.failed_pages),
+        "warnings": list(build.warnings),
+        "representation": result.representation,
+        "resource_uri": resource.uri,
+        "expires_at": resource.expires_at,
+        "temporary_local_file": True,
+    }
+    if result.pdf_mode is not None:
+        response["pdf_mode"] = result.pdf_mode
+    if build.ocr_backend:
+        response["ocr_backend"] = build.ocr_backend
+
+    hint = (
+        f"Temporary {output_format.upper()} export ready as an MCP resource "
+        f"({resource.size} bytes). It expires at {resource.expires_at.isoformat()}; "
+        "fetch and save the resource for durable storage. The tablet was not modified."
+    )
+    if build.status == "partial":
+        hint = f"Partial export: {'; '.join(build.warnings) or 'some pages failed'}. {hint}"
+
+    info = TextContent(type="text", text=make_response(response, hint))
+    link = ResourceLink(
+        type="resource_link",
+        name=resource.filename,
+        title=f"{result.metadata.title} ({output_format.upper()} export)",
+        uri=resource.uri,
+        description=(
+            f"Temporary export of reMarkable document {result.metadata.document_id}; "
+            f"expires {resource.expires_at.isoformat()}."
+        ),
+        mime_type=resource.mime_type,
+        size=resource.size,
+        meta={
+            "documentId": result.metadata.document_id,
+            "documentPath": result.metadata.path,
+            "expiresAt": resource.expires_at.isoformat(),
+            "temporaryLocalFile": True,
+        },
+    )
+    return [info, link]

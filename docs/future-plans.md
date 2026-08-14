@@ -17,8 +17,8 @@ See [#118](https://github.com/SamMorrowDrums/remarkable-mcp/issues/118).
 
 ### Export
 
-Provide reusable PDF and Markdown export for one document, then add folder and
-filter batching. See
+Reusable PDF and Markdown export for one document is available through
+`remarkable_export`. Reuse that primitive for folder and filter batching next. See
 [#27](https://github.com/SamMorrowDrums/remarkable-mcp/issues/27).
 
 ## Search and OCR

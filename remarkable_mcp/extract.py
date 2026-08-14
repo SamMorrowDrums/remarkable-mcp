@@ -1400,35 +1400,46 @@ def render_page_full_page_from_document_zip(
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(tmpdir_path)
 
-        rm_files = _get_ordered_rm_files(tmpdir_path)
-        page_order = _get_page_order(tmpdir_path)
-
-        if page_order:
-            if page < 1 or page > len(page_order):
-                return None
-            rm_file = _select_rm_file_for_page(tmpdir_path, rm_files, page)
-        else:
-            # No page metadata: fall back to filesystem order of .rm files.
-            if page < 1 or page > len(rm_files):
-                return None
-            rm_file = rm_files[page - 1]
-
-        if rm_file is not None and rm_file.exists():
-            return render_rm_file_full_page_png(rm_file, background_color=background_color)
-
-        # The page exists in cPages but has no .rm layer yet (a blank page):
-        # render a blank full page at the document's paper size so the viewer
-        # still shows it. (The write tool will return no_page_layer until the
-        # page has a drawable layer / has been added via remarkable_add_page.)
-        paper_w, paper_h = _document_paper_size(rm_files)
-        svg = _svg_full_page([], paper_w, paper_h)
-        scale = FULL_PAGE_TARGET_LONG_EDGE / max(paper_w, paper_h)
-        png = _svg_string_to_png(
-            svg, max(1, round(paper_w * scale)), max(1, round(paper_h * scale)), background_color
+        return render_page_full_page_from_extracted_document(
+            tmpdir_path,
+            page=page,
+            background_color=background_color,
         )
-        if png is None:
+
+
+def render_page_full_page_from_extracted_document(
+    tmpdir_path: Path, page: int = 1, background_color: Optional[str] = None
+) -> Optional[Tuple[bytes, Tuple[float, float]]]:
+    """Render a full page from an already extracted document archive."""
+    rm_files = _get_ordered_rm_files(tmpdir_path)
+    page_order = _get_page_order(tmpdir_path)
+
+    if page_order:
+        if page < 1 or page > len(page_order):
             return None
-        return png, (paper_w, paper_h)
+        rm_file = _select_rm_file_for_page(tmpdir_path, rm_files, page)
+    else:
+        # No page metadata: fall back to filesystem order of .rm files.
+        if page < 1 or page > len(rm_files):
+            return None
+        rm_file = rm_files[page - 1]
+
+    if rm_file is not None and rm_file.exists():
+        return render_rm_file_full_page_png(rm_file, background_color=background_color)
+
+    # The page exists in cPages but has no .rm layer yet (a blank page):
+    # render a blank full page at the document's paper size so the viewer
+    # still shows it. (The write tool will return no_page_layer until the
+    # page has a drawable layer / has been added via remarkable_add_page.)
+    paper_w, paper_h = _document_paper_size(rm_files)
+    svg = _svg_full_page([], paper_w, paper_h)
+    scale = FULL_PAGE_TARGET_LONG_EDGE / max(paper_w, paper_h)
+    png = _svg_string_to_png(
+        svg, max(1, round(paper_w * scale)), max(1, round(paper_h * scale)), background_color
+    )
+    if png is None:
+        return None
+    return png, (paper_w, paper_h)
 
 
 def document_zip_has_pdf_underlay(zip_path: Path) -> bool:
@@ -1704,11 +1715,6 @@ def render_merged_page_from_document_zip(
         Tuple of (png_bytes, note) where note is an informational message
         or None. Returns (None, error_note) on failure.
     """
-    import io
-
-    import fitz
-    from PIL import Image as PILImage
-
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
 
@@ -1716,172 +1722,180 @@ def render_merged_page_from_document_zip(
             with zipfile.ZipFile(zip_path, "r") as zf:
                 zf.extractall(tmpdir_path)
         except Exception:
-            # Fall back to annotation-only
-            png = render_page_from_document_zip(zip_path, page, background_color)
-            return png, "Could not extract zip; returned annotation-only render."
+            return None, "Could not extract document archive."
 
-        # Find the PDF file in the extracted directory. If multiple are present
-        # (rare), prefer the one whose stem matches the .content document id so
-        # selection is deterministic.
-        pdf_files = list(tmpdir_path.glob("**/*.pdf"))
-        if not pdf_files:
-            # Notebook (no PDF underlay): render the page's own strokes,
-            # selected by id so multi-page notebooks with a blank page don't
-            # shift (see _select_rm_file_for_page).
-            rm_files = _get_ordered_rm_files(tmpdir_path)
-            target = _select_rm_file_for_page(tmpdir_path, rm_files, page)
-            if target is None:
-                return None, f"Page {page} has no annotation strokes."
-            png = render_rm_file_to_png(target, background_color=background_color)
-            return png, "No PDF underlay found; returned annotation-only render."
+        return render_merged_page_from_extracted_document(
+            tmpdir_path,
+            page=page,
+            background_color=background_color,
+            canvas_width=canvas_width,
+            canvas_height=canvas_height,
+        )
 
-        content_stems = {p.stem for p in tmpdir_path.glob("*.content")}
-        matching = [p for p in pdf_files if p.stem in content_stems]
-        pdf_path = matching[0] if matching else sorted(pdf_files)[0]
-        pdf_bytes = pdf_path.read_bytes()
 
-        rm_files = _get_ordered_rm_files(tmpdir_path)
-        total_pages = len(_get_page_order(tmpdir_path)) or len(rm_files)
+def render_merged_page_from_extracted_document(
+    tmpdir_path: Path,
+    page: int = 1,
+    background_color: Optional[str] = None,
+    canvas_width: Optional[int] = None,
+    canvas_height: Optional[int] = None,
+) -> tuple[Optional[bytes], Optional[str]]:
+    """Render a merged page from an already extracted document archive."""
+    import io
 
-        if page < 1 or page > total_pages:
-            return None, f"Page {page} out of range (document has {total_pages} pages)."
+    import fitz
+    from PIL import Image as PILImage
 
-        # Select the .rm for this page by id (see _select_rm_file_for_page). A
-        # page with no strokes yields None and composites to the bare PDF page.
-        target_rm_file: Optional[Path] = _select_rm_file_for_page(tmpdir_path, rm_files, page)
+    # Find the PDF file in the extracted directory. If multiple are present
+    # (rare), prefer the one whose stem matches the .content document id so
+    # selection is deterministic.
+    pdf_files = list(tmpdir_path.glob("**/*.pdf"))
+    if not pdf_files:
+        full_page = render_page_full_page_from_extracted_document(
+            tmpdir_path,
+            page=page,
+            background_color=background_color,
+        )
+        if full_page is None:
+            return None, f"Page {page} has no renderable annotation layer."
+        return full_page[0], "No PDF underlay found; returned full-page annotation render."
 
-        def annotation_only(reason: str) -> Tuple[Optional[bytes], Optional[str]]:
-            """Fallback when the PDF side of the merge fails: render just the
-            page's own strokes — or nothing, for a strokeless page (every
-            fallback path must tolerate ``target_rm_file`` being None)."""
-            if target_rm_file is None:
-                return None, f"{reason}; page has no annotation strokes."
-            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
-            return png, f"{reason}; annotation-only render."
+    content_stems = {p.stem for p in tmpdir_path.glob("*.content")}
+    matching = [p for p in pdf_files if p.stem in content_stems]
+    pdf_path = matching[0] if matching else sorted(pdf_files)[0]
+    pdf_bytes = pdf_path.read_bytes()
 
-        # Determine which PDF page this reMarkable page maps to. Handles both the
-        # formatVersion 2 (cPages.redir) and formatVersion 1 (redirectionPageMap)
-        # layouts; the latter is used by many cloud-imported PDFs, which would
-        # otherwise be misread as user-added pages and rendered annotation-only.
-        pdf_page_index: Optional[int] = _resolve_pdf_page_index(tmpdir_path, page)
-
-        if pdf_page_index is None:
-            # No redirect — this page may be a user-added blank page
-            if target_rm_file is None:
-                return None, "Page has no PDF underlay and no annotations."
-            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
-            return png, "Page has no PDF underlay (user-added page); annotation-only render."
-
-        # Get PDF page dimensions to set annotation viewBox correctly
+    rm_files = _get_ordered_rm_files(tmpdir_path)
+    total_pages = len(_get_page_order(tmpdir_path)) or len(rm_files)
+    if total_pages == 0:
         try:
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            try:
-                if pdf_page_index >= len(doc):
-                    return annotation_only("PDF page index out of range")
-
-                pdf_page = doc[pdf_page_index]
-                pdf_w_pt = pdf_page.rect.width  # PDF width in points
-                pdf_h_pt = pdf_page.rect.height  # PDF height in points
-            finally:
-                doc.close()
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as pdf_document:
+                total_pages = len(pdf_document)
         except Exception:
-            return annotation_only("Could not read PDF dimensions")
+            total_pages = 0
 
-        # Determine output canvas size
-        out_w = canvas_width or int(pdf_w_pt * 2)  # 2x for decent resolution
-        out_h = canvas_height or int(pdf_h_pt * 2)
+    if page < 1 or page > total_pages:
+        return None, f"Page {page} out of range (document has {total_pages} pages)."
 
-        # 1. Rasterize the PDF page
-        pdf_png = _render_pdf_page_to_png(pdf_bytes, pdf_page_index, out_w, out_h)
-        if pdf_png is None:
-            return annotation_only("PDF rasterization failed")
+    # Select the .rm for this page by id (see _select_rm_file_for_page). A
+    # page with no strokes yields None and composites to the bare PDF page.
+    target_rm_file: Optional[Path] = _select_rm_file_for_page(tmpdir_path, rm_files, page)
 
-        # 2. Render annotation layer to SVG, then to PNG with transparent background
-        ann_svg_path = None
-        ann_png_bytes = None
+    def annotation_only(reason: str) -> Tuple[Optional[bytes], Optional[str]]:
+        """Return a complete annotation page when the PDF side cannot be used."""
+        full_page = render_page_full_page_from_extracted_document(
+            tmpdir_path,
+            page=page,
+            background_color=background_color,
+        )
+        if full_page is None:
+            return None, f"{reason}; page has no renderable annotation layer."
+        return full_page[0], f"{reason}; returned full-page annotation render."
 
+    # Determine which PDF page this reMarkable page maps to. Handles both the
+    # formatVersion 2 (cPages.redir) and formatVersion 1 (redirectionPageMap)
+    # layouts; the latter is used by many cloud-imported PDFs, which would
+    # otherwise be misread as user-added pages and rendered annotation-only.
+    pdf_page_index: Optional[int] = _resolve_pdf_page_index(tmpdir_path, page)
+
+    if pdf_page_index is None:
+        return annotation_only("Page has no PDF underlay (user-added page)")
+
+    # Get PDF page dimensions to set annotation viewBox correctly
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         try:
-            with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
-                ann_svg_path = Path(tmp_svg.name)
+            if pdf_page_index >= len(doc):
+                return annotation_only("PDF page index out of range")
 
-            if target_rm_file is not None and _rm_to_svg(target_rm_file, ann_svg_path):
-                # Read the SVG and adjust viewBox to match PDF page bounds.
-                #
-                # rmscene emits stroke/highlight coordinates in the reMarkable
-                # device coordinate grid, NOT in PDF points: x=0 is the horizontal
-                # centre of the page and y=0 the top, and one PDF point is
-                # `_rm_units_per_point()` units (see that function for the scale
-                # and how to make it device-derived). To map the whole page
-                # [0,W]x[0,H] pt into the output canvas, set the SVG viewBox to the
-                # rmscene rectangle that covers it: (-W*k/2, 0, W*k, H*k) with
-                # k = units-per-point. (The previous code assumed k=1, i.e.
-                # rmscene units == points, which placed strokes far outside the
-                # page and filled it black.)
-                svg_content = ann_svg_path.read_text()
-
-                blocks = _v6_blocks(target_rm_file)
-                paper_size = _v6_paper_size(blocks) if blocks is not None else None
-                points_per_unit = _points_per_unit(paper_size)
-                viewbox = _annotation_page_viewbox(
-                    pdf_w_pt,
-                    pdf_h_pt,
-                    points_per_unit,
-                    centered_x=blocks is not None,
-                )
-                svg_content = _rewrite_svg_root(
-                    svg_content,
-                    viewbox=viewbox,
-                    width=out_w,
-                    height=out_h,
-                )
-
-                # Render SVG to PNG with a transparent background.
-                ann_png_bytes = _svg_string_to_png(
-                    svg_content,
-                    out_w,
-                    out_h,
-                    None,
-                )
-                if ann_png_bytes is None:
-                    raise RuntimeError("PyMuPDF could not rasterize the annotation SVG")
-        except Exception as exc:
-            # Annotation rendering failed; we'll just return the PDF, but
-            # record the failure so callers can surface it as a note.
-            logger.debug("Annotation overlay rendering failed: %s", exc)
-            ann_render_error = exc
-        else:
-            ann_render_error = None
+            pdf_page = doc[pdf_page_index]
+            pdf_w_pt = pdf_page.rect.width
+            pdf_h_pt = pdf_page.rect.height
         finally:
-            if ann_svg_path:
-                ann_svg_path.unlink(missing_ok=True)
+            doc.close()
+    except Exception:
+        return annotation_only("Could not read PDF dimensions")
 
-        # 3. Composite: PDF base + annotation overlay
-        try:
-            pdf_img = PILImage.open(io.BytesIO(pdf_png)).convert("RGBA")
+    # Determine output canvas size
+    out_w = canvas_width or int(pdf_w_pt * 2)
+    out_h = canvas_height or int(pdf_h_pt * 2)
 
-            if ann_png_bytes:
-                ann_img = PILImage.open(io.BytesIO(ann_png_bytes)).convert("RGBA")
-                # Resize annotation to match PDF if needed
-                if ann_img.size != pdf_img.size:
-                    ann_img = ann_img.resize(pdf_img.size, PILImage.LANCZOS)
-                composite = PILImage.alpha_composite(pdf_img, ann_img)
-                merged_note = None
-            else:
-                composite = pdf_img
-                merged_note = (
-                    "Annotation overlay failed to render; returned PDF page without annotations."
-                    if ann_render_error is not None
-                    else None
-                )
+    # 1. Rasterize the PDF page
+    pdf_png = _render_pdf_page_to_png(pdf_bytes, pdf_page_index, out_w, out_h)
+    if pdf_png is None:
+        return annotation_only("PDF rasterization failed")
 
-            # Convert to RGB for PNG output (no alpha needed in final)
-            composite = composite.convert("RGB")
-            buf = io.BytesIO()
-            composite.save(buf, format="PNG")
-            return buf.getvalue(), merged_note
-        except Exception:
-            # Last resort: return annotation-only from already-extracted .rm file
-            return annotation_only("Compositing failed")
+    # 2. Render annotation layer to SVG, then to PNG with transparent background
+    ann_svg_path = None
+    ann_png_bytes = None
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
+            ann_svg_path = Path(tmp_svg.name)
+
+        if target_rm_file is not None and _rm_to_svg(target_rm_file, ann_svg_path):
+            # rmscene coordinates use the device paper grid, not PDF points. Set
+            # the root viewBox to the calibrated page rectangle before rasterizing.
+            svg_content = ann_svg_path.read_text()
+
+            blocks = _v6_blocks(target_rm_file)
+            paper_size = _v6_paper_size(blocks) if blocks is not None else None
+            points_per_unit = _points_per_unit(paper_size)
+            viewbox = _annotation_page_viewbox(
+                pdf_w_pt,
+                pdf_h_pt,
+                points_per_unit,
+                centered_x=blocks is not None,
+            )
+            svg_content = _rewrite_svg_root(
+                svg_content,
+                viewbox=viewbox,
+                width=out_w,
+                height=out_h,
+            )
+
+            ann_png_bytes = _svg_string_to_png(
+                svg_content,
+                out_w,
+                out_h,
+                None,
+            )
+            if ann_png_bytes is None:
+                raise RuntimeError("PyMuPDF could not rasterize the annotation SVG")
+    except Exception as exc:
+        # Annotation rendering failed; return the PDF page but expose the loss.
+        logger.debug("Annotation overlay rendering failed: %s", exc)
+        ann_render_error = exc
+    else:
+        ann_render_error = None
+    finally:
+        if ann_svg_path:
+            ann_svg_path.unlink(missing_ok=True)
+
+    # 3. Composite: PDF base + annotation overlay
+    try:
+        pdf_img = PILImage.open(io.BytesIO(pdf_png)).convert("RGBA")
+
+        if ann_png_bytes:
+            ann_img = PILImage.open(io.BytesIO(ann_png_bytes)).convert("RGBA")
+            if ann_img.size != pdf_img.size:
+                ann_img = ann_img.resize(pdf_img.size, PILImage.LANCZOS)
+            composite = PILImage.alpha_composite(pdf_img, ann_img)
+            merged_note = None
+        else:
+            composite = pdf_img
+            merged_note = (
+                "Annotation overlay failed to render; returned PDF page without annotations."
+                if ann_render_error is not None
+                else None
+            )
+
+        composite = composite.convert("RGB")
+        buf = io.BytesIO()
+        composite.save(buf, format="PNG")
+        return buf.getvalue(), merged_note
+    except Exception:
+        return annotation_only("Compositing failed")
 
 
 def get_document_page_count(zip_path: Path) -> int:

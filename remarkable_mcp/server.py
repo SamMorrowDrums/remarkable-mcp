@@ -90,7 +90,7 @@ def _build_instructions() -> str:
     # desktop app's private sync cache).
     write_mode = not read_only_mode and not local_dir_mode
 
-    read_only_note = "" if write_mode else " All operations are read-only."
+    read_only_note = "" if write_mode else " All tablet and library operations are read-only."
 
     instructions = (
         "# reMarkable MCP Server\n\n"
@@ -103,6 +103,8 @@ def _build_instructions() -> str:
 - `remarkable_recent(limit)` - Get recently modified documents
 - `remarkable_status()` - Check connection and diagnose issues
 - `remarkable_image(document, page, include_ocr)` - Get a PNG image with optional OCR
+- `remarkable_export(document, output_format)` - Export one document as a
+  temporary PDF or Markdown resource
 
 ## Recommended Workflows
 
@@ -120,6 +122,11 @@ Use `remarkable_image` when you need visual context:
 
 Example: `remarkable_image("UI Mockup", page=1)` returns a PNG image
 Example: `remarkable_image("Notes", include_ocr=True)` returns image with extracted text
+
+### Exporting a Document
+Use `remarkable_export` for a complete PDF or structured Markdown artifact.
+Exports never modify the tablet, but they do create a server-managed temporary
+local file. The returned resource link expires after 15 minutes.
 
 ### For Large Documents
 Use pagination to avoid overwhelming context. The response includes:
@@ -139,6 +146,7 @@ Use pagination to avoid overwhelming context. The response includes:
 Documents are registered as resources for direct access:
 - `remarkable:///{path}.txt` - Get full extracted text content in one request
 - `remarkableimg:///{path}.page-{N}.png` - Get PNG image of page N (notebooks only)
+- `remarkableexport:///{format}/{id}` - Fetch a temporary generated export
 - Use resources when you need complete document content without pagination
 """
     )
@@ -313,8 +321,10 @@ async def lifespan(app: MCPServer) -> AsyncIterator[None]:
         # Stop background loader on shutdown (if running)
         await stop_background_loader(task)
         from remarkable_mcp.api import close_device_client
+        from remarkable_mcp.export_resources import cleanup_export_resources
 
         await close_device_client()
+        cleanup_export_resources()
 
 
 try:
