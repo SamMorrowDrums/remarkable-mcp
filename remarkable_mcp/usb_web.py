@@ -22,6 +22,7 @@ Benefits:
 """
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -32,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 # Default USB web interface settings
 DEFAULT_USB_HOST = "http://10.11.99.1"
+GET_408_MAX_ATTEMPTS = 3
+GET_408_BACKOFF_SECONDS = 0.25
 
 # API endpoints
 DOCUMENTS_URL = "/documents/"
@@ -120,10 +123,35 @@ class USBWebClient:
     ) -> requests.Response:
         """Make an HTTP request to the USB web interface."""
         url = f"{self.host}{endpoint}"
+        request_timeout = self.timeout if timeout is None else timeout
+        normalized_method = method.upper()
+
         try:
-            response = requests.request(method, url, timeout=timeout or self.timeout)
-            response.raise_for_status()
-            return response
+            for attempt in range(GET_408_MAX_ATTEMPTS):
+                response = requests.request(normalized_method, url, timeout=request_timeout)
+                if response.status_code != 408 or normalized_method != "GET":
+                    response.raise_for_status()
+                    return response
+
+                if attempt == GET_408_MAX_ATTEMPTS - 1:
+                    response.close()
+                    raise RuntimeError(
+                        f"USB web interface returned HTTP 408 after "
+                        f"{GET_408_MAX_ATTEMPTS} GET attempts for {endpoint}. "
+                        "The tablet's xochitl HTTP handler did not complete the request in time. "
+                        "The tablet may be temporarily busy; wait a moment and try again."
+                    )
+
+                response.close()
+                delay = GET_408_BACKOFF_SECONDS * (2**attempt)
+                logger.warning(
+                    "USB web interface returned HTTP 408 for %s (attempt %d/%d); retrying in %.2fs",
+                    endpoint,
+                    attempt + 1,
+                    GET_408_MAX_ATTEMPTS,
+                    delay,
+                )
+                time.sleep(delay)
         except requests.Timeout:
             raise RuntimeError(
                 "USB web interface request timed out. "

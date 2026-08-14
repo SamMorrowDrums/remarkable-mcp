@@ -183,6 +183,11 @@ def _cache_token(doc_id: str) -> tuple[int, int]:
         return _global_cache_generation, _cache_generation.get(doc_id, 0)
 
 
+def get_cache_generation_token(doc_id: str) -> tuple[int, int]:
+    """Return a token that becomes stale when this document cache is cleared."""
+    return _cache_token(doc_id)
+
+
 def _cache_extraction_result_if_current(
     doc_id: str,
     result: Dict[str, Any],
@@ -235,7 +240,8 @@ def cache_page_ocr(
     page: int,
     backend: str,
     text: str,
-) -> None:
+    generation_token: Optional[tuple[int, int]] = None,
+) -> bool:
     """
     Cache OCR result for a specific page.
 
@@ -247,10 +253,16 @@ def cache_page_ocr(
     """
     cache_key = (doc_id, page, backend)
     with _cache_lock:
+        if generation_token is not None and generation_token != (
+            _global_cache_generation,
+            _cache_generation.get(doc_id, 0),
+        ):
+            return False
         _page_ocr_cache[cache_key] = {
             "text": text,
             "timestamp": time.time(),
         }
+        return True
 
 
 def get_cached_ocr_result(
@@ -974,7 +986,7 @@ def render_rm_file_to_png(
     """
     Render a .rm file to PNG image bytes.
 
-    Uses the rmscene renderers to convert .rm to SVG, then cairosvg to convert to PNG.
+    Uses the rmscene renderers to convert .rm to SVG, then PyMuPDF to convert to PNG.
     The output is sized based on the SVG content bounds with a margin.
 
     Args:
@@ -986,19 +998,11 @@ def render_rm_file_to_png(
     Returns:
         PNG image bytes, or None if rendering failed
     """
-    import subprocess
-    import tempfile
-
     tmp_svg_path = None
-    tmp_png_path = None
-    tmp_raw_path = None
 
     try:
-        # Create temp files
         with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
             tmp_svg_path = Path(tmp_svg.name)
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
-            tmp_png_path = Path(tmp_png.name)
 
         # Convert .rm to SVG via the rmscene renderers
         if not _rm_to_svg(rm_file_path, tmp_svg_path):
@@ -1016,73 +1020,17 @@ def render_rm_file_to_png(
             output_width = REMARKABLE_WIDTH
             output_height = REMARKABLE_HEIGHT
 
-        # Convert SVG to PNG
-        try:
-            import cairosvg
-            from PIL import Image as PILImage
-
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_raw:
-                tmp_raw_path = Path(tmp_raw.name)
-
-            # Use cairosvg with background_color if specified
-            cairosvg.svg2png(
-                url=str(tmp_svg_path),
-                write_to=str(tmp_raw_path),
-                output_width=output_width,
-                output_height=output_height,
-                background_color=background_color,
-            )
-
-            # If no background color specified (transparent), return as-is
-            if background_color is None:
-                with open(tmp_raw_path, "rb") as f:
-                    return f.read()
-
-            # If background color specified, ensure it's applied properly
-            img = PILImage.open(tmp_raw_path)
-            if img.mode == "RGBA" and background_color:
-                # Parse hex color (supports #RRGGBB and #RRGGBBAA formats)
-                r, g, b, a = _parse_hex_color(background_color)
-                # Create background and composite foreground on top
-                if a == 255:
-                    # Fully opaque background - convert to RGB
-                    bg = PILImage.new("RGB", img.size, (r, g, b))
-                    bg.paste(img, mask=img.split()[3])
-                    img = bg
-                elif a > 0:
-                    # Semi-transparent or transparent background
-                    bg = PILImage.new("RGBA", img.size, (r, g, b, a))
-                    img = PILImage.alpha_composite(bg, img)
-                # If a == 0 (fully transparent), return as-is
-            img.save(tmp_png_path)
-
-            with open(tmp_png_path, "rb") as f:
-                return f.read()
-
-        except ImportError:
-            # Fall back to inkscape
-            result = subprocess.run(
-                ["inkscape", str(tmp_svg_path), "--export-filename", str(tmp_png_path)],
-                capture_output=True,
-                timeout=30,
-            )
-            if result.returncode != 0:
-                return None
-
-            with open(tmp_png_path, "rb") as f:
-                return f.read()
-
-    except subprocess.TimeoutExpired:
-        return None
+        return _svg_string_to_png(
+            tmp_svg_path.read_text(),
+            output_width,
+            output_height,
+            background_color,
+        )
     except Exception:
         return None
     finally:
         if tmp_svg_path:
             tmp_svg_path.unlink(missing_ok=True)
-        if tmp_png_path:
-            tmp_png_path.unlink(missing_ok=True)
-        if tmp_raw_path:
-            tmp_raw_path.unlink(missing_ok=True)
 
 
 def _svg_full_page(paths: list, paper_w: float, paper_h: float) -> str:
@@ -1107,20 +1055,70 @@ def _svg_full_page(paths: list, paper_w: float, paper_h: float) -> str:
 def _svg_string_to_png(
     svg: str, output_width: int, output_height: int, background_color: Optional[str]
 ) -> Optional[bytes]:
-    """Rasterize an in-memory SVG string to PNG bytes via cairosvg."""
+    """Rasterize an SVG string to exact-size PNG bytes without system Cairo."""
+    import io
+
     try:
-        import cairosvg
+        import fitz
     except ImportError:
-        return None
-    try:
-        return cairosvg.svg2png(
-            bytestring=svg.encode("utf-8"),
-            output_width=output_width,
-            output_height=output_height,
-            background_color=background_color,
+        logger.error(
+            "SVG rasterization requires PyMuPDF. Reinstall remarkable-mcp so its "
+            "runtime dependencies are available."
         )
-    except Exception:
         return None
+
+    if output_width < 1 or output_height < 1:
+        logger.error(
+            "SVG rasterization requires positive output dimensions, got %sx%s.",
+            output_width,
+            output_height,
+        )
+        return None
+
+    doc = None
+    try:
+        doc = fitz.open(stream=svg.encode("utf-8"), filetype="svg")
+        if len(doc) != 1:
+            raise ValueError(f"expected one SVG page, found {len(doc)}")
+
+        page = doc[0]
+        if page.rect.width <= 0 or page.rect.height <= 0:
+            raise ValueError(f"SVG has invalid dimensions: {page.rect}")
+
+        matrix = fitz.Matrix(
+            output_width / page.rect.width,
+            output_height / page.rect.height,
+        )
+        pixmap = page.get_pixmap(matrix=matrix, colorspace=fitz.csRGB, alpha=True)
+        png = pixmap.tobytes("png")
+
+        from PIL import Image as PILImage
+
+        image = PILImage.open(io.BytesIO(png)).convert("RGBA")
+        if image.size != (output_width, output_height):
+            image = image.resize((output_width, output_height), PILImage.Resampling.LANCZOS)
+
+        if background_color is not None:
+            red, green, blue, alpha = _parse_hex_color(background_color)
+            background = PILImage.new("RGBA", image.size, (red, green, blue, alpha))
+            image = PILImage.alpha_composite(background, image)
+            if alpha == 255:
+                image = image.convert("RGB")
+
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        return output.getvalue()
+    except Exception as exc:
+        logger.error(
+            "PyMuPDF could not rasterize SVG to PNG (%sx%s): %s",
+            output_width,
+            output_height,
+            exc,
+        )
+        return None
+    finally:
+        if doc is not None:
+            doc.close()
 
 
 def render_rm_file_full_page_png(
@@ -1644,8 +1642,8 @@ def render_tablet_pdf_page_to_png(
     produce an image. The reMarkable's own firmware renders every notebook (and
     annotated PDF/EPUB) to a PDF served at ``/download/<uuid>/pdf``, so this path
     works regardless of the .rm block format, handles empty pages, and—crucially
-    for portability—does not depend on a working ``cairo``/``libcairo`` for
-    ``cairosvg`` (PyMuPDF bundles its own renderer). Credit: ljdutel (#95).
+    for portability—does not depend on a system graphics library (PyMuPDF
+    bundles its own renderer). Credit: ljdutel (#95).
 
     Args:
         pdf_bytes: Raw bytes of the tablet-exported PDF.
@@ -1881,15 +1879,15 @@ def render_merged_page_from_document_zip(
                     height=out_h,
                 )
 
-                # Render SVG to PNG with transparent background
-                import cairosvg
-
-                ann_png_data = cairosvg.svg2png(
-                    bytestring=svg_content.encode("utf-8"),
-                    output_width=out_w,
-                    output_height=out_h,
+                # Render SVG to PNG with a transparent background.
+                ann_png_bytes = _svg_string_to_png(
+                    svg_content,
+                    out_w,
+                    out_h,
+                    None,
                 )
-                ann_png_bytes = ann_png_data
+                if ann_png_bytes is None:
+                    raise RuntimeError("PyMuPDF could not rasterize the annotation SVG")
         except Exception as exc:
             # Annotation rendering failed; we'll just return the PDF, but
             # record the failure so callers can surface it as a note.
@@ -2216,7 +2214,7 @@ def extract_handwriting_ocr(rm_files: List[Path]) -> tuple[Optional[List[str]], 
     Supports multiple backends (set REMARKABLE_OCR_BACKEND env var):
     - "sampling": Uses client's LLM via MCP sampling (requires async context, tools only)
     - "google": Google Cloud Vision - best for handwriting
-    - "tesseract": pytesseract - basic OCR, requires cairosvg (or inkscape)
+    - "tesseract": pytesseract - basic OCR, rasterized locally with PyMuPDF
     - "auto" (default): Google if API key provided, else Tesseract
 
     Note: "sampling" backend requires async context and is only available via tools,
@@ -2277,7 +2275,6 @@ def _ocr_google_vision_rest(rm_files: List[Path], api_key: str) -> Optional[List
     OCR using Google Cloud Vision REST API with API key.
     """
     import base64
-    import subprocess
     import tempfile
 
     import requests
@@ -2286,54 +2283,25 @@ def _ocr_google_vision_rest(rm_files: List[Path], api_key: str) -> Optional[List
 
     for rm_file in rm_files:
         tmp_svg_path = None
-        tmp_png_path = None
-        tmp_raw_path = None
         try:
-            # Create temp files
             with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
                 tmp_svg_path = Path(tmp_svg.name)
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
-                tmp_png_path = Path(tmp_png.name)
 
             # Convert .rm to SVG via the rmscene renderers
             if not _rm_to_svg(rm_file, tmp_svg_path):
                 continue
-            # Convert SVG to PNG
-            try:
-                import cairosvg
-                from PIL import Image as PILImage
 
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_raw:
-                    tmp_raw_path = Path(tmp_raw.name)
-
-                cairosvg.svg2png(
-                    url=str(tmp_svg_path),
-                    write_to=str(tmp_raw_path),
-                    output_width=REMARKABLE_WIDTH,
-                    output_height=REMARKABLE_HEIGHT,
-                )
-
-                # Add white background
-                img = PILImage.open(tmp_raw_path)
-                if img.mode == "RGBA":
-                    bg = PILImage.new("RGB", img.size, (255, 255, 255))
-                    bg.paste(img, mask=img.split()[3])
-                    img = bg
-                img.save(tmp_png_path)
-                tmp_raw_path.unlink(missing_ok=True)
-                tmp_raw_path = None
-            except ImportError:
-                result = subprocess.run(
-                    ["inkscape", str(tmp_svg_path), "--export-filename", str(tmp_png_path)],
-                    capture_output=True,
-                    timeout=30,
-                )
-                if result.returncode != 0:
-                    continue
+            png = _svg_string_to_png(
+                tmp_svg_path.read_text(),
+                REMARKABLE_WIDTH,
+                REMARKABLE_HEIGHT,
+                "#FFFFFF",
+            )
+            if png is None:
+                continue
 
             # Read and encode image
-            with open(tmp_png_path, "rb") as f:
-                image_content = base64.b64encode(f.read()).decode("utf-8")
+            image_content = base64.b64encode(png).decode("utf-8")
 
             # Call Google Vision REST API
             url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
@@ -2359,19 +2327,12 @@ def _ocr_google_vision_rest(rm_files: List[Path], api_key: str) -> Optional[List
                 # API key invalid or API not enabled - fall back to Tesseract
                 return _ocr_tesseract(rm_files)
 
-        except subprocess.TimeoutExpired:
-            # Page rendering timed out - skip this page and continue
-            pass
         except Exception:
             # API call or rendering failed - skip this page and continue
             pass
         finally:
             if tmp_svg_path:
                 tmp_svg_path.unlink(missing_ok=True)
-            if tmp_png_path:
-                tmp_png_path.unlink(missing_ok=True)
-            if tmp_raw_path:
-                tmp_raw_path.unlink(missing_ok=True)
 
     return ocr_results if ocr_results else None
 
@@ -2381,7 +2342,6 @@ def _ocr_google_vision_sdk(rm_files: List[Path]) -> Optional[List[str]]:
     OCR using Google Cloud Vision SDK with service account credentials.
     """
     try:
-        import subprocess
         import tempfile
 
         from google.cloud import vision
@@ -2391,57 +2351,25 @@ def _ocr_google_vision_sdk(rm_files: List[Path]) -> Optional[List[str]]:
 
         for rm_file in rm_files:
             tmp_svg_path = None
-            tmp_png_path = None
-            tmp_raw_path = None
             try:
-                # Create temp files
                 with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
                     tmp_svg_path = Path(tmp_svg.name)
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
-                    tmp_png_path = Path(tmp_png.name)
 
                 # Convert .rm to SVG via the rmscene renderers
                 if not _rm_to_svg(rm_file, tmp_svg_path):
                     continue
-                try:
-                    import cairosvg
-                    from PIL import Image as PILImage
 
-                    # Convert to PNG (comes out with transparent background)
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_raw:
-                        tmp_raw_path = Path(tmp_raw.name)
-
-                    cairosvg.svg2png(
-                        url=str(tmp_svg_path),
-                        write_to=str(tmp_raw_path),
-                        output_width=REMARKABLE_WIDTH,
-                        output_height=REMARKABLE_HEIGHT,
-                    )
-
-                    # Add white background (SVG renders as black-on-transparent)
-                    img = PILImage.open(tmp_raw_path)
-                    if img.mode == "RGBA":
-                        bg = PILImage.new("RGB", img.size, (255, 255, 255))
-                        bg.paste(img, mask=img.split()[3])
-                        img = bg
-                    img.save(tmp_png_path)
-                    tmp_raw_path.unlink(missing_ok=True)
-                    tmp_raw_path = None
-                except ImportError:
-                    # Fall back to inkscape
-                    result = subprocess.run(
-                        ["inkscape", str(tmp_svg_path), "--export-filename", str(tmp_png_path)],
-                        capture_output=True,
-                        timeout=30,
-                    )
-                    if result.returncode != 0:
-                        continue
+                png = _svg_string_to_png(
+                    tmp_svg_path.read_text(),
+                    REMARKABLE_WIDTH,
+                    REMARKABLE_HEIGHT,
+                    "#FFFFFF",
+                )
+                if png is None:
+                    continue
 
                 # Send to Google Vision API
-                with open(tmp_png_path, "rb") as f:
-                    content = f.read()
-
-                image = vision.Image(content=content)
+                image = vision.Image(content=png)
 
                 # Use DOCUMENT_TEXT_DETECTION for best handwriting results
                 response = client.document_text_detection(image=image)
@@ -2452,19 +2380,12 @@ def _ocr_google_vision_sdk(rm_files: List[Path]) -> Optional[List[str]]:
                 if response.full_text_annotation.text:
                     ocr_results.append(response.full_text_annotation.text.strip())
 
-            except subprocess.TimeoutExpired:
-                # Page rendering timed out - skip this page and continue
-                pass
             except Exception:
                 # Rendering or API error - skip this page and continue
                 pass
             finally:
                 if tmp_svg_path:
                     tmp_svg_path.unlink(missing_ok=True)
-                if tmp_png_path:
-                    tmp_png_path.unlink(missing_ok=True)
-                if tmp_raw_path:
-                    tmp_raw_path.unlink(missing_ok=True)
 
         return ocr_results if ocr_results else None
 
@@ -2481,10 +2402,10 @@ def _ocr_tesseract(rm_files: List[Path]) -> Optional[List[str]]:
     OCR using Tesseract.
     Basic quality - designed for printed text, not handwriting.
 
-    Requires: pytesseract, cairosvg (or inkscape)
+    Requires: pytesseract and PyMuPDF.
     """
     try:
-        import subprocess
+        import io
         import tempfile
 
         import pytesseract
@@ -2494,55 +2415,26 @@ def _ocr_tesseract(rm_files: List[Path]) -> Optional[List[str]]:
 
         for rm_file in rm_files:
             tmp_svg_path = None
-            tmp_png_path = None
-            tmp_raw_path = None
             try:
-                # Create temp files
                 with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
                     tmp_svg_path = Path(tmp_svg.name)
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
-                    tmp_png_path = Path(tmp_png.name)
 
                 # Convert .rm to SVG via the rmscene renderers
                 if not _rm_to_svg(rm_file, tmp_svg_path):
                     continue
 
                 # Convert SVG to PNG with higher resolution for better OCR
-                try:
-                    import cairosvg
-
-                    # Convert to PNG (comes out with transparent background)
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_raw:
-                        tmp_raw_path = Path(tmp_raw.name)
-
-                    # Use 1.5x resolution for better OCR (2x is too slow)
-                    cairosvg.svg2png(
-                        url=str(tmp_svg_path),
-                        write_to=str(tmp_raw_path),
-                        output_width=2106,  # 1.5x reMarkable width
-                        output_height=2808,  # 1.5x reMarkable height
-                    )
-
-                    # Add white background (SVG renders as black-on-transparent)
-                    img = Image.open(tmp_raw_path)
-                    if img.mode == "RGBA":
-                        bg = Image.new("RGB", img.size, (255, 255, 255))
-                        bg.paste(img, mask=img.split()[3])
-                        img = bg
-                    img.save(tmp_png_path)
-                    tmp_raw_path.unlink(missing_ok=True)
-                    tmp_raw_path = None
-                except ImportError:
-                    result = subprocess.run(
-                        ["inkscape", str(tmp_svg_path), "--export-filename", str(tmp_png_path)],
-                        capture_output=True,
-                        timeout=30,
-                    )
-                    if result.returncode != 0:
-                        continue
+                png = _svg_string_to_png(
+                    tmp_svg_path.read_text(),
+                    2106,
+                    2808,
+                    "#FFFFFF",
+                )
+                if png is None:
+                    continue
 
                 # Preprocess image for better OCR
-                img = Image.open(tmp_png_path)
+                img = Image.open(io.BytesIO(png))
 
                 # Convert to grayscale
                 img = img.convert("L")
@@ -2562,19 +2454,12 @@ def _ocr_tesseract(rm_files: List[Path]) -> Optional[List[str]]:
                 if text.strip():
                     ocr_results.append(text.strip())
 
-            except subprocess.TimeoutExpired:
-                # Page rendering timed out - skip this page and continue
-                pass
             except Exception:
                 # Rendering or OCR error - skip this page and continue
                 pass
             finally:
                 if tmp_svg_path:
                     tmp_svg_path.unlink(missing_ok=True)
-                if tmp_png_path:
-                    tmp_png_path.unlink(missing_ok=True)
-                if tmp_raw_path:
-                    tmp_raw_path.unlink(missing_ok=True)
 
         return ocr_results if ocr_results else None
 

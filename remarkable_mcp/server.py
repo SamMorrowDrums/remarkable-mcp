@@ -5,12 +5,16 @@ reMarkable MCP Server initialization.
 import logging
 import os
 from contextlib import asynccontextmanager
+from ipaddress import ip_address
 from typing import AsyncIterator
 from urllib.parse import quote, unquote
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 logger = logging.getLogger(__name__)
+
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 class RemarkableMCP(FastMCP):
@@ -172,6 +176,8 @@ You're connected directly to the tablet via SSH. This enables:
 Write operations are enabled. These tools modify your tablet's filesystem:
 
 - `remarkable_upload(file_path, parent_folder, document_name)` - Upload a PDF/EPUB
+- `remarkable_markdown_to_pdf(markdown, document_name, parent_folder, defer_restart)` -
+  Render Markdown as a PDF and upload it
 - `remarkable_mkdir(folder_name, parent)` - Create a folder
 - `remarkable_move(document, dest_folder)` - Move a document/folder
 - `remarkable_rename(document, new_name)` - Rename a document/folder
@@ -195,6 +201,8 @@ Write operations are enabled. These tools modify your tablet's filesystem:
 Upload is available via the USB web interface:
 
 - `remarkable_upload(file_path)` - Upload a PDF/EPUB file
+- `remarkable_markdown_to_pdf(markdown, document_name)` - Render Markdown as a
+  named PDF and upload it to the root folder
 
 Note: mkdir, move, rename, and delete require SSH mode.
 """
@@ -216,6 +224,8 @@ Write operations are enabled (the default). These tools modify your cloud librar
 and sync to all your devices:
 
 - `remarkable_upload(file_path, parent_folder, document_name)` - Upload a PDF/EPUB
+- `remarkable_markdown_to_pdf(markdown, document_name, parent_folder)` - Render
+  Markdown as a PDF and upload it
 - `remarkable_mkdir(folder_name, parent)` - Create a folder
 - `remarkable_move(document, dest_folder)` - Move a document/folder
 - `remarkable_rename(document, new_name)` - Rename a document/folder
@@ -335,6 +345,47 @@ from remarkable_mcp import app_canvas as _app_canvas  # noqa: E402
 _app_canvas.register_app_tools()
 
 
-def run():
-    """Run the MCP server."""
-    mcp.run()
+def _transport_security_for_host(host: str) -> TransportSecuritySettings:
+    """Build a strict Host/Origin allowlist for the actual HTTP bind address."""
+    normalized = host.strip().strip("[]")
+    if normalized in _LOOPBACK_HOSTS:
+        return TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
+            allowed_origins=[
+                "http://127.0.0.1:*",
+                "http://localhost:*",
+                "http://[::1]:*",
+            ],
+        )
+
+    try:
+        address = ip_address(normalized)
+    except ValueError:
+        authority = normalized
+    else:
+        authority = f"[{normalized}]" if address.version == 6 else normalized
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[authority, f"{authority}:*"],
+        allowed_origins=[
+            f"http://{authority}",
+            f"http://{authority}:*",
+            f"https://{authority}",
+            f"https://{authority}:*",
+        ],
+    )
+
+
+def run(
+    transport: str = "stdio",
+    host: str = "127.0.0.1",
+    port: int = 8000,
+):
+    """Run the MCP server over stdio or Streamable HTTP."""
+    if transport == "streamable-http":
+        mcp.settings.host = host
+        mcp.settings.port = port
+        mcp.settings.transport_security = _transport_security_for_host(host)
+    mcp.run(transport=transport)

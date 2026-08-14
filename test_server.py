@@ -12,8 +12,9 @@ import tempfile
 import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 import requests
@@ -112,13 +113,13 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Cloud default: 6 read tools + always-on canvas + 5 write tools.
+        """Cloud default: 6 read tools + always-on canvas + 6 write tools.
 
         ``remarkable_author`` is SSH-only and therefore hidden in cloud mode, so
-        the default (cloud) surface is 12 tools, not 13.
+        the default (cloud) surface is 13 tools, not 14.
         """
         tools = await mcp.list_tools()
-        assert len(tools) == 12, f"Expected 12 tools, got {len(tools)}"
+        assert len(tools) == 13, f"Expected 13 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -898,6 +899,36 @@ class TestRemarkableImage:
         assert compat_schema.get("type") == "boolean"
         assert compat_schema.get("default") is False
 
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_image_response_formats_work_without_cairo(self, mock_get_rmapi, mock_document):
+        """Cairo-free rendering preserves embedded and compatibility responses."""
+        from mcp.types import EmbeddedResource
+
+        from remarkable_mcp import notebooks
+
+        document_zip = _make_notebook_zip(notebooks.page_rm_bytes("Portable rendering"))
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_document.is_folder = False
+        mock_client.get_meta_items.return_value = [mock_document]
+        mock_client.download.return_value = document_zip
+
+        with _cairo_unavailable():
+            embedded = await mcp.call_tool(
+                "remarkable_image",
+                {"document": "Test Document"},
+            )
+            compatible = await mcp.call_tool(
+                "remarkable_image",
+                {"document": "Test Document", "compatibility": True},
+            )
+
+        assert any(isinstance(content, EmbeddedResource) for content in embedded)
+        compatible_data = json.loads(compatible[0].text)
+        assert compatible_data["mime_type"] == "image/png"
+        assert compatible_data["image_base64"]
+
 
 # =============================================================================
 # Test Merged Rendering
@@ -1063,6 +1094,140 @@ def _make_synthetic_pdf(pages: int = 2) -> bytes:
     return data
 
 
+def _make_notebook_zip(rm_bytes: bytes, pdf_bytes: bytes | None = None) -> bytes:
+    """Build a one-page native notebook archive, optionally with a PDF underlay."""
+    import io
+
+    output = io.BytesIO()
+    page_entry = {"id": "page-1"}
+    if pdf_bytes is not None:
+        page_entry["redir"] = {"value": 0}
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr("doc.content", json.dumps({"cPages": {"pages": [page_entry]}}))
+        archive.writestr("page-1.rm", rm_bytes)
+        if pdf_bytes is not None:
+            archive.writestr("doc.pdf", pdf_bytes)
+    return output.getvalue()
+
+
+@contextmanager
+def _cairo_unavailable():
+    """Fail any accidental Cairo import while allowing all other imports."""
+    import builtins
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name.split(".", 1)[0].lower() in {"cairo", "cairocffi", "cairosvg"}:
+            raise ImportError(f"{name} intentionally unavailable")
+        return original_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=guarded_import):
+        yield
+
+
+class TestCairoFreeRasterization:
+    """SVG-to-PNG paths must work with no Cairo installation."""
+
+    def test_svg_stream_preserves_dimensions_background_and_alpha(self):
+        import io
+
+        from PIL import Image
+
+        from remarkable_mcp.extract import _svg_string_to_png
+
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" '
+            'viewBox="0 0 120 80"><rect x="30" y="20" width="60" height="40" '
+            'fill="#D02030"/></svg>'
+        )
+        with _cairo_unavailable():
+            opaque = _svg_string_to_png(svg, 360, 240, "#FBFBFB")
+            transparent = _svg_string_to_png(svg, 180, 120, None)
+
+        assert opaque is not None and opaque.startswith(b"\x89PNG\r\n\x1a\n")
+        opaque_image = Image.open(io.BytesIO(opaque))
+        assert opaque_image.size == (360, 240)
+        assert opaque_image.mode == "RGB"
+        assert opaque_image.getpixel((0, 0)) == (251, 251, 251)
+        red, green, blue = opaque_image.getpixel((180, 120))
+        assert red > 150 and green < 100 and blue < 100
+
+        assert transparent is not None and transparent.startswith(b"\x89PNG\r\n\x1a\n")
+        transparent_image = Image.open(io.BytesIO(transparent))
+        assert transparent_image.size == (180, 120)
+        assert transparent_image.mode == "RGBA"
+        assert transparent_image.getpixel((0, 0))[3] == 0
+
+    def test_native_notebook_page_rasterizes_without_cairo(self, tmp_path):
+        import io
+
+        from PIL import Image
+
+        from remarkable_mcp import notebooks
+        from remarkable_mcp.extract import (
+            CONTENT_MARGIN,
+            render_page_from_document_zip,
+            render_page_from_document_zip_svg,
+        )
+
+        archive_path = tmp_path / "notebook.zip"
+        archive_path.write_bytes(_make_notebook_zip(notebooks.page_rm_bytes("Notebook page")))
+
+        with _cairo_unavailable():
+            svg = render_page_from_document_zip_svg(archive_path, page=1)
+            png = render_page_from_document_zip(
+                archive_path,
+                page=1,
+                background_color="#FFFFFF",
+            )
+
+        assert svg is not None
+        assert png is not None and png.startswith(b"\x89PNG\r\n\x1a\n")
+        image = Image.open(io.BytesIO(png))
+        viewbox = svg.split('viewBox="', 1)[1].split('"', 1)[0].split()
+        expected_size = (
+            int(float(viewbox[2])) + 2 * CONTENT_MARGIN,
+            int(float(viewbox[3])) + 2 * CONTENT_MARGIN,
+        )
+        assert image.size == expected_size
+        assert image.mode == "RGB"
+        assert sum(image.convert("L").histogram()[:128]) > 0
+
+    def test_annotated_pdf_overlay_rasterizes_without_cairo(self, tmp_path):
+        import io
+
+        from PIL import Image, ImageChops
+
+        from remarkable_mcp import notebooks
+        from remarkable_mcp.extract import (
+            _render_pdf_page_to_png,
+            render_merged_page_from_document_zip,
+        )
+
+        pdf = _make_synthetic_pdf(1)
+        archive_path = tmp_path / "annotated.zip"
+        archive_path.write_bytes(
+            _make_notebook_zip(
+                notebooks.page_rm_bytes("Overlay"),
+                pdf_bytes=pdf,
+            )
+        )
+
+        with _cairo_unavailable():
+            png, note = render_merged_page_from_document_zip(archive_path, page=1)
+            bare_pdf_png = _render_pdf_page_to_png(pdf, 0, 890, 1188)
+
+        assert note is None
+        assert png is not None and png.startswith(b"\x89PNG\r\n\x1a\n")
+        image = Image.open(io.BytesIO(png))
+        assert image.size == (890, 1188)
+        assert image.mode == "RGB"
+        assert bare_pdf_png is not None
+        bare_pdf_image = Image.open(io.BytesIO(bare_pdf_png)).convert("RGB")
+        assert ImageChops.difference(image, bare_pdf_image).getbbox() is not None
+
+
 class TestRenderTabletPdfFallback:
     """Tests for the portable tablet-PDF render fallback (issue #95/#102/#94)."""
 
@@ -1109,7 +1274,7 @@ class TestRenderTabletPdfFallback:
         mock_client.get_meta_items.return_value = [mock_document]
         mock_client.download.return_value = b"fake zip"
         mock_page_count.return_value = 2
-        # Local stroke renderer fails (e.g. empty page or missing libcairo)
+        # Local stroke renderer fails (for example, an empty page).
         mock_render.return_value = None
         # Tablet exposes a natively-rendered PDF
         mock_download_raw.return_value = _make_synthetic_pdf(2)
@@ -1176,7 +1341,7 @@ class TestRenderTabletPdfFallback:
         # The misleading "v5 / rmc" message is gone; guidance is actionable
         suggestion = data["_error"]["suggestion"].lower()
         assert "v5" not in suggestion
-        assert "cairo" in suggestion or "native pdf" in suggestion
+        assert "pymupdf" in suggestion
 
     @pytest.mark.asyncio
     @patch("remarkable_mcp.tools.render_page_full_page_from_document_zip")
@@ -1295,7 +1460,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await mcp.list_tools()
 
-        assert len(tools) == 12
+        assert len(tools) == 13
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:
@@ -2259,6 +2424,80 @@ class TestUSBWebInterface:
         content = client.download(doc)
         assert content == b"fake zip content"
 
+    @patch("remarkable_mcp.usb_web.time.sleep")
+    @patch("requests.request")
+    def test_usb_web_get_retries_408_until_success(self, mock_request, mock_sleep):
+        """A transient xochitl 408 is retried for a safe GET request."""
+        from remarkable_mcp.usb_web import USBWebClient
+
+        timed_out = Mock(status_code=408)
+        succeeded = Mock(status_code=200)
+        mock_request.side_effect = [timed_out, succeeded]
+
+        result = USBWebClient(timeout=37)._request("/documents/")
+
+        assert result is succeeded
+        assert mock_request.call_count == 2
+        assert all(call.kwargs["timeout"] == 37 for call in mock_request.call_args_list)
+        timed_out.close.assert_called_once_with()
+        mock_sleep.assert_called_once_with(0.25)
+
+    @patch("remarkable_mcp.usb_web.time.sleep")
+    @patch("requests.request")
+    def test_usb_web_get_408_exhaustion_is_educational(self, mock_request, mock_sleep):
+        """Exhausted GET retries explain that xochitl may be temporarily busy."""
+        from remarkable_mcp.usb_web import USBWebClient
+
+        responses = [Mock(status_code=408) for _ in range(3)]
+        mock_request.side_effect = responses
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"HTTP 408 after 3 GET attempts.*temporarily busy.*try again",
+        ):
+            USBWebClient()._request("/download/doc1/pdf", timeout=120)
+
+        assert mock_request.call_count == 3
+        assert all(call.kwargs["timeout"] == 120 for call in mock_request.call_args_list)
+        assert mock_sleep.call_args_list == [call(0.25), call(0.5)]
+        responses[0].close.assert_called_once_with()
+        responses[1].close.assert_called_once_with()
+        responses[2].close.assert_called_once_with()
+
+    @patch("remarkable_mcp.usb_web.time.sleep")
+    @patch("requests.request")
+    def test_usb_web_does_not_retry_408_for_non_get(self, mock_request, mock_sleep):
+        """Potentially mutating requests retain their single-attempt behavior."""
+        from remarkable_mcp.usb_web import USBWebClient
+
+        response = Mock(status_code=408)
+        response.raise_for_status.side_effect = requests.HTTPError(
+            "408 Client Error: Request Timeout"
+        )
+        mock_request.return_value = response
+
+        with pytest.raises(RuntimeError, match="USB web interface request failed: 408"):
+            USBWebClient()._request("/upload", method="POST")
+
+        mock_request.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    @patch("remarkable_mcp.usb_web.time.sleep")
+    @patch("requests.request")
+    def test_usb_web_does_not_retry_non_transient_http_error(self, mock_request, mock_sleep):
+        """Non-transient HTTP errors keep the existing error behavior."""
+        from remarkable_mcp.usb_web import USBWebClient
+
+        response = Mock(status_code=404)
+        response.raise_for_status.side_effect = requests.HTTPError("404 Client Error: Not Found")
+        mock_request.return_value = response
+
+        with pytest.raises(RuntimeError, match="USB web interface request failed: 404"):
+            USBWebClient()._request("/documents/missing")
+
+        mock_request.assert_called_once()
+        mock_sleep.assert_not_called()
+
     @patch("remarkable_mcp.usb_web.create_usb_web_client")
     def test_get_rmapi_usb_web_mode(self, mock_create_client):
         """Test get_rmapi in USB web mode."""
@@ -2756,6 +2995,7 @@ class TestWriteTools:
 
         write_tool_names = [
             "remarkable_upload",
+            "remarkable_markdown_to_pdf",
             "remarkable_mkdir",
             "remarkable_move",
             "remarkable_rename",
@@ -2784,6 +3024,7 @@ class TestWriteTools:
 
             write_tool_names = [
                 "remarkable_upload",
+                "remarkable_markdown_to_pdf",
                 "remarkable_mkdir",
                 "remarkable_move",
                 "remarkable_rename",
@@ -2796,6 +3037,7 @@ class TestWriteTools:
             # Clean up: remove registered tools to not affect other tests
             for name in [
                 "remarkable_upload",
+                "remarkable_markdown_to_pdf",
                 "remarkable_mkdir",
                 "remarkable_move",
                 "remarkable_rename",
@@ -2983,6 +3225,7 @@ class TestWriteTools:
                 if t.name
                 in (
                     "remarkable_upload",
+                    "remarkable_markdown_to_pdf",
                     "remarkable_mkdir",
                     "remarkable_move",
                     "remarkable_rename",
@@ -3126,6 +3369,179 @@ class TestWriteTools:
                 assert "remarkable_author" not in names
             finally:
                 mcp._tool_manager._tools.pop("remarkable_author", None)
+
+
+class TestMarkdownPDFWriteback:
+    """Markdown rendering and upload behavior across transports."""
+
+    def test_renderer_creates_paginated_pdf_without_loading_images(self):
+        import pymupdf
+
+        from remarkable_mcp.markdown_pdf import render_markdown_pdf
+
+        markdown = (
+            "# Report\n\n"
+            "![private](https://example.com/private.png)\n\n"
+            "| Item | Value |\n| --- | --- |\n| A | 1 |\n\n"
+            + ("A long paragraph for pagination. " * 700)
+        )
+        payload = render_markdown_pdf(markdown)
+        document = pymupdf.open(stream=payload, filetype="pdf")
+        try:
+            text = "".join(page.get_text() for page in document)
+            assert payload.startswith(b"%PDF")
+            assert document.page_count > 1
+            assert "Report" in text
+            assert "Image omitted: private" in text
+            assert "root:" not in text
+        finally:
+            document.close()
+
+    def test_empty_markdown_is_rejected(self):
+        from remarkable_mcp.markdown_pdf import render_markdown_pdf
+
+        with pytest.raises(ValueError, match="cannot be empty"):
+            render_markdown_pdf("  \n")
+
+    @pytest.mark.asyncio
+    async def test_markdown_to_pdf_uploads_rendered_bytes_to_cloud(self):
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in ("REMARKABLE_USE_SSH", "REMARKABLE_USE_USB_WEB")
+        }
+        mock_doc = Mock(id="markdown-doc-id")
+        client = Mock(spec=["get_meta_items", "upload_document"])
+        client.get_meta_items.return_value = []
+        client.upload_document.return_value = mock_doc
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_markdown_to_pdf",
+                {
+                    "markdown": "# Notes\n\n- One\n- Two",
+                    "document_name": "Team Notes",
+                },
+            )
+
+        data = json.loads(result[0][0].text)
+        assert data["uploaded"] is True
+        assert data["name"] == "Team Notes"
+        assert data["transport"] == "cloud"
+        assert "_hint" in data
+        content, name, extension, parent = client.upload_document.call_args.args
+        assert content.startswith(b"%PDF")
+        assert name == "Team Notes"
+        assert extension == "pdf"
+        assert parent == ""
+
+    @pytest.mark.asyncio
+    async def test_markdown_to_pdf_forwards_deferred_ssh_restart(self):
+        client = Mock(
+            spec=[
+                "get_meta_items",
+                "_ssh_command",
+                "_documents",
+                "_documents_by_id",
+            ]
+        )
+        client.get_meta_items.return_value = []
+        client._documents = []
+        client._documents_by_id = {}
+
+        with (
+            patch.dict(
+                os.environ,
+                {"REMARKABLE_USE_SSH": "1"},
+                clear=True,
+            ),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+            patch("remarkable_mcp.write_tools._upload_file_bytes"),
+            patch("remarkable_mcp.write_tools._write_metadata"),
+            patch("remarkable_mcp.write_tools._write_content_file"),
+            patch(
+                "remarkable_mcp.write_tools._maybe_restart_xochitl",
+                return_value=False,
+            ) as maybe_restart,
+        ):
+            result = await mcp.call_tool(
+                "remarkable_markdown_to_pdf",
+                {
+                    "markdown": "# Deferred",
+                    "document_name": "Deferred Notes",
+                    "defer_restart": True,
+                },
+            )
+
+        data = json.loads(result[0][0].text)
+        assert data["uploaded"] is True
+        assert data["refresh_pending"] is True
+        assert "remarkable_refresh" in data["_hint"]
+        maybe_restart.assert_called_once_with(client, True)
+
+    def test_usb_upload_uses_requested_document_name(self):
+        from remarkable_mcp.write_tools import _upload_via_usb_web
+
+        response = Mock()
+        response.status_code = 200
+        with (
+            tempfile.NamedTemporaryFile(suffix=".pdf") as temp_pdf,
+            patch("requests.post", return_value=response) as post,
+        ):
+            _upload_via_usb_web(temp_pdf.name, "Requested Name")
+
+        response.raise_for_status.assert_called_once()
+        multipart_filename = post.call_args.kwargs["files"]["file"][0]
+        assert multipart_filename == "Requested Name.pdf"
+
+    @pytest.mark.asyncio
+    async def test_markdown_title_is_not_used_as_local_temp_filename(self):
+        client = Mock()
+        client._documents = []
+        client._documents_by_id = {}
+        captured = {}
+
+        def capture_upload(local_path, document_name):
+            captured["local_name"] = os.path.basename(local_path)
+            captured["document_name"] = document_name
+            return {"status": 200, "ok": True}
+
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in (
+                "REMARKABLE_USE_SSH",
+                "REMARKABLE_USE_LOCAL_DIR",
+                "REMARKABLE_LOCAL_DIR",
+            )
+        }
+        env["REMARKABLE_USE_USB_WEB"] = "1"
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+            patch(
+                "remarkable_mcp.write_tools._upload_via_usb_web",
+                side_effect=capture_upload,
+            ),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_markdown_to_pdf",
+                {
+                    "markdown": "# Portable",
+                    "document_name": 'A/B: "portable"?',
+                },
+            )
+
+        data = json.loads(result[0][0].text)
+        assert data["uploaded"] is True
+        assert captured == {
+            "local_name": "document.pdf",
+            "document_name": 'A/B: "portable"?',
+        }
 
 
 class TestCloudWriteDispatch:
@@ -3794,6 +4210,24 @@ class TestSSHCacheConcurrency:
 
         assert call_count == 1
 
+    def test_empty_metadata_result_is_cached(self):
+        from remarkable_mcp.ssh import SSHClient
+
+        client = SSHClient()
+        call_count = 0
+
+        def fake_command(command, timeout=30):
+            nonlocal call_count
+            call_count += 1
+            return ""
+
+        client._ssh_command = fake_command
+
+        assert client.get_meta_items() == []
+        assert client.get_meta_items() == []
+        assert client.get_doc("missing") is None
+        assert call_count == 1
+
     def test_file_type_reader_waits_for_batch_preload(self):
         from remarkable_mcp.ssh import Document, SSHClient
 
@@ -3939,6 +4373,30 @@ class TestExtractionCacheGeneration:
 
         assert _cache_extraction_result_if_current(doc_id, result, False, token)
         assert get_cached_ocr_result(doc_id, include_ocr=False) == result
+
+    def test_inflight_page_ocr_cannot_repopulate_after_mutation(self):
+        from remarkable_mcp.extract import (
+            cache_page_ocr,
+            clear_extraction_cache,
+            get_cache_generation_token,
+            get_cached_page_ocr,
+        )
+
+        doc_id = "mutated-page"
+        clear_extraction_cache(doc_id)
+        token = get_cache_generation_token(doc_id)
+
+        clear_extraction_cache(doc_id)
+        cached = cache_page_ocr(
+            doc_id,
+            1,
+            "sampling",
+            "stale",
+            generation_token=token,
+        )
+
+        assert cached is False
+        assert get_cached_page_ocr(doc_id, 1, "sampling") is None
 
 
 class TestSmokeDiagnostics:
@@ -4274,14 +4732,14 @@ class TestFullPageRender:
             rm_tmp.write(data)
             rm_path = Path(rm_tmp.name)
         try:
-            result = render_rm_file_full_page_png(rm_path, background_color="#FFFFFF")
+            with _cairo_unavailable():
+                result = render_rm_file_full_page_png(rm_path, background_color="#FFFFFF")
             assert result is not None
             png, (w, h) = result
             # The fixture has no SceneInfo -> fall back to the standard page extent.
             assert (round(w), round(h)) == (1404, 1872)
             im = Image.open(_io.BytesIO(png))
-            # PNG aspect must match the page aspect so [0,1] maps linearly.
-            assert abs(im.size[0] / im.size[1] - w / h) < 0.01
+            assert im.size == (1404, 1872)
         finally:
             rm_path.unlink(missing_ok=True)
 
@@ -4309,18 +4767,21 @@ class TestFullPageRender:
                 zf.writestr("p1.rm", rm_bytes)  # p2.rm intentionally absent
 
             # Page 1 has a drawable layer -> rendered from its .rm.
-            r1 = render_page_full_page_from_document_zip(zpath, 1, background_color="#FFFFFF")
+            with _cairo_unavailable():
+                r1 = render_page_full_page_from_document_zip(zpath, 1, background_color="#FFFFFF")
             assert r1 is not None
             png1, size1 = r1
-            assert Image.open(_io.BytesIO(png1)).size[0] > 0
+            assert Image.open(_io.BytesIO(png1)).size == (1404, 1872)
 
             # Page 2 exists in cPages but has no .rm -> a BLANK full page is
             # rendered (not None). If pages were addressed by filesystem .rm
             # order this would be out of range (only one .rm file exists).
-            r2 = render_page_full_page_from_document_zip(zpath, 2, background_color="#FFFFFF")
+            with _cairo_unavailable():
+                r2 = render_page_full_page_from_document_zip(zpath, 2, background_color="#FFFFFF")
             assert r2 is not None
-            _png2, size2 = r2
+            png2, size2 = r2
             assert size2 == size1  # blank page sized to the document's paper size
+            assert Image.open(_io.BytesIO(png2)).size == (1404, 1872)
 
             # Page 3 is not in cPages -> out of range.
             assert render_page_full_page_from_document_zip(zpath, 3) is None
@@ -4370,7 +4831,8 @@ class TestFullPageRender:
             rm_tmp.write(nb.page_rm_bytes("Hello world"))
             rm_path = Path(rm_tmp.name)
         try:
-            result = render_rm_file_full_page_png(rm_path, background_color="#FFFFFF")
+            with _cairo_unavailable():
+                result = render_rm_file_full_page_png(rm_path, background_color="#FFFFFF")
             assert result is not None
             png, _ = result
             im = Image.open(_io.BytesIO(png)).convert("L")
@@ -4753,6 +5215,129 @@ class TestCLIFlags:
         finally:
             if old is not None:
                 os.environ["REMARKABLE_READ_ONLY"] = old
+
+    def test_http_uses_loopback_defaults(self, capsys):
+        from remarkable_mcp import cli
+
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in ("REMARKABLE_MCP_HOST", "REMARKABLE_MCP_PORT")
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(sys, "argv", ["remarkable-mcp", "--http"]),
+            patch("remarkable_mcp.server.run") as mock_run,
+        ):
+            cli.main()
+
+        mock_run.assert_called_once_with(
+            transport="streamable-http",
+            host="127.0.0.1",
+            port=8000,
+        )
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_http_warns_for_non_loopback_binding(self, capsys):
+        from remarkable_mcp import cli
+
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["remarkable-mcp", "--http", "--host", "0.0.0.0", "--port", "9000"],
+            ),
+            patch("remarkable_mcp.server.run") as mock_run,
+        ):
+            cli.main()
+
+        mock_run.assert_called_once_with(
+            transport="streamable-http",
+            host="0.0.0.0",
+            port=9000,
+        )
+        warning = capsys.readouterr().err
+        assert "WARNING" in warning
+        assert "no authentication" in warning
+        assert "including writes" in warning
+        assert "matching '0.0.0.0'" in warning
+
+    def test_default_transport_security_requires_proxy_header_rewrite(self):
+        from mcp.server.transport_security import TransportSecurityMiddleware
+
+        middleware = TransportSecurityMiddleware(mcp.settings.transport_security)
+        assert middleware._validate_host("mcp.example.com") is False
+        assert middleware._validate_host("127.0.0.1:8000") is True
+        assert middleware._validate_origin("https://openwebui.example.com") is False
+        assert middleware._validate_origin(None) is True
+
+    def test_runtime_transport_security_matches_explicit_wildcard_host(self):
+        from mcp.server.transport_security import TransportSecurityMiddleware
+
+        import remarkable_mcp.server as server
+
+        previous_host = mcp.settings.host
+        previous_port = mcp.settings.port
+        previous_security = mcp.settings.transport_security
+        try:
+            with patch.object(mcp, "run") as fastmcp_run:
+                server.run(
+                    transport="streamable-http",
+                    host="0.0.0.0",
+                    port=9000,
+                )
+            fastmcp_run.assert_called_once_with(transport="streamable-http")
+            middleware = TransportSecurityMiddleware(mcp.settings.transport_security)
+            assert middleware._validate_host("0.0.0.0:9000") is True
+            assert middleware._validate_origin("http://0.0.0.0:3000") is True
+            assert middleware._validate_host("mcp.example.com") is False
+            assert middleware._validate_origin("https://openwebui.example.com") is False
+        finally:
+            mcp.settings.host = previous_host
+            mcp.settings.port = previous_port
+            mcp.settings.transport_security = previous_security
+
+    def test_read_only_instructions_do_not_advertise_markdown_writeback(self):
+        from remarkable_mcp.server import _build_instructions
+
+        with patch.dict(os.environ, {"REMARKABLE_READ_ONLY": "1"}):
+            instructions = _build_instructions()
+        assert "remarkable_markdown_to_pdf" not in instructions
+
+    def test_http_preserves_explicit_ssh_key(self):
+        from remarkable_mcp import cli
+
+        old_key = os.environ.pop("REMARKABLE_SSH_KEY", None)
+        try:
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "remarkable-mcp",
+                        "--ssh",
+                        "--ssh-key",
+                        "~/.ssh/remarkable",
+                        "--http",
+                    ],
+                ),
+                patch("remarkable_mcp.server.run"),
+            ):
+                cli.main()
+            assert os.environ["REMARKABLE_SSH_KEY"] == "~/.ssh/remarkable"
+        finally:
+            os.environ.pop("REMARKABLE_SSH_KEY", None)
+            os.environ.pop("REMARKABLE_USE_SSH", None)
+            if old_key is not None:
+                os.environ["REMARKABLE_SSH_KEY"] = old_key
+
+    def test_host_and_port_require_http(self):
+        from remarkable_mcp.cli import main
+
+        with patch.object(sys, "argv", ["remarkable-mcp", "--port", "8001"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
 
 
 class TestCanvasWrite:
@@ -5377,6 +5962,35 @@ class TestRestartXochitl:
         assert client.calls == ["systemctl restart xochitl"]
         assert not any("is-active" in c for c in client.calls)
         mock_sleep.assert_not_called()
+
+    def test_restart_settle_blocks_other_ssh_operations(self):
+        from remarkable_mcp import write_tools
+        from remarkable_mcp.ssh import SSHClient
+
+        client = SSHClient()
+        settle_started = threading.Event()
+        release_settle = threading.Event()
+
+        def fake_command(command, timeout):
+            return "active\n" if "is-active" in command else ""
+
+        def fake_sleep(seconds):
+            if seconds == write_tools._RESTART_SETTLE_SECONDS:
+                settle_started.set()
+                assert release_settle.wait(2)
+
+        client._ssh_command_unlocked = fake_command
+        with (
+            patch("remarkable_mcp.write_tools.time.sleep", side_effect=fake_sleep),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            restart = executor.submit(write_tools._restart_xochitl, client)
+            assert settle_started.wait(1)
+            competing = executor.submit(client._ssh_command, "echo ok", 5)
+            assert not competing.done()
+            release_settle.set()
+            restart.result(timeout=2)
+            assert competing.result(timeout=2) == ""
 
 
 class TestDeferRestart:

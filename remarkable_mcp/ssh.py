@@ -121,6 +121,7 @@ class SSHClient:
         self.key_path = os.path.expanduser(key_path) if key_path else None
         self._documents: List[Document] = []
         self._documents_by_id: Dict[str, Document] = {}
+        self._metadata_loaded_all = False
         self._metadata_lock = threading.RLock()
         self._file_type_lock = threading.RLock()
         self._io_lock = threading.RLock()
@@ -373,9 +374,9 @@ class SSHClient:
             # Re-check inside the lock: startup resource loading and the first
             # status/tool request can arrive together on separate worker threads.
             # Exactly one of them should scan the tablet; the other reuses its cache.
-            if self._documents and limit is None:
-                return self._documents
-            if self._documents and limit is not None and len(self._documents) >= limit:
+            if self._metadata_loaded_all:
+                return self._documents if limit is None else self._documents[:limit]
+            if limit is not None and len(self._documents) >= limit:
                 return self._documents[:limit]
 
             try:
@@ -413,6 +414,7 @@ class SSHClient:
 
             self._documents = documents
             self._documents_by_id = {d.id: d for d in documents}
+            self._metadata_loaded_all = limit is None
 
             logger.info(f"Loaded {len(documents)} documents via SSH")
             return documents
@@ -466,7 +468,7 @@ class SSHClient:
 
     def get_doc(self, doc_id: str) -> Optional[Document]:
         """Get a document by ID."""
-        if not self._documents_by_id:
+        if not self._metadata_loaded_all and not self._documents_by_id:
             self.get_meta_items()
         return self._documents_by_id.get(doc_id)
 

@@ -3,8 +3,8 @@
 FastMCP awaits ``async def`` tool handlers directly on the asyncio event loop
 without dispatching them to a thread pool, and it also calls plain ``def``
 handlers inline. Any blocking I/O performed inside a tool handler — SSH
-subprocess calls, ``requests`` HTTP requests, ``pymupdf``/``cairosvg``
-rendering, ``pytesseract`` OCR, ``zipfile`` extraction — therefore blocks the
+subprocess calls, ``requests`` HTTP requests, ``pymupdf`` rendering,
+``pytesseract`` OCR, ``zipfile`` extraction — therefore blocks the
 entire event loop. While that handler is running, no other ``call_tool``
 request can make progress, which serializes concurrent requests and can make
 the server appear to hang under parallel tool calls.
