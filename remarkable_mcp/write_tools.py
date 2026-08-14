@@ -390,9 +390,9 @@ def _pending_refresh_error(error_type: str, message: str, suggestion: str) -> st
 
 async def _refresh_ssh_client(ssh_client: SSHClient) -> None:
     try:
-        await ssh_client.run_operation_async(
+        await ssh_client.run_refresh_operation_async(
             "xochitl-refresh",
-            lambda: _restart_xochitl(ssh_client),
+            lambda: _restart_xochitl(ssh_client, wait_ready=not ssh_client.is_closing()),
         )
     except BaseException:
         _invalidate_client_cache(ssh_client)
