@@ -58,8 +58,9 @@ tool visibility changes.
 | `remarkable_mkdir` / `rename` / `move` / `delete` | **N/A** | PASS | **N/A** | PASS |
 | `remarkable_author` | **N/A** | **N/A** | **N/A** | PASS |
 
-USB web is read + render + upload-to-root only — the device firmware HTTP server
-exposes no folder/move/rename/delete endpoints, so those tools are not registered
+USB web is read + render + upload only. It preserves the uploaded filename but
+does not accept a destination-folder parameter; the tablet web service chooses
+the folder. Its HTTP API exposes no folder/move/rename/delete endpoints, so those tools are not registered
 in that mode (shown as N/A). Local directory mode is strictly read-only (the
 folder is the desktop app's private sync cache), so no write tool registers
 there. `remarkable_author` requires native `.rm` write-back and is SSH-only
@@ -77,23 +78,23 @@ safe and non-flaky: the cloud client invalidates its in-memory document cache on
 every root commit and blobs are content-addressed (immutable), so there is no
 eventual-consistency window to wait on within a session.
 
-USB-web uploads land at the device root with the requested name ignored, so they
-can't be reliably re-targeted for read-back and are **not** round-tripped (the
-upload row still PASSes on a successful upload call).
+USB-web uploads preserve the multipart filename but ignore `parent_folder`.
+Because the destination folder is chosen by the tablet web service, the upload
+is not round-tripped in USB mode. A later SSH phase resolves the unique filename
+for cleanup.
 
 ## Caveats
 
-- **USB upload leaves a file at the device root.** The USB web interface ignores
-  the requested name/folder and has no delete endpoint, so a full (non-`--read-only`)
-  USB run leaves one clearly-named `smoke-usb-<ts>-…` document on the tablet. If
-  SSH is also available in the same run it is swept automatically; otherwise delete
-  it from the tablet by hand. Use `--read-only` to avoid it entirely.
+- **USB upload can leave a file behind.** USB web has no delete endpoint. If SSH
+  is available in the same run, the harness removes the timestamped filename
+  automatically. Otherwise delete it from the tablet by hand, or use
+  `--read-only`.
 - **SSH requires working key auth.** With `--ssh`/`--usb` the harness disables the
   cloud startup fallback (`REMARKABLE_DISABLE_CLOUD_FALLBACK=1`) so a dead device
   can't silently "pass" via cloud. If SSH key auth isn't set up, the SSH mode waits
   for its connect timeout and is then reported as unavailable.
-- Writes are confined to a unique per-run folder and cleaned up afterwards
-  (cloud/SSH). The only exception is the USB-root upload noted above.
+- Cloud and SSH writes use unique per-run folders and are cleaned up. USB cleanup
+  uses the unique visible filename noted above.
 
   The SSH write phase also launches two folder writes concurrently with automatic
   refresh enabled. It requires both calls to pass and `remarkable_status` to

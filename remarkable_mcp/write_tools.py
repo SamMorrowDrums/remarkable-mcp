@@ -1375,8 +1375,9 @@ def register_write_tools():
         are supported. Works in all three transports:
         - Cloud: uploaded via the sync protocol; supports parent_folder + document_name
         - SSH: transferred over SSH, metadata created; supports parent_folder + document_name
-        - USB web: uploaded via POST /upload; lands at the root (the multipart
-          filename carries document_name because the endpoint has no rename field)
+        - USB web: uploaded via POST /upload. The multipart filename carries
+          document_name, parent_folder is ignored, and the tablet web service
+          chooses the destination folder.
 
         Requires write mode (the default; disabled with --read-only).
         </instructions>
@@ -1477,8 +1478,9 @@ def register_write_tools():
                     }
                     if parent_folder != "/":
                         result["note"] = (
-                            "USB web upload places files at root. "
-                            "Use SSH mode for folder placement."
+                            "USB web ignores parent_folder. The tablet web "
+                            "service chooses the destination folder. Use SSH or "
+                            "cloud mode for explicit folder placement."
                         )
                     return make_response(
                         result,
@@ -1615,15 +1617,16 @@ def register_write_tools():
         Works in all three transports:
         - Cloud: sync upload with parent_folder and document_name
         - SSH: filesystem upload with parent_folder and document_name
-        - USB web: root upload whose multipart filename is document_name + ".pdf"
+        - USB web: upload whose multipart filename is document_name + ".pdf";
+          parent_folder is ignored and the tablet web service chooses the folder.
 
         Requires write mode (the default; disabled with --read-only).
         </instructions>
         <parameters>
         - markdown: Markdown source text. Must not be empty.
         - document_name: Display name on the tablet (default: "Markdown").
-        - parent_folder: Destination folder (default: root "/"). USB web always
-          uploads to root because its firmware has no folder parameter.
+        - parent_folder: Destination folder (default: root "/"). USB web ignores
+          this parameter because its upload endpoint has no folder argument.
         - defer_restart: SSH only. When True, skip the xochitl restart and call
           remarkable_refresh() once after the batch. Forwarded exactly like
           remarkable_upload; ignored in cloud and USB web modes.
