@@ -419,6 +419,9 @@ class TestRemarkableBrowse:
         mock_doc.ID = "doc-123"
         mock_doc.Parent = ""
         mock_doc.ModifiedClient = "2024-01-15"
+        mock_doc.is_folder = False
+        mock_doc.is_cloud_archived = False
+        mock_doc.tags = []
 
         mock_client.get_meta_items.return_value = [mock_doc]
 
@@ -1065,8 +1068,9 @@ class TestMergedRendering:
         # Check that render_merged parameter exists in the input schema
         assert "render_merged" in image_tool.input_schema.get("properties", {})
         merged_schema = image_tool.input_schema["properties"]["render_merged"]
-        assert merged_schema.get("type") == "boolean"
-        assert merged_schema.get("default") is False
+        assert merged_schema.get("default") is None
+        assert {"type": "boolean"} in merged_schema.get("anyOf", [])
+        assert {"type": "null"} in merged_schema.get("anyOf", [])
 
     @pytest.mark.asyncio
     @patch("remarkable_mcp.tools.get_rmapi")

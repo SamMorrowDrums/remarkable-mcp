@@ -60,6 +60,15 @@ async def test_one_server_serves_modern_and_legacy_catalogs():
             assert {tool.name for tool in modern_tools.tools} == {
                 tool.name for tool in legacy_tools.tools
             }
+            modern_image = next(
+                tool for tool in modern_tools.tools if tool.name == "remarkable_image"
+            )
+            legacy_image = next(
+                tool for tool in legacy_tools.tools if tool.name == "remarkable_image"
+            )
+            modern_merge_schema = modern_image.input_schema["properties"]["render_merged"]
+            assert modern_merge_schema == legacy_image.input_schema["properties"]["render_merged"]
+            assert modern_merge_schema["default"] is None
 
             modern_prompts = await modern.list_prompts()
             legacy_prompts = await legacy.list_prompts()

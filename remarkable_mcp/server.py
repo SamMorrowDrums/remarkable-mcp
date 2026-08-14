@@ -123,7 +123,8 @@ Example: `remarkable_image("Notes", include_ocr=True)` returns image with extrac
 
 ### For Large Documents
 Use pagination to avoid overwhelming context. The response includes:
-- `page` / `total_pages` - current position
+- `page` / `content_pages` - current extracted-text position
+- `total_pages` - physical document page count
 - `more` - true if more content exists
 - `next_page` - page number to request next
 

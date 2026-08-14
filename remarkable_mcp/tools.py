@@ -40,6 +40,7 @@ from remarkable_mcp.extract import (
     find_similar_documents,
     get_background_color,
     get_cached_ocr_result,
+    get_document_file_type,
     get_document_page_count,
     get_ocr_backend,
     render_mapped_pdf_page_from_document_zip,
@@ -120,7 +121,7 @@ def _find_target_document(collection, items_by_id: dict, document: str):
     actual_document = _resolve_root_path(document) if document.startswith("/") else document
     document_lower = actual_document.lower().strip("/")
     for item in collection:
-        if item.is_folder:
+        if item.is_folder or _is_cloud_archived(item):
             continue
         item_path = get_item_path(item, items_by_id)
         if not _is_within_root(item_path, root):
@@ -177,9 +178,11 @@ DEFAULT_PAGE_SIZE = 8000
 
 def _is_cloud_archived(item) -> bool:
     """Check if an item is cloud-archived (not available on device)."""
-    # SSH mode: check is_cloud_archived property
-    if hasattr(item, "is_cloud_archived"):
-        return item.is_cloud_archived
+    # SSH/local-dir/USB expose an explicit property. Require a real bool so
+    # permissive proxy objects do not accidentally hide otherwise valid items.
+    archived = getattr(item, "is_cloud_archived", None)
+    if isinstance(archived, bool):
+        return archived
     # Cloud mode: check parent == "trash"
     parent = item.Parent if hasattr(item, "Parent") else getattr(item, "parent", "")
     return parent == "trash"
@@ -205,6 +208,14 @@ def _modified_sort_key(item) -> float:
         except (OverflowError, OSError, ValueError):
             return 0.0
     return 0.0
+
+
+def _count_pdf_pages(pdf_bytes: bytes) -> int:
+    """Count pages in a native PDF returned instead of an rmdoc archive."""
+    import fitz
+
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
+        return len(document)
 
 
 def _ocr_png_tesseract(png_path: Path) -> Optional[str]:
@@ -317,6 +328,8 @@ async def remarkable_read(
     - Start with page=1 (default)
     - Check "more" field - if true, there's more content
     - Use "next_page" value to get the next page
+    - "total_pages" is the physical document count; "content_pages" is the
+      extracted-text count used by page/more/next_page
 
     Use grep to search for specific content on the current page.
 
@@ -325,7 +338,8 @@ async def remarkable_read(
     <parameters>
     - document: Document name or path (use remarkable_browse to find documents)
     - content_type: "text" (full), "raw" (PDF/EPUB only), "annotations" (notes only)
-    - page: Page number (default: 1). For notebooks, this is the notebook page.
+    - page: Extracted-content page number (default: 1). Physical document pages
+      are reported separately as total_pages.
     - grep: Optional regex pattern to filter content (searches current page)
     - include_ocr: Enable handwriting OCR for annotations (default: False)
     </parameters>
@@ -348,7 +362,9 @@ async def remarkable_read(
         page_size = DEFAULT_PAGE_SIZE
 
         root = _get_root_path()
-        documents = [item for item in collection if not item.is_folder]
+        documents = [
+            item for item in collection if not item.is_folder and not _is_cloud_archived(item)
+        ]
         target_doc = _find_target_document(collection, items_by_id, document)
 
         if not target_doc:
@@ -370,6 +386,25 @@ async def remarkable_read(
 
         doc_path = get_item_path(target_doc, items_by_id)
         file_type = await run_blocking(get_file_type, client, target_doc)
+        archive_bytes: Optional[bytes] = None
+
+        async def load_archive() -> bytes:
+            nonlocal archive_bytes
+            if archive_bytes is None:
+                archive_bytes = await run_blocking(client.download, target_doc)
+            return archive_bytes
+
+        async def count_archive_pages() -> int:
+            raw_doc = await load_archive()
+            if raw_doc.lstrip().startswith(b"%PDF"):
+                return await run_blocking(_count_pdf_pages, raw_doc)
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                tmp.write(raw_doc)
+                tmp_path = Path(tmp.name)
+            try:
+                return await run_blocking(get_document_page_count, tmp_path)
+            finally:
+                tmp_path.unlink(missing_ok=True)
 
         # Collect content based on content_type
         text_parts = []
@@ -425,7 +460,7 @@ async def remarkable_read(
                     content = cached
 
             if not notebook_pages and is_notebook:
-                raw_doc = await run_blocking(client.download, target_doc)
+                raw_doc = await load_archive()
                 with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                     tmp.write(raw_doc)
                     tmp_path = Path(tmp.name)
@@ -447,7 +482,7 @@ async def remarkable_read(
             if not (is_notebook and notebook_pages):
                 if content is None:
                     # Need to extract if we haven't already
-                    raw_doc = await run_blocking(client.download, target_doc)
+                    raw_doc = await load_archive()
                     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                         tmp.write(raw_doc)
                         tmp_path = Path(tmp.name)
@@ -504,20 +539,29 @@ async def remarkable_read(
                         text_parts.append("\n\n=== Annotations ===\n")
                     text_parts.extend(annotation_parts)
 
-        # For notebooks with OCR: use page-based pagination
-        if notebook_pages:
-            total_pages = len(notebook_pages)
+        physical_pages = int(content.get("pages") or 0) if content else 0
+        if physical_pages <= 0:
+            physical_pages = await count_archive_pages()
+        total_pages = max(1, physical_pages)
 
-            if page > total_pages:
+        # OCR results remain content-pagination units. They can be fewer than
+        # physical pages when blank or non-OCR pages are omitted.
+        if notebook_pages:
+            content_pages = len(notebook_pages)
+
+            if page > content_pages:
                 return make_error(
                     error_type="page_out_of_range",
-                    message=f"Page {page} does not exist. "
-                    f"Document has {total_pages} notebook page(s).",
-                    suggestion=f"Use page=1 to {total_pages} to read different pages.",
+                    message=(
+                        f"Content page {page} does not exist. Extracted content has "
+                        f"{content_pages} page(s); the document has {total_pages} "
+                        "physical page(s)."
+                    ),
+                    suggestion=f"Use page=1 to {content_pages} to read extracted content.",
                 )
 
             page_content = notebook_pages[page - 1]
-            has_more = page < total_pages
+            has_more = page < content_pages
 
             # Apply grep filter if specified
             grep_matches = 0
@@ -560,6 +604,7 @@ async def remarkable_read(
                 "content": page_content,
                 "page": page,
                 "total_pages": total_pages,
+                "content_pages": content_pages,
                 "page_type": "notebook",
                 "total_chars": len(page_content),
                 "more": has_more,
@@ -571,11 +616,17 @@ async def remarkable_read(
             if ocr_backend_used:
                 result["ocr_backend"] = ocr_backend_used
 
+            if has_more:
+                result["next_page"] = page + 1
+
             if grep:
                 result["grep"] = grep
                 result["grep_matches"] = grep_matches
 
-            hint_parts = [f"Notebook page {page}/{total_pages}."]
+            hint_parts = [
+                f"Notebook content page {page}/{content_pages}; "
+                f"document has {total_pages} physical page(s)."
+            ]
             if has_more:
                 doc_name = target_doc.VissibleName
                 hint_parts.append(f"Next: remarkable_read('{doc_name}', page={page + 1}).")
@@ -650,7 +701,10 @@ async def remarkable_read(
             if page > 1:
                 return make_error(
                     error_type="page_out_of_range",
-                    message=f"Page {page} does not exist. Document has 1 page(s).",
+                    message=(
+                        f"Content page {page} does not exist. Extracted content has "
+                        f"1 page; the document has {total_pages} physical page(s)."
+                    ),
                     suggestion="Use page=1 to start from the beginning.",
                 )
             # Return empty result for page 1
@@ -661,7 +715,8 @@ async def remarkable_read(
                 "content_type": content_type,
                 "content": "",
                 "page": 1,
-                "total_pages": 1,
+                "total_pages": total_pages,
+                "content_pages": 1,
                 "total_chars": 0,
                 "more": False,
                 "modified": (
@@ -676,16 +731,20 @@ async def remarkable_read(
 
         if start_idx >= total_chars:
             # Page out of range
-            total_pages = max(1, (total_chars + page_size - 1) // page_size)
+            content_pages = max(1, (total_chars + page_size - 1) // page_size)
             return make_error(
                 error_type="page_out_of_range",
-                message=f"Page {page} does not exist. Document has {total_pages} page(s).",
+                message=(
+                    f"Content page {page} does not exist. Extracted content has "
+                    f"{content_pages} page(s); the document has {total_pages} "
+                    "physical page(s)."
+                ),
                 suggestion="Use page=1 to start from the beginning.",
             )
 
         page_content = full_text[start_idx:end_idx]
         has_more = end_idx < total_chars
-        total_pages = max(1, (total_chars + page_size - 1) // page_size)
+        content_pages = max(1, (total_chars + page_size - 1) // page_size)
 
         result = {
             "document": target_doc.VissibleName,
@@ -695,6 +754,7 @@ async def remarkable_read(
             "content": page_content,
             "page": page,
             "total_pages": total_pages,
+            "content_pages": content_pages,
             "total_chars": total_chars,
             "more": has_more,
             "modified": (
@@ -727,10 +787,14 @@ async def remarkable_read(
 
         if has_more:
             hint_parts.append(
-                f"Page {page}/{total_pages}. Next: remarkable_read('{document}', page={page + 1})"
+                f"Content page {page}/{content_pages}; document has {total_pages} "
+                f"physical page(s). Next: remarkable_read('{document}', page={page + 1})"
             )
         else:
-            hint_parts.append(f"Page {page}/{total_pages} (complete).")
+            hint_parts.append(
+                f"Content page {page}/{content_pages} (complete); "
+                f"document has {total_pages} physical page(s)."
+            )
 
         if content_type == "text" and not raw_available and file_type in ("pdf", "epub"):
             hint_parts.append(
@@ -1191,6 +1255,7 @@ async def remarkable_search(
                 if "_error" not in read_data:
                     doc_result["content"] = read_data.get("content", "")[:2000]  # Limit per doc
                     doc_result["total_pages"] = read_data.get("total_pages", 1)
+                    doc_result["content_pages"] = read_data.get("content_pages", 1)
                     if grep:
                         doc_result["grep_matches"] = read_data.get("grep_matches", 0)
                     if len(read_data.get("content", "")) > 2000:
@@ -1496,6 +1561,7 @@ async def _render_png_page(
     page: int,
     background: str,
     render_merged: bool,
+    allow_pdf_fallback: bool,
 ) -> tuple[Optional[bytes], Optional[str], bool, bool]:
     """Render a PNG with the same fallbacks used by remarkable_image."""
     merged_note = None
@@ -1517,7 +1583,7 @@ async def _render_png_page(
         )
 
     rendered_via_pdf = False
-    if png_data is None:
+    if png_data is None and allow_pdf_fallback:
         png_data, has_source_pdf = await run_blocking(
             render_mapped_pdf_page_from_document_zip, tmp_path, page
         )
@@ -1549,7 +1615,7 @@ async def remarkable_image(
     output_format: str = "png",
     compatibility: bool = False,
     include_ocr: bool = False,
-    render_merged: bool = False,
+    render_merged: Optional[bool] = None,
 ):
     """
     <usecase>Get an image of a specific page from a reMarkable document.</usecase>
@@ -1562,10 +1628,9 @@ async def remarkable_image(
 
     ## Merged PDF + Annotation Rendering
 
-    Set render_merged=True to composite the PDF page with the annotation layer into
-    a single image. This is ideal for annotated PDFs where the annotation-only render
-    is hard to interpret without the printed page context. Only works with PNG format
-    and documents that have a PDF underlay.
+    PNG pages backed by an imported PDF automatically composite the PDF page with
+    its reMarkable annotations. Set render_merged=False for an annotation-only
+    render, or True to explicitly request compositing. SVG remains annotation-only.
 
     ## Response Formats
 
@@ -1581,9 +1646,7 @@ async def remarkable_image(
     Optionally, enable include_ocr=True to extract text from the image using OCR.
     Google Vision is used when configured; otherwise OCR runs locally with Tesseract.
 
-    Note: This works best with notebooks and handwritten content. For PDFs/EPUBs,
-    the annotations layer is rendered (not the underlying PDF content) unless
-    render_merged=True is set.
+    Note: Native notebooks retain their existing stroke rendering behavior.
     </instructions>
     <parameters>
     - document: Document name or path (use remarkable_browse to find documents)
@@ -1595,8 +1658,9 @@ async def remarkable_image(
     - compatibility: If True, return resource URI in JSON instead of embedded resource.
       Use this if your client doesn't support embedded resources in tool responses.
     - include_ocr: Enable OCR text extraction from the image (default: False).
-    - render_merged: Composite PDF page + annotation layer into one image (default: False).
-      Only works with PNG format and documents that have a PDF underlay.
+    - render_merged: PDF compositing mode for PNG: None (default) automatically
+      merges PDF-backed pages, True explicitly requests merging, and False returns
+      the annotation-only layer. SVG output remains annotation-only.
     </parameters>
     <examples>
     - remarkable_image("UI Mockup")  # Get first page as embedded PNG resource
@@ -1606,7 +1670,8 @@ async def remarkable_image(
     - remarkable_image("Diagram", output_format="svg")  # Get as embedded SVG resource
     - remarkable_image("Notes", compatibility=True)  # Return resource URI for retry
     - remarkable_image("Notes", include_ocr=True)  # Get image with OCR text extraction
-    - remarkable_image("Annotated PDF", render_merged=True)  # PDF + annotations composited
+    - remarkable_image("Annotated PDF")  # PDF + annotations composited automatically
+    - remarkable_image("Annotated PDF", render_merged=False)  # Annotation layer only
     </examples>
     """
     try:
@@ -1619,7 +1684,9 @@ async def remarkable_image(
         items_by_id = get_items_by_id(collection)
 
         root = _get_root_path()
-        documents = [item for item in collection if not item.is_folder]
+        documents = [
+            item for item in collection if not item.is_folder and not _is_cloud_archived(item)
+        ]
         target_doc = _find_target_document(collection, items_by_id, document)
 
         if not target_doc:
@@ -1654,6 +1721,10 @@ async def remarkable_image(
 
         try:
             total_pages = await run_blocking(get_document_page_count, tmp_path)
+            file_type = await run_blocking(get_document_file_type, tmp_path)
+            if not file_type:
+                file_type = await run_blocking(get_file_type, client, target_doc)
+            use_merged = render_merged is True or (render_merged is None and file_type == "pdf")
 
             if total_pages == 0:
                 return make_error(
@@ -1681,7 +1752,7 @@ async def remarkable_image(
             is_merged = False
 
             if format_lower == "svg":
-                if render_merged:
+                if render_merged is True:
                     merged_note = (
                         "render_merged is only supported with PNG format; "
                         "returning annotation-only SVG."
@@ -1754,7 +1825,8 @@ async def remarkable_image(
                     tmp_path,
                     page,
                     background,
-                    render_merged,
+                    use_merged,
+                    render_merged is not False,
                 )
 
                 if png_data is None:

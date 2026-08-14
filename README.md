@@ -436,6 +436,10 @@ disable them. See [Write Tools](#write-tools-by-transport). Clients that support
 - Empty notebook text can trigger OCR automatically.
 - Search can scan several matching documents.
 - Image tools return visual content that text extraction misses.
+- `remarkable_read.total_pages` is the physical document count; `content_pages`
+  counts extracted-text chunks, and `more` / `next_page` continue those chunks.
+- PNG images of PDF-backed pages merge the source page and annotations
+  automatically; pass `render_merged=False` for the annotation layer alone.
 - OCR uses Google Vision when configured and otherwise runs locally with Tesseract.
 - Browse and search accept tag filters.
 
@@ -476,8 +480,11 @@ remarkable_image("Wireframe", output_format="svg")
 # Get image with OCR text extraction
 remarkable_image("Handwritten Notes", include_ocr=True)
 
-# Composite an imported PDF page with its reMarkable annotations
-remarkable_image("Research Paper", page=3, render_merged=True)
+# Imported PDF pages include their reMarkable annotations automatically
+remarkable_image("Research Paper", page=3)
+
+# Request only the reMarkable annotation layer
+remarkable_image("Research Paper", page=3, render_merged=False)
 
 # Transparent background for compositing
 remarkable_image("Logo Sketch", background="#00000000")
@@ -505,6 +512,9 @@ Documents are automatically registered as MCP resources:
 | `remarkableraw:///{path}.epub.txt` | Extracted text from the original EPUB |
 | `remarkableimg:///{path}.page-{N}.png` | PNG image of page N (notebooks only) |
 | `remarkablesvg:///{path}.page-{N}.svg` | SVG vector image of page N (notebooks only) |
+
+Trashed documents are excluded from tool, canvas, and resource lookup, so a
+trashed item cannot shadow a live document with the same name.
 
 [Full resources reference](docs/resources.md)
 

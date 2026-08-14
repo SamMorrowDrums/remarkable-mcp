@@ -189,7 +189,11 @@ Examples:
 
 ## Filtering
 
-Archived documents and trash items are **not** registered as resources. Only documents that are actively synced appear.
+Archived documents and trash items are **not** registered as resources. The same
+transport-aware predicate is used for synchronous and background registration,
+tool lookup, canvas lookup, and name suggestions. A trashed item therefore cannot
+shadow a live namesake or appear in page completions. Cloud, SSH, local-directory,
+and USB metadata retain their transport-specific behavior.
 
 ### Root Path Filtering
 
