@@ -294,20 +294,18 @@ class TestReadPageCounts:
         assert data["next_page"] == 2
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("file_type", ["pdf", "epub"])
-    async def test_raw_reads_still_report_physical_pages(self, file_type):
+    async def test_raw_epub_uses_archive_page_count(self):
         import remarkable_mcp.tools as tools
 
-        document = _document(f"Raw {file_type}", f"raw-{file_type}")
+        document = _document("Raw epub", "raw-epub")
         client = Mock()
         client.get_meta_items.return_value = [document]
         client.download.return_value = b"document archive"
 
         with (
             patch.object(tools, "get_rmapi", return_value=client),
-            patch.object(tools, "get_file_type", return_value=file_type),
+            patch.object(tools, "get_file_type", return_value="epub"),
             patch.object(tools, "download_raw_file", return_value=b"source"),
-            patch.object(tools, "extract_text_from_pdf", return_value="source text"),
             patch.object(tools, "extract_text_from_epub", return_value="source text"),
             patch.object(tools, "get_document_page_count", return_value=6),
         ):
@@ -318,22 +316,25 @@ class TestReadPageCounts:
 
         data = _response_json(result)
         assert data["total_pages"] == 6
+        assert data["total_pages_known"] is True
         assert data["content_pages"] == 1
         assert data["more"] is False
+        client.download.assert_called_once_with(document)
 
     @pytest.mark.asyncio
-    async def test_raw_pdf_counts_usb_native_pdf_fallback(self):
+    async def test_raw_pdf_counts_source_without_archive_download(self):
         import remarkable_mcp.tools as tools
 
-        document = _document("USB PDF", "usb-pdf")
+        document = _document("Raw PDF", "raw-pdf")
         client = Mock()
         client.get_meta_items.return_value = [document]
-        client.download.return_value = _pdf_bytes()
+        client.download.side_effect = AssertionError("raw PDF must not fetch the archive")
+        pdf_bytes = _pdf_bytes()
 
         with (
             patch.object(tools, "get_rmapi", return_value=client),
             patch.object(tools, "get_file_type", return_value="pdf"),
-            patch.object(tools, "download_raw_file", return_value=_pdf_bytes()),
+            patch.object(tools, "download_raw_file", return_value=pdf_bytes) as download_raw,
             patch.object(tools, "extract_text_from_pdf", return_value="source text"),
         ):
             result = await _call_tool(
@@ -344,7 +345,107 @@ class TestReadPageCounts:
         data = _response_json(result)
         assert "_error" not in data
         assert data["total_pages"] == 1
+        assert data["total_pages_known"] is True
         assert data["content_pages"] == 1
+        download_raw.assert_called_once_with(client, document, "pdf")
+        client.download.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_raw_epub_archive_failure_preserves_content(self):
+        import remarkable_mcp.tools as tools
+
+        document = _document("Offline EPUB", "offline-epub")
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        client.download.side_effect = RuntimeError("archive unavailable")
+
+        with (
+            patch.object(tools, "get_rmapi", return_value=client),
+            patch.object(tools, "get_file_type", return_value="epub"),
+            patch.object(tools, "download_raw_file", return_value=b"source"),
+            patch.object(tools, "extract_text_from_epub", return_value="preserved raw text"),
+        ):
+            result = await _call_tool(
+                "remarkable_read",
+                {"document": document.VissibleName, "content_type": "raw"},
+            )
+
+        data = _response_json(result)
+        assert "_error" not in data
+        assert data["content"] == "preserved raw text"
+        assert data["total_pages"] is None
+        assert data["total_pages_known"] is False
+        assert "archive could not be read" in data["page_count_note"]
+        assert data["page_count_note"] in data["_hint"]
+        client.download.assert_called_once_with(document)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("metadata_file_type", ["pdf", "notebook"])
+    async def test_text_read_native_pdf_skips_unavailable_annotations(
+        self,
+        metadata_file_type,
+    ):
+        import remarkable_mcp.tools as tools
+
+        document = _document("Native PDF text", "native-pdf-text")
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        pdf_bytes = _pdf_bytes()
+        client.download.return_value = pdf_bytes
+
+        with (
+            patch.object(tools, "get_rmapi", return_value=client),
+            patch.object(tools, "get_file_type", return_value=metadata_file_type),
+            patch.object(tools, "download_raw_file", return_value=pdf_bytes),
+            patch.object(tools, "extract_text_from_pdf", return_value="source text"),
+            patch.object(
+                tools,
+                "extract_text_from_document_zip",
+                side_effect=AssertionError("native PDF must not be parsed as a zip"),
+            ),
+        ):
+            result = await _call_tool(
+                "remarkable_read",
+                {"document": document.VissibleName, "content_type": "text"},
+            )
+
+        data = _response_json(result)
+        assert "_error" not in data
+        assert data["content"] == "source text"
+        assert data["total_pages"] == 1
+        assert data["total_pages_known"] is True
+        client.download.assert_called_once_with(document)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("metadata_file_type", ["pdf", "notebook"])
+    async def test_annotations_read_native_pdf_is_explicitly_unavailable(
+        self,
+        metadata_file_type,
+    ):
+        import remarkable_mcp.tools as tools
+
+        document = _document("Native PDF annotations", "native-pdf-annotations")
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        client.download.return_value = _pdf_bytes()
+
+        with (
+            patch.object(tools, "get_rmapi", return_value=client),
+            patch.object(tools, "get_file_type", return_value=metadata_file_type),
+            patch.object(
+                tools,
+                "extract_text_from_document_zip",
+                side_effect=AssertionError("native PDF must not be parsed as a zip"),
+            ),
+        ):
+            result = await _call_tool(
+                "remarkable_read",
+                {"document": document.VissibleName, "content_type": "annotations"},
+            )
+
+        data = _response_json(result)
+        assert data["_error"]["type"] == "annotations_not_available"
+        assert "native PDF" in data["_error"]["message"]
 
 
 class TestPdfRenderingDefault:
@@ -545,6 +646,69 @@ class TestPdfRenderingDefault:
         data = _response_json(result)
         assert data["merged"] is False
         assert "render_merged is only supported" not in data["_hint"]
+
+    @pytest.mark.asyncio
+    async def test_native_pdf_download_renders_png_without_zip_parsing(self):
+        import remarkable_mcp.tools as tools
+
+        document = _document("Native PDF image", "native-pdf-image")
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        client.download.return_value = _pdf_bytes()
+
+        with (
+            patch.object(tools, "get_rmapi", return_value=client),
+            patch.object(
+                tools,
+                "get_document_page_count",
+                side_effect=AssertionError("native PDF must not use zip page counting"),
+            ),
+            patch.object(
+                tools,
+                "get_document_file_type",
+                side_effect=AssertionError("native PDF must not use zip type detection"),
+            ),
+        ):
+            result = await _call_tool(
+                "remarkable_image",
+                {"document": document.VissibleName, "compatibility": True},
+            )
+
+        data = _response_json(result)
+        assert "_error" not in data
+        assert data["total_pages"] == 1
+        assert data["render_source"] == "tablet_pdf"
+        assert data["merged"] is False
+        assert data["image_base64"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("arguments", "error_type"),
+        [
+            ({"output_format": "svg"}, "svg_not_available"),
+            ({"render_merged": False}, "annotation_only_not_available"),
+        ],
+    )
+    async def test_native_pdf_download_rejects_archive_only_render_modes(
+        self,
+        arguments,
+        error_type,
+    ):
+        import remarkable_mcp.tools as tools
+
+        document = _document("Native PDF limits", "native-pdf-limits")
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        client.download.return_value = _pdf_bytes()
+
+        with patch.object(tools, "get_rmapi", return_value=client):
+            result = await _call_tool(
+                "remarkable_image",
+                {"document": document.VissibleName, **arguments},
+            )
+
+        data = _response_json(result)
+        assert data["_error"]["type"] == error_type
 
 
 class TestCanvasArchivedLookup:

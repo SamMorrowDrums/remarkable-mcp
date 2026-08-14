@@ -210,6 +210,11 @@ def _modified_sort_key(item) -> float:
     return 0.0
 
 
+def _is_pdf_payload(data: Optional[bytes]) -> bool:
+    """Return whether transport bytes are a native PDF rather than an rmdoc zip."""
+    return bool(data and data.lstrip().startswith(b"%PDF"))
+
+
 def _count_pdf_pages(pdf_bytes: bytes) -> int:
     """Count pages in a native PDF returned instead of an rmdoc archive."""
     import fitz
@@ -330,6 +335,12 @@ async def remarkable_read(
     - Use "next_page" value to get the next page
     - "total_pages" is the physical document count; "content_pages" is the
       extracted-text count used by page/more/next_page
+    - "total_pages_known" reports whether the physical count was available.
+      Raw PDF reads count the downloaded PDF directly. If a raw EPUB archive
+      cannot be read, content still returns with total_pages=null.
+    - If older USB firmware returns only a native PDF, "text" returns source
+      text without annotations and "annotations" reports that the archive is
+      unavailable instead of trying to parse the PDF as a zip.
 
     Use grep to search for specific content on the current page.
 
@@ -396,7 +407,7 @@ async def remarkable_read(
 
         async def count_archive_pages() -> int:
             raw_doc = await load_archive()
-            if raw_doc.lstrip().startswith(b"%PDF"):
+            if _is_pdf_payload(raw_doc):
                 return await run_blocking(_count_pdf_pages, raw_doc)
             with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                 tmp.write(raw_doc)
@@ -409,6 +420,8 @@ async def remarkable_read(
         # Collect content based on content_type
         text_parts = []
         raw_available = False
+        raw_data: Optional[bytes] = None
+        page_count_note = None
 
         # Get raw PDF/EPUB content if requested or for "text" mode
         if content_type in ("text", "raw") and file_type in ("pdf", "epub"):
@@ -443,6 +456,59 @@ async def remarkable_read(
         ocr_backend_used = None  # Track which OCR backend was used
         content = None  # Will hold extraction result
 
+        async def read_native_pdf_content(pdf_bytes: bytes):
+            nonlocal file_type, page_count_note, raw_available
+            if content_type == "annotations":
+                return None, make_error(
+                    error_type="annotations_not_available",
+                    message=(
+                        "Annotations are unavailable because this transport "
+                        "returned a native PDF instead of a document archive."
+                    ),
+                    suggestion=(
+                        "Use content_type='raw' or 'text', or connect through "
+                        "cloud/SSH or newer USB firmware that supports rmdoc."
+                    ),
+                )
+
+            file_type = "pdf"
+            if not raw_available:
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                    tmp.write(pdf_bytes)
+                    pdf_path = Path(tmp.name)
+                try:
+                    native_text = await run_blocking(extract_text_from_pdf, pdf_path)
+                    if native_text:
+                        text_parts.append(native_text)
+                    raw_available = True
+                finally:
+                    pdf_path.unlink(missing_ok=True)
+
+            try:
+                native_pdf_pages = await run_blocking(_count_pdf_pages, pdf_bytes)
+            except Exception as e:
+                logger.warning(
+                    "Could not count native PDF pages for %s: %s",
+                    target_doc.ID,
+                    e,
+                )
+                native_pdf_pages = 0
+                page_count_note = (
+                    "Physical page count unavailable; source PDF text was "
+                    "returned without annotations."
+                )
+
+            return {
+                "typed_text": [],
+                "highlights": [],
+                "handwritten_text": None,
+                "pages": native_pdf_pages,
+                "page_ids": [],
+                "annotated_pages": [],
+                "ocr_backend": None,
+                "tags": [],
+            }, None
+
         if content_type in ("text", "annotations"):
             # For notebooks (no PDF/EPUB), use page-based pagination
             is_notebook = file_type not in ("pdf", "epub")
@@ -461,31 +527,16 @@ async def remarkable_read(
 
             if not notebook_pages and is_notebook:
                 raw_doc = await load_archive()
-                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                    tmp.write(raw_doc)
-                    tmp_path = Path(tmp.name)
-
-                try:
-                    content = await run_blocking(
-                        extract_text_from_document_zip,
-                        tmp_path,
-                        include_ocr=include_ocr,
-                        doc_id=target_doc.ID,
-                    )
-                    if content.get("handwritten_text"):
-                        notebook_pages = content["handwritten_text"]
-                        ocr_backend_used = content.get("ocr_backend")
-                finally:
-                    tmp_path.unlink(missing_ok=True)
-
-            # For non-notebooks or when no OCR pages, build annotation sections
-            if not (is_notebook and notebook_pages):
-                if content is None:
-                    # Need to extract if we haven't already
-                    raw_doc = await load_archive()
+                if _is_pdf_payload(raw_doc):
+                    content, native_error = await read_native_pdf_content(raw_doc)
+                    if native_error:
+                        return native_error
+                    is_notebook = False
+                else:
                     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                         tmp.write(raw_doc)
                         tmp_path = Path(tmp.name)
+
                     try:
                         content = await run_blocking(
                             extract_text_from_document_zip,
@@ -493,8 +544,34 @@ async def remarkable_read(
                             include_ocr=include_ocr,
                             doc_id=target_doc.ID,
                         )
+                        if content.get("handwritten_text"):
+                            notebook_pages = content["handwritten_text"]
+                            ocr_backend_used = content.get("ocr_backend")
                     finally:
                         tmp_path.unlink(missing_ok=True)
+
+            # For non-notebooks or when no OCR pages, build annotation sections
+            if not (is_notebook and notebook_pages):
+                if content is None:
+                    # Need to extract if we haven't already
+                    raw_doc = await load_archive()
+                    if _is_pdf_payload(raw_doc):
+                        content, native_error = await read_native_pdf_content(raw_doc)
+                        if native_error:
+                            return native_error
+                    else:
+                        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                            tmp.write(raw_doc)
+                            tmp_path = Path(tmp.name)
+                        try:
+                            content = await run_blocking(
+                                extract_text_from_document_zip,
+                                tmp_path,
+                                include_ocr=include_ocr,
+                                doc_id=target_doc.ID,
+                            )
+                        finally:
+                            tmp_path.unlink(missing_ok=True)
 
                 # Add annotations section
                 annotation_parts = []
@@ -540,9 +617,41 @@ async def remarkable_read(
                     text_parts.extend(annotation_parts)
 
         physical_pages = int(content.get("pages") or 0) if content else 0
-        if physical_pages <= 0:
-            physical_pages = await count_archive_pages()
-        total_pages = max(1, physical_pages)
+        if physical_pages <= 0 and page_count_note is None:
+            if content_type == "raw" and file_type == "pdf":
+                try:
+                    physical_pages = await run_blocking(_count_pdf_pages, raw_data)
+                except Exception as e:
+                    logger.warning("Could not count raw PDF pages for %s: %s", target_doc.ID, e)
+                    page_count_note = (
+                        "Physical page count unavailable; raw PDF content was returned."
+                    )
+            else:
+                try:
+                    physical_pages = await count_archive_pages()
+                except Exception as e:
+                    if content_type != "raw" or file_type != "epub":
+                        raise
+                    logger.warning("Could not count raw EPUB pages for %s: %s", target_doc.ID, e)
+                    page_count_note = (
+                        "Physical page count unavailable because the document archive "
+                        "could not be read; raw EPUB content was returned."
+                    )
+        raw_page_count_unknown = (
+            physical_pages <= 0 and content_type == "raw" and file_type in ("pdf", "epub")
+        )
+        if raw_page_count_unknown and page_count_note is None:
+            page_count_note = (
+                f"Physical page count unavailable; raw {file_type.upper()} content was returned."
+            )
+        page_count_unknown = physical_pages <= 0 and page_count_note is not None
+        total_pages = None if page_count_unknown else max(1, physical_pages)
+        total_pages_known = total_pages is not None
+        physical_page_summary = (
+            f"document has {total_pages} physical page(s)"
+            if total_pages_known
+            else "physical document page count is unavailable"
+        )
 
         # OCR results remain content-pagination units. They can be fewer than
         # physical pages when blank or non-OCR pages are omitted.
@@ -604,6 +713,7 @@ async def remarkable_read(
                 "content": page_content,
                 "page": page,
                 "total_pages": total_pages,
+                "total_pages_known": total_pages_known,
                 "content_pages": content_pages,
                 "page_type": "notebook",
                 "total_chars": len(page_content),
@@ -623,10 +733,7 @@ async def remarkable_read(
                 result["grep"] = grep
                 result["grep_matches"] = grep_matches
 
-            hint_parts = [
-                f"Notebook content page {page}/{content_pages}; "
-                f"document has {total_pages} physical page(s)."
-            ]
+            hint_parts = [f"Notebook content page {page}/{content_pages}; {physical_page_summary}."]
             if has_more:
                 doc_name = target_doc.VissibleName
                 hint_parts.append(f"Next: remarkable_read('{doc_name}', page={page + 1}).")
@@ -703,7 +810,7 @@ async def remarkable_read(
                     error_type="page_out_of_range",
                     message=(
                         f"Content page {page} does not exist. Extracted content has "
-                        f"1 page; the document has {total_pages} physical page(s)."
+                        f"1 page; {physical_page_summary}."
                     ),
                     suggestion="Use page=1 to start from the beginning.",
                 )
@@ -716,6 +823,7 @@ async def remarkable_read(
                 "content": "",
                 "page": 1,
                 "total_pages": total_pages,
+                "total_pages_known": total_pages_known,
                 "content_pages": 1,
                 "total_chars": 0,
                 "more": False,
@@ -727,6 +835,9 @@ async def remarkable_read(
                 f"Document '{target_doc.VissibleName}' has no extractable text content. "
                 "This may be a handwritten notebook - try include_ocr=True for OCR extraction."
             )
+            if page_count_note:
+                result["page_count_note"] = page_count_note
+                hint = f"{hint} {page_count_note}"
             return make_response(result, hint)
 
         if start_idx >= total_chars:
@@ -736,8 +847,7 @@ async def remarkable_read(
                 error_type="page_out_of_range",
                 message=(
                     f"Content page {page} does not exist. Extracted content has "
-                    f"{content_pages} page(s); the document has {total_pages} "
-                    "physical page(s)."
+                    f"{content_pages} page(s); {physical_page_summary}."
                 ),
                 suggestion="Use page=1 to start from the beginning.",
             )
@@ -754,6 +864,7 @@ async def remarkable_read(
             "content": page_content,
             "page": page,
             "total_pages": total_pages,
+            "total_pages_known": total_pages_known,
             "content_pages": content_pages,
             "total_chars": total_chars,
             "more": has_more,
@@ -787,14 +898,16 @@ async def remarkable_read(
 
         if has_more:
             hint_parts.append(
-                f"Content page {page}/{content_pages}; document has {total_pages} "
-                f"physical page(s). Next: remarkable_read('{document}', page={page + 1})"
+                f"Content page {page}/{content_pages}; {physical_page_summary}. "
+                f"Next: remarkable_read('{document}', page={page + 1})"
             )
         else:
             hint_parts.append(
-                f"Content page {page}/{content_pages} (complete); "
-                f"document has {total_pages} physical page(s)."
+                f"Content page {page}/{content_pages} (complete); {physical_page_summary}."
             )
+        if page_count_note:
+            result["page_count_note"] = page_count_note
+            hint_parts.append(page_count_note)
 
         if content_type == "text" and not raw_available and file_type in ("pdf", "epub"):
             hint_parts.append(
@@ -1255,6 +1368,7 @@ async def remarkable_search(
                 if "_error" not in read_data:
                     doc_result["content"] = read_data.get("content", "")[:2000]  # Limit per doc
                     doc_result["total_pages"] = read_data.get("total_pages", 1)
+                    doc_result["total_pages_known"] = read_data.get("total_pages_known", True)
                     doc_result["content_pages"] = read_data.get("content_pages", 1)
                     if grep:
                         doc_result["grep_matches"] = read_data.get("grep_matches", 0)
@@ -1647,6 +1761,9 @@ async def remarkable_image(
     Google Vision is used when configured; otherwise OCR runs locally with Tesseract.
 
     Note: Native notebooks retain their existing stroke rendering behavior.
+    If older USB firmware returns only a native PDF export, PNG remains
+    available; SVG and explicit annotation-only rendering require an rmdoc
+    archive and return a clear error when it is unavailable.
     </instructions>
     <parameters>
     - document: Document name or path (use remarkable_browse to find documents)
@@ -1715,15 +1832,22 @@ async def remarkable_image(
             )
 
         raw_doc = await run_blocking(client.download, target_doc)
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-            tmp.write(raw_doc)
-            tmp_path = Path(tmp.name)
+        native_pdf = raw_doc if _is_pdf_payload(raw_doc) else None
+        tmp_path: Optional[Path] = None
+        if native_pdf is None:
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                tmp.write(raw_doc)
+                tmp_path = Path(tmp.name)
 
         try:
-            total_pages = await run_blocking(get_document_page_count, tmp_path)
-            file_type = await run_blocking(get_document_file_type, tmp_path)
-            if not file_type:
-                file_type = await run_blocking(get_file_type, client, target_doc)
+            if native_pdf is not None:
+                total_pages = await run_blocking(_count_pdf_pages, native_pdf)
+                file_type = "pdf"
+            else:
+                total_pages = await run_blocking(get_document_page_count, tmp_path)
+                file_type = await run_blocking(get_document_file_type, tmp_path)
+                if not file_type:
+                    file_type = await run_blocking(get_file_type, client, target_doc)
             use_merged = render_merged is True or (render_merged is None and file_type == "pdf")
 
             if total_pages == 0:
@@ -1752,6 +1876,15 @@ async def remarkable_image(
             is_merged = False
 
             if format_lower == "svg":
+                if native_pdf is not None:
+                    return make_error(
+                        error_type="svg_not_available",
+                        message=(
+                            "SVG output is unavailable because this transport returned "
+                            "a native PDF instead of a document archive."
+                        ),
+                        suggestion="Retry with output_format='png'.",
+                    )
                 if render_merged is True:
                     merged_note = (
                         "render_merged is only supported with PNG format; "
@@ -1814,20 +1947,40 @@ async def remarkable_image(
                     info = TextContent(type="text", text=info_text)
                     return [info, embedded]
             else:
-                (
-                    png_data,
-                    merged_note,
-                    is_merged,
-                    rendered_via_pdf,
-                ) = await _render_png_page(
-                    client,
-                    target_doc,
-                    tmp_path,
-                    page,
-                    background,
-                    use_merged,
-                    render_merged is not False,
-                )
+                if native_pdf is not None and render_merged is False:
+                    return make_error(
+                        error_type="annotation_only_not_available",
+                        message=(
+                            "Annotation-only rendering is unavailable because this "
+                            "transport returned a native PDF instead of a document archive."
+                        ),
+                        suggestion=(
+                            "Use the default PNG render, or connect through cloud/SSH or "
+                            "newer USB firmware that supports rmdoc."
+                        ),
+                    )
+                if native_pdf is not None:
+                    png_data = await run_blocking(
+                        render_tablet_pdf_page_to_png,
+                        native_pdf,
+                        page,
+                    )
+                    rendered_via_pdf = png_data is not None
+                else:
+                    (
+                        png_data,
+                        merged_note,
+                        is_merged,
+                        rendered_via_pdf,
+                    ) = await _render_png_page(
+                        client,
+                        target_doc,
+                        tmp_path,
+                        page,
+                        background,
+                        use_merged,
+                        render_merged is not False,
+                    )
 
                 if png_data is None:
                     return make_error(
@@ -1944,7 +2097,8 @@ async def remarkable_image(
                     return [info, embedded]
 
         finally:
-            tmp_path.unlink(missing_ok=True)
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
     except Exception as e:
         return make_error(

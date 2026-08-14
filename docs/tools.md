@@ -88,6 +88,7 @@ remarkable_read("/Work/Projects/Q4 Planning")
   "content": "Extracted text content...",
   "page": 1,
   "total_pages": 5,
+  "total_pages_known": true,
   "content_pages": 2,
   "total_chars": 12500,
   "more": true,
@@ -105,13 +106,21 @@ remarkable_read("/Work/Projects/Q4 Planning")
 
 ### Pagination
 
-- `total_pages` always reports physical document pages, matching
-  `remarkable_image`.
+- `total_pages` reports physical document pages, matching `remarkable_image`,
+  and `total_pages_known` says whether that count was available.
 - `content_pages` reports extracted-text pagination units. PDF/EPUB source text
   uses ~8000-character chunks; notebook OCR may produce fewer content pages than
   physical pages when blank pages have no text.
 - `page`, `more`, and `next_page` refer to those content pages. This preserves
   bounded text responses without overloading the physical page count.
+- Raw PDF reads count pages from the same source bytes used for text extraction
+  and do not fetch the full document archive. A raw EPUB may need that archive
+  for its physical page count; if the archive is unavailable, the extracted
+  content still succeeds with `total_pages: null`, `total_pages_known: false`,
+  and a `page_count_note`.
+- On older USB firmware that returns a native PDF instead of an rmdoc archive,
+  `content_type="text"` returns source text without annotations, while
+  `content_type="annotations"` returns `annotations_not_available`.
 
 When `more: true`, use the `page` parameter to continue reading.
 
@@ -417,6 +426,9 @@ used when configured; otherwise OCR runs locally with Tesseract.
 - SVG remains annotation-only; explicit `render_merged=True` with SVG returns
   SVG plus an explanatory note.
 - Compatibility responses preserve the same merge choice and expose `merged`.
+- If older USB firmware returns only a native PDF export, PNG still renders via
+  that export. SVG and explicit `render_merged=False` require the unavailable
+  rmdoc annotation layer and return clear errors.
 - RGBA colors (8-digit hex) allow transparency control
 
 ---

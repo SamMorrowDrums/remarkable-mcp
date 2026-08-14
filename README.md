@@ -438,6 +438,9 @@ disable them. See [Write Tools](#write-tools-by-transport). Clients that support
 - Image tools return visual content that text extraction misses.
 - `remarkable_read.total_pages` is the physical document count; `content_pages`
   counts extracted-text chunks, and `more` / `next_page` continue those chunks.
+  Raw PDF reads count pages from the already-downloaded PDF. If a raw EPUB's
+  separate archive cannot be read, its text still returns with
+  `total_pages: null` and `total_pages_known: false`.
 - PNG images of PDF-backed pages merge the source page and annotations
   automatically; pass `render_merged=False` for the annotation layer alone.
 - OCR uses Google Vision when configured and otherwise runs locally with Tesseract.
