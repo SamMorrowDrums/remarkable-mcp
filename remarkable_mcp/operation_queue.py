@@ -146,7 +146,7 @@ class OperationDispatcher:
     async def _await_job(self, job: OperationJob[T]) -> T:
         wrapped = asyncio.wrap_future(job.future)
         try:
-            return await asyncio.shield(wrapped)
+            result = await asyncio.shield(wrapped)
         except asyncio.CancelledError as cancellation:
             self.cancel(job)
             _uncancel_current_task()
@@ -165,6 +165,11 @@ class OperationDispatcher:
             dirty = job.cancel_dirty
             _operation_cancel_dirty.set(job.started_at is not None if dirty is None else dirty)
             raise cancellation
+        except BaseException:
+            _operation_cancel_dirty.set(job.cancel_dirty)
+            raise
+        _operation_cancel_dirty.set(job.cancel_dirty)
+        return result
 
     def cancel(self, job: OperationJob[Any]) -> None:
         job.cancel_event.set()
@@ -195,7 +200,10 @@ class OperationDispatcher:
         with self._state_lock:
             job = self._active_jobs.get(ident)
             if job is not None:
-                job.cancel_dirty = dirty
+                if dirty:
+                    job.cancel_dirty = True
+                elif job.cancel_dirty is None:
+                    job.cancel_dirty = False
 
     def diagnostics(self) -> dict[str, Any]:
         with self._state_lock:

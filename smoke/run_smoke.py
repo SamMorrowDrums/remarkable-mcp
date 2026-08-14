@@ -535,7 +535,17 @@ def _detail_for(tool, payload):
         return {"count": payload.get("count")}
     err = _error_type(payload)
     if err:
-        return {"error_type": err}
+        detail = {"error_type": err}
+        if tool == "remarkable_refresh":
+            error = payload.get("_error", {})
+            detail.update(
+                {
+                    "message": error.get("message"),
+                    "suggestion": error.get("suggestion"),
+                    "refresh_pending": payload.get("refresh_pending"),
+                }
+            )
+        return detail
     return None
 
 
@@ -845,12 +855,13 @@ async def run_write_phase(session, mode, rec, registered):
         if "remarkable_delete" in registered:
             # Also sweep any USB-web leftover from an earlier USB phase. The web
             # service chooses its folder, so resolve the unique visible name.
+            usb_leftover_sources = {}
             if is_ssh:
                 for data in rec.modes.values():
                     leftover = data.get("usb_upload_leftover")
                     if leftover:
                         created.append(("doc", leftover))
-                        data.pop("usb_upload_leftover", None)
+                        usb_leftover_sources[leftover] = data
 
             delete_states = []
             for _kind, path in created:
@@ -868,13 +879,17 @@ async def run_write_phase(session, mode, rec, registered):
                 )
                 st, _ = classify_ok(payload, is_err, exc)
                 delete_states.append((path, st))
+                if st == PASS and path in usb_leftover_sources:
+                    usb_leftover_sources[path].pop("usb_upload_leftover", None)
             if not delete_states:
                 rec.record(mode, "remarkable_delete", SKIP, "nothing was created to delete")
             else:
                 failed = [p for p, s in delete_states if s != PASS]
                 if failed:
+                    rec.modes[mode]["cleanup_pending"] = failed
                     rec.record(mode, "remarkable_delete", FAIL, f"could not delete: {failed}")
                 else:
+                    rec.modes[mode].pop("cleanup_pending", None)
                     rec.record(
                         mode, "remarkable_delete", PASS, f"deleted {len(delete_states)} item(s)"
                     )

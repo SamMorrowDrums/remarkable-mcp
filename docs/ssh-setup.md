@@ -195,9 +195,9 @@ Note: WiFi is slower than USB but works from anywhere on your network.
 | `REMARKABLE_SSH_REFRESH_DEBOUNCE` | `0.15` | Stable window used to coalesce concurrent writes into one refresh |
 | `REMARKABLE_SSH_REFRESH_MAX_WAIT` | `1` | Hard maximum seconds before a write generation closes |
 | `REMARKABLE_SSH_SHUTDOWN_TIMEOUT` | `5` | Maximum seconds to drain/terminate SSH work during server shutdown |
-| `REMARKABLE_RESTART_TIMEOUT` | `30` | Max seconds to wait for `xochitl` to report active again after a write restarts it |
-| `REMARKABLE_RESTART_POLL_INTERVAL` | `1` | Seconds between `systemctl is-active` polls while waiting for `xochitl` |
-| `REMARKABLE_RESTART_SETTLE` | `3` | Extra settle delay (seconds) after `xochitl` is active, before the next operation runs |
+| `REMARKABLE_RESTART_TIMEOUT` | `60` | Max seconds to confirm stable fresh SSH sessions, unchanged boot ID, and any required USB web recovery after restart |
+| `REMARKABLE_RESTART_POLL_INTERVAL` | `1` | Seconds between fresh SSH readiness probes while waiting for `xochitl` |
+| `REMARKABLE_RESTART_SETTLE` | `3` | Stable interval between the first ready probe and the required confirmation probe |
 | `REMARKABLE_DEFER_RESTART` | *(unset)* | When set (`1`/`true`/`yes`), write tools skip their per-write `xochitl` restart; call `remarkable_refresh` once to apply a whole batch with a single restart |
 | `REMARKABLE_USB_MAX_CONCURRENCY` | `2` | Maximum concurrent requests to the USB HTTP interface |
 
@@ -211,9 +211,31 @@ participant restarts `xochitl`, and all callers wait for that same refresh
 before returning success.
 
 `remarkable_refresh` performs one restart for all writes explicitly deferred
-with `defer_restart=True`; it remains preferable for a known large batch. A
-refresh failure is reported as persisted-but-unrefreshed with
-`refresh_pending: true`, so do not repeat the mutation automatically.
+with `defer_restart=True`; it remains preferable for a known large batch. It
+does not restart `xochitl` when the current server process has already confirmed
+that no deferred work is pending. A newly started process performs one
+conservative explicit refresh because process-local memory cannot prove that a
+previous process left no pending disk changes.
+
+The refresh runs entirely inside the serialized SSH dispatcher. Immediately
+before restart it clears only `xochitl`'s systemd start counter; this avoids the
+Paper Pro firmware's four-starts-per-ten-minutes limit, whose failure target
+reboots the tablet. Success requires two fresh SSH sessions separated by the
+settle interval and the same kernel boot ID. These probes explicitly disable
+OpenSSH connection multiplexing, so an existing control socket cannot mask a
+failed new session. OpenSSH aliases are resolved with `ssh -G`; port 80 at the
+effective `HostName` is also required after restart only when it was reachable
+before it. A failure is reported as persisted-but-unrefreshed with
+`refresh_pending: true`, so do not repeat the mutation automatically. Wake and
+unlock a rebooted or sleeping tablet, then retry only the refresh.
+
+If a deferred write completes while a refresh is already in progress, that
+newer dirty epoch remains pending and the response requests one additional
+refresh. Multi-step writes also retain cumulative dirty state: cancellation or
+an error after an earlier successful mutation cannot turn the operation clean.
+Those failures return `write_partially_persisted` with do-not-repeat guidance
+and the actual pending state. A shared refresh failure does not replace the
+original result of a participant whose own mutation remained clean.
 
 Only failures that prove no remote command started are retried. Generic SSH
 exit 255, authentication failures, connection resets after session start,

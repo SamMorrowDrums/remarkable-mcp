@@ -3539,6 +3539,7 @@ class TestMarkdownPDFWriteback:
             spec=[
                 "get_meta_items",
                 "_ssh_command",
+                "mark_operation_dirty",
                 "_documents",
                 "_documents_by_id",
             ]
@@ -4295,6 +4296,7 @@ class TestSSHCacheConcurrency:
         def fake_command(command, timeout=30):
             nonlocal call_count
             assert "*.metadata" in command
+            assert 'echo; echo "===FILE===' in command
             with count_lock:
                 call_count += 1
             first_started.set()
@@ -4343,6 +4345,7 @@ class TestSSHCacheConcurrency:
 
         def fake_command(command, timeout=30):
             assert "*.content" in command
+            assert 'echo; echo "===FILE===' in command
             preload_started.set()
             assert release_preload.wait(2)
             return '===FILE===doc-1\n{"fileType":"pdf"}\n'
@@ -4907,6 +4910,127 @@ class TestSSHRefreshCoordinator:
         assert coordinator.diagnostics()["deferred_dirty"] is True
 
     @pytest.mark.asyncio
+    async def test_ambiguous_deferred_write_retains_recovery_refresh(self):
+        from remarkable_mcp.ssh_reliability import (
+            SSHExecutionUnknownError,
+            SSHRefreshCoordinator,
+        )
+
+        coordinator = SSHRefreshCoordinator()
+        refresh = AsyncMock()
+        assert await coordinator.refresh_explicit(refresh) is True
+        refresh.reset_mock()
+
+        async def ambiguous_mutation():
+            raise SSHExecutionUnknownError("remote execution may have started")
+
+        with pytest.raises(SSHExecutionUnknownError):
+            await coordinator.run_write(
+                ambiguous_mutation,
+                refresh,
+                deferred=True,
+                persisted=lambda result: True,
+            )
+
+        assert coordinator.diagnostics()["deferred_dirty"] is True
+        assert await coordinator.refresh_explicit(refresh) is True
+        refresh.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_pre_execution_deferred_failure_does_not_require_refresh(self):
+        from remarkable_mcp.ssh_reliability import (
+            SSHPreExecutionError,
+            SSHRefreshCoordinator,
+        )
+
+        coordinator = SSHRefreshCoordinator()
+        refresh = AsyncMock()
+        assert await coordinator.refresh_explicit(refresh) is True
+        refresh.reset_mock()
+
+        async def unavailable_mutation():
+            raise SSHPreExecutionError(
+                "connection refused",
+                reason="connection_refused",
+                attempts=1,
+                elapsed=0.1,
+            )
+
+        with pytest.raises(SSHPreExecutionError):
+            await coordinator.run_write(
+                unavailable_mutation,
+                refresh,
+                deferred=True,
+                persisted=lambda result: True,
+            )
+
+        assert coordinator.diagnostics()["deferred_dirty"] is False
+        assert await coordinator.refresh_explicit(refresh) is False
+        refresh.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancel_dirty_is_cumulative_across_multi_step_operation(self):
+        import asyncio
+
+        from remarkable_mcp.operation_queue import OperationDispatcher
+        from remarkable_mcp.ssh_reliability import SSHRefreshCoordinator
+
+        dispatcher = OperationDispatcher(name="cumulative-dirty")
+        coordinator = SSHRefreshCoordinator()
+        first_step_done = threading.Event()
+
+        def mutation():
+            dispatcher.set_current_cancel_dirty(True)
+            first_step_done.set()
+            while not dispatcher.current_cancel_event().wait(0.01):
+                pass
+            dispatcher.set_current_cancel_dirty(False)
+            return "cancelled"
+
+        task = asyncio.create_task(
+            coordinator.run_write(
+                lambda: dispatcher.call_async("multi-step-write", mutation),
+                lambda: _async_value(None),
+                deferred=True,
+                persisted=lambda result: result == "saved",
+            )
+        )
+        try:
+            assert await asyncio.to_thread(first_step_done.wait, 1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert coordinator.diagnostics()["deferred_dirty"] is True
+        finally:
+            dispatcher.close()
+
+    @pytest.mark.asyncio
+    async def test_partial_error_response_retains_pending_refresh(self):
+        from remarkable_mcp.operation_queue import OperationDispatcher
+        from remarkable_mcp.ssh_reliability import SSHRefreshCoordinator
+
+        dispatcher = OperationDispatcher(name="partial-error")
+        coordinator = SSHRefreshCoordinator()
+
+        def mutation():
+            dispatcher.set_current_cancel_dirty(True)
+            return "error response"
+
+        try:
+            result, refreshed = await coordinator.run_write(
+                lambda: dispatcher.call_async("partial-write", mutation),
+                lambda: _async_value(None),
+                deferred=True,
+                persisted=lambda response: False,
+            )
+        finally:
+            dispatcher.close()
+
+        assert result == "error response"
+        assert refreshed is False
+        assert coordinator.diagnostics()["deferred_dirty"] is True
+
+    @pytest.mark.asyncio
     async def test_refresh_failure_retains_dirty_state_for_explicit_recovery(self):
         from remarkable_mcp.ssh_reliability import SSHRefreshCoordinator
 
@@ -4922,10 +5046,118 @@ class TestSSHRefreshCoordinator:
                 deferred=False,
                 persisted=lambda value: value == "saved",
             )
+        status = coordinator.diagnostics()
+        assert status["deferred_dirty"] is True
+        assert status["last_error"] == "RuntimeError: tablet disconnected"
+
+        assert await coordinator.refresh_explicit(lambda: _async_value(None)) is True
+        status = coordinator.diagnostics()
+        assert status["deferred_dirty"] is False
+        assert status["last_error"] is None
+
+    @pytest.mark.asyncio
+    async def test_first_explicit_refresh_treats_process_state_as_unknown(self):
+        from remarkable_mcp.ssh_reliability import SSHRefreshCoordinator
+
+        coordinator = SSHRefreshCoordinator()
+        refresh = AsyncMock()
+
+        assert await coordinator.refresh_explicit(refresh) is True
+        refresh.assert_awaited_once()
+        status = coordinator.diagnostics()
+        assert status["pending_state_known"] is True
+        assert status["deferred_dirty"] is False
+
+        assert await coordinator.refresh_explicit(refresh) is False
+        refresh.assert_awaited_once()
+        assert coordinator.diagnostics()["refreshes"] == 1
+
+    @pytest.mark.asyncio
+    async def test_deferred_write_during_refresh_keeps_new_epoch_pending(self):
+        import asyncio
+
+        from remarkable_mcp.ssh_reliability import SSHRefreshCoordinator
+
+        coordinator = SSHRefreshCoordinator()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        refreshes = 0
+
+        async def refresh():
+            nonlocal refreshes
+            refreshes += 1
+            if refreshes == 1:
+                started.set()
+                await release.wait()
+
+        await coordinator.run_write(
+            lambda: _async_value("first"),
+            refresh,
+            deferred=True,
+            persisted=lambda result: result == "first",
+        )
+        first_refresh = asyncio.create_task(coordinator.refresh_explicit(refresh))
+        await started.wait()
+
+        await coordinator.run_write(
+            lambda: _async_value("second"),
+            refresh,
+            deferred=True,
+            persisted=lambda result: result == "second",
+        )
+        release.set()
+        assert await first_refresh is True
         assert coordinator.diagnostics()["deferred_dirty"] is True
 
-        await coordinator.refresh_explicit(lambda: _async_value(None))
+        assert await coordinator.refresh_explicit(refresh) is True
         assert coordinator.diagnostics()["deferred_dirty"] is False
+        assert refreshes == 2
+
+    @pytest.mark.asyncio
+    async def test_shared_refresh_failure_preserves_clean_participant_result(
+        self,
+        monkeypatch,
+    ):
+        import asyncio
+
+        from remarkable_mcp.ssh_reliability import SSHRefreshCoordinator
+
+        monkeypatch.setenv("REMARKABLE_SSH_REFRESH_DEBOUNCE", "0.01")
+        coordinator = SSHRefreshCoordinator()
+        both_started = asyncio.Event()
+        started = 0
+
+        async def mutation(value):
+            nonlocal started
+            started += 1
+            if started == 2:
+                both_started.set()
+            await both_started.wait()
+            return value
+
+        async def failed_refresh():
+            raise RuntimeError("tablet disconnected")
+
+        dirty, clean = await asyncio.gather(
+            coordinator.run_write(
+                lambda: mutation("saved"),
+                failed_refresh,
+                deferred=False,
+                persisted=lambda result: result == "saved",
+            ),
+            coordinator.run_write(
+                lambda: mutation("folder_not_found"),
+                failed_refresh,
+                deferred=False,
+                persisted=lambda result: result == "saved",
+            ),
+            return_exceptions=True,
+        )
+
+        assert isinstance(dirty, RuntimeError)
+        assert str(dirty) == "tablet disconnected"
+        assert clean == ("folder_not_found", True)
+        assert coordinator.diagnostics()["deferred_dirty"] is True
 
     @pytest.mark.asyncio
     async def test_not_started_cancellation_does_not_refresh(self):
@@ -5014,6 +5246,12 @@ class TestSSHRefreshCoordinator:
             started.set()
             await release.wait()
 
+        await coordinator.run_write(
+            lambda: _async_value("saved"),
+            refresh,
+            deferred=True,
+            persisted=lambda result: result == "saved",
+        )
         leader = asyncio.create_task(coordinator.refresh_explicit(refresh))
         await started.wait()
         follower = asyncio.create_task(coordinator.refresh_explicit(refresh))
@@ -5022,7 +5260,7 @@ class TestSSHRefreshCoordinator:
         release.set()
         results = await asyncio.gather(leader, follower, return_exceptions=True)
         assert isinstance(results[0], asyncio.CancelledError)
-        assert results[1] is None
+        assert results[1] is True
         assert refreshes == 1
 
     @pytest.mark.asyncio
@@ -5354,6 +5592,12 @@ class TestSSHShutdownCancellation:
             refresh_started.set()
             await release_refresh.wait()
 
+        await client._refresh_coordinator.run_write(
+            lambda: _async_value("saved"),
+            refresh,
+            deferred=True,
+            persisted=lambda result: result == "saved",
+        )
         refresh_task = asyncio.create_task(client._refresh_coordinator.refresh_explicit(refresh))
         await refresh_started.wait()
         close_task = asyncio.create_task(client.aclose())
@@ -5528,6 +5772,36 @@ class TestSSHKeyAuth:
         assert "-i" not in argv
         assert "IdentitiesOnly=yes" not in argv
         assert "sshpass" not in argv
+
+    def test_fresh_probe_disables_ssh_multiplexing(self, monkeypatch):
+        from remarkable_mcp.ssh import SSHClient
+
+        captured = self._capture(monkeypatch, text=True)
+        client = SSHClient()
+        client.probe_fresh_session("echo ok")
+
+        argv = captured["args"]
+        assert "ControlMaster=no" in argv
+        assert "ControlPath=none" in argv
+        assert "ControlPersist=no" in argv
+
+    def test_effective_host_resolves_ssh_config_alias_once(self, monkeypatch):
+        import remarkable_mcp.ssh as ssh_mod
+        from remarkable_mcp.ssh import SSHClient
+
+        resolved = Mock(
+            returncode=0,
+            stdout="host remarkable\nhostname 10.11.99.1\nport 22\n",
+            stderr="",
+        )
+        run = Mock(return_value=resolved)
+        monkeypatch.setattr(ssh_mod.subprocess, "run", run)
+        client = SSHClient(host="remarkable")
+
+        assert client.effective_host() == "10.11.99.1"
+        assert client.effective_host() == "10.11.99.1"
+        run.assert_called_once()
+        assert run.call_args.args[0][-1] == "root@remarkable"
 
     def test_password_uses_sshpass_without_batchmode(self, monkeypatch):
         from remarkable_mcp.ssh import SSHClient
@@ -6495,7 +6769,14 @@ class TestCanvasWrite:
                 return content.encode()
             return None  # page .rm absent
 
-        client = Mock(spec=["get_meta_items", "_scp_download", "_ssh_command"])
+        client = Mock(
+            spec=[
+                "get_meta_items",
+                "_scp_download",
+                "_ssh_command",
+                "mark_operation_dirty",
+            ]
+        )
         client.get_meta_items.return_value = [doc]
         client._scp_download.side_effect = fake_scp
 
@@ -6557,7 +6838,14 @@ class TestCanvasWrite:
                 return b"ORIGINAL_RM_BYTES"
             return None
 
-        client = Mock(spec=["get_meta_items", "_scp_download", "_ssh_command"])
+        client = Mock(
+            spec=[
+                "get_meta_items",
+                "_scp_download",
+                "_ssh_command",
+                "mark_operation_dirty",
+            ]
+        )
         client.get_meta_items.return_value = [doc]
         client._scp_download.side_effect = fake_scp
         client._ssh_command.return_value = "no"  # .bak does not exist yet
@@ -6771,7 +7059,14 @@ class TestCanvasWrite:
         """method="create_document" scaffolds a notebook (.rm + .content + .metadata)."""
         import remarkable_mcp.write_tools as wt
 
-        client = Mock(spec=["get_meta_items", "_scp_download", "_ssh_command"])
+        client = Mock(
+            spec=[
+                "get_meta_items",
+                "_scp_download",
+                "_ssh_command",
+                "mark_operation_dirty",
+            ]
+        )
         client.get_meta_items.return_value = []
 
         writes = {}
@@ -6819,7 +7114,14 @@ class TestCanvasWrite:
         """Seeding text sets has_text; the typed text renders in the canvas preview."""
         import remarkable_mcp.write_tools as wt
 
-        client = Mock(spec=["get_meta_items", "_scp_download", "_ssh_command"])
+        client = Mock(
+            spec=[
+                "get_meta_items",
+                "_scp_download",
+                "_ssh_command",
+                "mark_operation_dirty",
+            ]
+        )
         client.get_meta_items.return_value = []
 
         with (
@@ -7007,15 +7309,10 @@ class TestGetDocumentFileType:
 
 
 class TestRestartXochitl:
-    """_restart_xochitl waits for the UI to come back before returning.
-
-    Restarting xochitl forces a document-store rescan that briefly starves the
-    SSH daemon. The readiness wait is what prevents a following write from
-    landing mid-rescan and racing on a refused/dropped connection.
-    """
+    """_restart_xochitl avoids firmware restart limits and proves recovery."""
 
     @staticmethod
-    def _ssh_client(is_active_sequence):
+    def _ssh_client(is_active_sequence, boot_ids=None):
         """Mock SSHClient whose `_ssh_command` dispatches on the command text.
 
         `is_active_sequence` is consumed one entry per `systemctl is-active`
@@ -7024,46 +7321,66 @@ class TestRestartXochitl:
         the unit is still activating).
         """
         states = iter(is_active_sequence)
+        boots = iter(boot_ids or ["boot-a\n"] * 20)
         calls = []
 
         def _command(command, timeout=30):
             calls.append(command)
-            if "is-active" in command:
+            if command == "systemctl is-active xochitl":
                 state = next(states)
                 if isinstance(state, Exception):
                     raise state
                 return state
+            if command == "cat /proc/sys/kernel/random/boot_id":
+                return next(boots)
             return ""
 
-        client = Mock(spec=["_ssh_command"])
+        client = Mock(
+            spec=[
+                "_ssh_command",
+                "probe_fresh_session",
+                "effective_host",
+                "host",
+            ]
+        )
+        client.host = "10.11.99.1"
         client._ssh_command.side_effect = _command
+        client.probe_fresh_session.side_effect = _command
+        client.effective_host.return_value = "10.11.99.1"
         client.calls = calls
         return client
 
     def test_restarts_then_reports_ready_on_first_active(self):
         from remarkable_mcp import write_tools
 
-        client = self._ssh_client(["active\n"])
-        with patch("remarkable_mcp.write_tools.time.sleep") as mock_sleep:
+        client = self._ssh_client(["active\n", "active\n", "active\n"])
+        with (
+            patch("remarkable_mcp.write_tools._tcp_port_open", return_value=False),
+            patch("remarkable_mcp.write_tools.time.sleep") as mock_sleep,
+        ):
             write_tools._restart_xochitl(client)
 
-        assert client.calls[0] == "systemctl restart xochitl"
-        assert any("is-active" in c for c in client.calls)
-        # No poll-interval sleeps when active on the first probe; only the final
-        # settle delay runs.
-        assert mock_sleep.call_count == 1
-        assert mock_sleep.call_args_list[0].args[0] == write_tools._RESTART_SETTLE_SECONDS
+        reset_index = client.calls.index("systemctl reset-failed xochitl")
+        assert client.calls[reset_index + 1] == "systemctl restart xochitl"
+        assert client.calls.count("systemctl is-active xochitl") == 3
+        assert client.probe_fresh_session.call_count == 4
+        client.effective_host.assert_called_once_with()
+        mock_sleep.assert_called_once_with(write_tools._RESTART_SETTLE_SECONDS)
 
     def test_polls_until_active(self):
         from remarkable_mcp import write_tools
 
-        client = self._ssh_client(["activating\n", "activating\n", "active\n"])
-        with patch("remarkable_mcp.write_tools.time.sleep") as mock_sleep:
+        client = self._ssh_client(
+            ["active\n", "activating\n", "activating\n", "active\n", "active\n"]
+        )
+        with (
+            patch("remarkable_mcp.write_tools._tcp_port_open", return_value=False),
+            patch("remarkable_mcp.write_tools.time.sleep") as mock_sleep,
+        ):
             write_tools._restart_xochitl(client)
 
-        is_active_calls = [c for c in client.calls if "is-active" in c]
-        assert len(is_active_calls) == 3
-        # Two poll-interval waits between the three probes, then one settle wait.
+        is_active_calls = [c for c in client.calls if c == "systemctl is-active xochitl"]
+        assert len(is_active_calls) == 5
         sleeps = [c.args[0] for c in mock_sleep.call_args_list]
         assert sleeps == [
             write_tools._RESTART_POLL_INTERVAL,
@@ -7074,24 +7391,166 @@ class TestRestartXochitl:
     def test_command_failure_is_treated_as_not_ready(self):
         from remarkable_mcp import write_tools
 
-        # is-active raises (non-zero exit while activating) before succeeding;
-        # the error must not propagate — keep polling instead.
-        client = self._ssh_client([RuntimeError("SSH command failed"), "active\n"])
-        with patch("remarkable_mcp.write_tools.time.sleep"):
+        client = self._ssh_client(
+            ["active\n", RuntimeError("SSH command failed"), "active\n", "active\n"]
+        )
+        with (
+            patch("remarkable_mcp.write_tools._tcp_port_open", return_value=False),
+            patch("remarkable_mcp.write_tools.time.sleep"),
+        ):
             write_tools._restart_xochitl(client)
 
-        assert len([c for c in client.calls if "is-active" in c]) == 2
+        assert len([c for c in client.calls if c == "systemctl is-active xochitl"]) == 4
 
     def test_wait_ready_false_skips_poll(self):
         from remarkable_mcp import write_tools
 
-        client = self._ssh_client([])
-        with patch("remarkable_mcp.write_tools.time.sleep") as mock_sleep:
+        client = self._ssh_client(["active\n"])
+        with (
+            patch("remarkable_mcp.write_tools._tcp_port_open") as mock_web,
+            patch("remarkable_mcp.write_tools.time.sleep") as mock_sleep,
+        ):
             write_tools._restart_xochitl(client, wait_ready=False)
 
-        assert client.calls == ["systemctl restart xochitl"]
-        assert not any("is-active" in c for c in client.calls)
+        assert client.calls == [
+            "systemctl is-active xochitl",
+            "cat /proc/sys/kernel/random/boot_id",
+            "systemctl reset-failed xochitl",
+            "systemctl restart xochitl",
+        ]
+        mock_web.assert_not_called()
         mock_sleep.assert_not_called()
+
+    def test_four_restarts_inside_limit_window_reset_before_each_start(self):
+        from remarkable_mcp import write_tools
+
+        calls = []
+        starts_in_window = 3
+
+        def command(command, timeout=30):
+            nonlocal starts_in_window
+            calls.append(command)
+            if command == "systemctl is-active xochitl":
+                return "active\n"
+            if command == "cat /proc/sys/kernel/random/boot_id":
+                return "boot-a\n"
+            if command == "systemctl reset-failed xochitl":
+                starts_in_window = 0
+                return ""
+            if command == "systemctl restart xochitl":
+                starts_in_window += 1
+                if starts_in_window >= 4:
+                    raise RuntimeError("start-limit-hit")
+                return ""
+            raise AssertionError(command)
+
+        client = Mock(spec=["_ssh_command", "host"])
+        client.host = "10.11.99.1"
+        client._ssh_command.side_effect = command
+
+        for _ in range(4):
+            write_tools._restart_xochitl(client, wait_ready=False)
+
+        restart_indexes = [
+            index for index, command in enumerate(calls) if command == "systemctl restart xochitl"
+        ]
+        assert len(restart_indexes) == 4
+        assert all(
+            calls[index - 1] == "systemctl reset-failed xochitl" for index in restart_indexes
+        )
+
+    def test_reset_failure_is_attributed_and_restart_is_not_attempted(self):
+        from remarkable_mcp import write_tools
+
+        client = self._ssh_client(["active\n"])
+        original = client._ssh_command.side_effect
+
+        def dispatch(command, timeout=30):
+            if command == "systemctl reset-failed xochitl":
+                client.calls.append(command)
+                raise RuntimeError("permission denied")
+            return original(command, timeout)
+
+        client._ssh_command.side_effect = dispatch
+        with pytest.raises(RuntimeError, match="clear xochitl's systemd start limiter"):
+            write_tools._restart_xochitl(client, wait_ready=False)
+
+        assert "systemctl restart xochitl" not in client.calls
+
+    def test_start_limit_restart_failure_surfaces_emergency_reboot_risk(self):
+        from remarkable_mcp import write_tools
+
+        client = self._ssh_client(["active\n"])
+        original = client._ssh_command.side_effect
+
+        def dispatch(command, timeout=30):
+            if command == "systemctl restart xochitl":
+                client.calls.append(command)
+                raise RuntimeError("xochitl.service: Failed with result 'start-limit-hit'")
+            return original(command, timeout)
+
+        client._ssh_command.side_effect = dispatch
+        with pytest.raises(RuntimeError, match="emergency.target"):
+            write_tools._restart_xochitl(client, wait_ready=False)
+
+    def test_boot_id_change_reports_emergency_reboot(self):
+        from remarkable_mcp import write_tools
+
+        client = self._ssh_client(
+            ["active\n"],
+            boot_ids=["boot-a\n", "boot-b\n"],
+        )
+        with (
+            patch("remarkable_mcp.write_tools._tcp_port_open", return_value=False),
+            pytest.raises(RuntimeError, match="boot ID changed.*emergency"),
+        ):
+            write_tools._restart_xochitl(client)
+
+    def test_usb_web_is_required_only_when_reachable_before_restart(self):
+        from remarkable_mcp import write_tools
+
+        no_web_client = self._ssh_client(["active\n", "active\n", "active\n"])
+        with (
+            patch("remarkable_mcp.write_tools._tcp_port_open", return_value=False) as no_web,
+            patch("remarkable_mcp.write_tools.time.sleep"),
+        ):
+            write_tools._restart_xochitl(no_web_client)
+        no_web.assert_called_once()
+
+        web_client = self._ssh_client(
+            ["active\n", "active\n", "active\n", "active\n"],
+        )
+        with (
+            patch(
+                "remarkable_mcp.write_tools._tcp_port_open",
+                side_effect=[True, False, True, True],
+            ) as web,
+            patch("remarkable_mcp.write_tools.time.sleep"),
+        ):
+            write_tools._restart_xochitl(web_client)
+        assert web.call_count == 4
+
+    def test_single_active_probe_cannot_report_false_success(self):
+        from remarkable_mcp import write_tools
+
+        client = self._ssh_client(
+            ["active\n", "active\n", "activating\n", "activating\n"],
+        )
+        now = [0.0]
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        with (
+            patch("remarkable_mcp.write_tools._tcp_port_open", return_value=False),
+            patch("remarkable_mcp.write_tools._RESTART_READY_TIMEOUT", 2),
+            patch("remarkable_mcp.write_tools._RESTART_POLL_INTERVAL", 1),
+            patch("remarkable_mcp.write_tools._RESTART_SETTLE_SECONDS", 0),
+            patch("remarkable_mcp.write_tools.time.monotonic", side_effect=lambda: now[0]),
+            patch("remarkable_mcp.write_tools.time.sleep", side_effect=sleep),
+            pytest.raises(RuntimeError, match="did not sustain"),
+        ):
+            write_tools._restart_xochitl(client)
 
     def test_restart_settle_blocks_other_ssh_operations(self):
         from remarkable_mcp import write_tools
@@ -7101,8 +7560,12 @@ class TestRestartXochitl:
         settle_started = threading.Event()
         release_settle = threading.Event()
 
-        def fake_command(command, timeout):
-            return "active\n" if "is-active" in command else ""
+        def fake_command(command, timeout, *, fresh_connection=False):
+            if command == "systemctl is-active xochitl":
+                return "active\n"
+            if command == "cat /proc/sys/kernel/random/boot_id":
+                return "boot-a\n"
+            return ""
 
         def fake_sleep(seconds):
             if seconds == write_tools._RESTART_SETTLE_SECONDS:
@@ -7110,7 +7573,9 @@ class TestRestartXochitl:
                 assert release_settle.wait(2)
 
         client._ssh_command_unlocked = fake_command
+        client.effective_host = lambda: "10.11.99.1"
         with (
+            patch("remarkable_mcp.write_tools._tcp_port_open", return_value=False),
             patch("remarkable_mcp.write_tools.time.sleep", side_effect=fake_sleep),
             ThreadPoolExecutor(max_workers=2) as executor,
         ):
@@ -7155,6 +7620,7 @@ class TestDeferRestart:
                 "get_meta_items",
                 "_ssh_command",
                 "_scp_download",
+                "mark_operation_dirty",
                 "_documents",
                 "_documents_by_id",
             ]
@@ -7418,12 +7884,104 @@ class TestDeferRestart:
                     {"file_path": str(pdf)},
                 )
             data = json.loads(result.content[0].text)
-            assert data["_error"]["type"] == "write_execution_unknown"
+            assert data["_error"]["type"] == "write_partially_persisted"
+            assert data["_error"]["cause_type"] == "SSHExecutionUnknownError"
+            assert data["refresh_pending"] is False
+            assert "Do not repeat" in data["_error"]["suggestion"]
             mock_upload.assert_called_once()
             mock_restart.assert_called_once_with(client, wait_ready=True)
         finally:
             client.close()
             self._cleanup_tools()
+
+    @pytest.mark.asyncio
+    async def test_partial_deferred_pre_execution_error_is_not_retryable(self):
+        from remarkable_mcp.ssh import SSHClient
+        from remarkable_mcp.ssh_reliability import SSHPreExecutionError
+        from remarkable_mcp.write_tools import _run_ssh_tool_operation
+
+        client = SSHClient()
+
+        def partial_mutation():
+            client.mark_operation_dirty()
+            raise SSHPreExecutionError(
+                "connection refused before the second step",
+                reason="connection_refused",
+                attempts=1,
+                elapsed=0.1,
+            )
+
+        try:
+            response = await _run_ssh_tool_operation(
+                client,
+                "partial-write",
+                partial_mutation,
+                defer_restart=True,
+            )
+            data = json.loads(response)
+        finally:
+            client.close()
+
+        assert data["_error"]["type"] == "write_partially_persisted"
+        assert data["_error"]["cause_type"] == "ssh_unavailable"
+        assert data["refresh_pending"] is True
+        assert "Do not repeat" in data["_error"]["suggestion"]
+
+    @pytest.mark.asyncio
+    async def test_partial_deferred_error_response_is_not_retryable(self):
+        from remarkable_mcp.ssh import SSHClient
+        from remarkable_mcp.write_tools import _run_ssh_tool_operation
+
+        client = SSHClient()
+
+        def partial_mutation():
+            client.mark_operation_dirty()
+            return make_error(
+                error_type="upload_failed",
+                message="metadata write failed",
+                suggestion="try again",
+            )
+
+        try:
+            response = await _run_ssh_tool_operation(
+                client,
+                "partial-write",
+                partial_mutation,
+                defer_restart=True,
+            )
+            data = json.loads(response)
+        finally:
+            client.close()
+
+        assert data["_error"]["type"] == "write_partially_persisted"
+        assert data["_error"]["cause_type"] == "upload_failed"
+        assert data["refresh_pending"] is True
+        assert "Do not repeat" in data["_error"]["suggestion"]
+
+    @pytest.mark.asyncio
+    async def test_clean_deferred_error_response_does_not_request_refresh(self):
+        from remarkable_mcp.ssh import SSHClient
+        from remarkable_mcp.write_tools import _run_ssh_tool_operation
+
+        client = SSHClient()
+        try:
+            response = await _run_ssh_tool_operation(
+                client,
+                "clean-validation-error",
+                lambda: make_error(
+                    error_type="folder_not_found",
+                    message="Folder not found",
+                    suggestion="Choose an existing folder.",
+                ),
+                defer_restart=True,
+            )
+            data = json.loads(response)
+        finally:
+            client.close()
+
+        assert data["_error"]["type"] == "folder_not_found"
+        assert data["refresh_pending"] is False
+        assert "remarkable_refresh" not in data["_hint"]
 
     @pytest.mark.asyncio
     async def test_refresh_tool_registered_in_ssh_and_restarts_once(self):
@@ -7449,6 +8007,65 @@ class TestDeferRestart:
             self._cleanup_tools()
 
     @pytest.mark.asyncio
+    async def test_refresh_real_ssh_client_refreshes_unknown_then_noops_when_clean(self):
+        from remarkable_mcp.ssh import SSHClient
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+        client = SSHClient()
+        try:
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+                patch("remarkable_mcp.write_tools._restart_xochitl") as restart,
+                patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            ):
+                first = json.loads((await _call_tool("remarkable_refresh", {})).content[0].text)
+                second = json.loads((await _call_tool("remarkable_refresh", {})).content[0].text)
+
+            assert first["refreshed"] is True
+            assert first["refresh_pending"] is False
+            assert second["refreshed"] is False
+            assert second["refresh_pending"] is False
+            restart.assert_called_once_with(client, wait_ready=True)
+        finally:
+            client.close()
+            self._cleanup_tools()
+
+    @pytest.mark.asyncio
+    async def test_refresh_reports_concurrent_deferred_write_as_pending(self):
+        from remarkable_mcp.ssh import SSHClient
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+        client = SSHClient()
+        try:
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+                patch.object(
+                    client._refresh_coordinator,
+                    "refresh_explicit",
+                    new=AsyncMock(return_value=True),
+                ),
+                patch.object(
+                    client._refresh_coordinator,
+                    "diagnostics",
+                    return_value={"deferred_dirty": True},
+                ),
+                patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            ):
+                result = await _call_tool("remarkable_refresh", {})
+                data = json.loads(result.content[0].text)
+
+            assert data["refreshed"] is True
+            assert data["refresh_pending"] is True
+            assert "concurrent deferred write" in data["_hint"]
+        finally:
+            client.close()
+            self._cleanup_tools()
+
+    @pytest.mark.asyncio
     async def test_refresh_failure_invalidates_deferred_cache(self):
         from remarkable_mcp.ssh import Document, SSHClient
         from remarkable_mcp.write_tools import register_write_tools
@@ -7466,6 +8083,12 @@ class TestDeferRestart:
             client._documents = [doc]
             client._documents_by_id = {doc.ID: doc}
             client._file_type_cache = {doc.ID: "pdf"}
+            await client._refresh_coordinator.run_write(
+                lambda: _async_value("saved"),
+                lambda: _async_value(None),
+                deferred=True,
+                persisted=lambda result: result == "saved",
+            )
             with (
                 patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
                 patch(
@@ -7478,9 +8101,13 @@ class TestDeferRestart:
                 data = json.loads(result.content[0].text)
 
             assert data["_error"]["type"] == "refresh_failed"
+            assert data["refresh_pending"] is True
             assert client._documents == []
             assert client._documents_by_id == {}
             assert client._file_type_cache is None
+            assert client.reliability_status()["refresh"]["last_error"] == (
+                "RuntimeError: SSH lost"
+            )
         finally:
             self._cleanup_tools()
 

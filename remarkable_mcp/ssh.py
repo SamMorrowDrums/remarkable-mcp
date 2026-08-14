@@ -49,6 +49,14 @@ DEFAULT_SSH_PORT = 22
 # Document storage path on the tablet
 XOCHITL_PATH = "/home/root/.local/share/remarkable/xochitl"
 _REMOTE_EXECUTION_MARKER = b"__REMARKABLE_MCP_REMOTE_STARTED__"
+_FRESH_CONNECTION_OPTIONS = [
+    "-o",
+    "ControlMaster=no",
+    "-o",
+    "ControlPath=none",
+    "-o",
+    "ControlPersist=no",
+]
 
 
 @dataclass
@@ -147,6 +155,8 @@ class SSHClient:
         self._trace_lock = threading.Lock()
         self._trace_sequence = 0
         self._trace_active = 0
+        self._ssh_config_lock = threading.Lock()
+        self._effective_host: Optional[str] = None
 
     def _trace_start(self, operation: str) -> tuple[int, float]:
         if os.environ.get("REMARKABLE_SSH_TRACE", "").lower() not in ("1", "true", "yes"):
@@ -219,6 +229,43 @@ class SSHClient:
             opts += ["-i", self.key_path, "-o", "IdentitiesOnly=yes"]
         return opts
 
+    def effective_host(self) -> str:
+        """Resolve OpenSSH aliases to the hostname used for direct readiness probes."""
+        with self._ssh_config_lock:
+            if self._effective_host is not None:
+                return self._effective_host
+            args = [
+                "ssh",
+                "-G",
+                "-p",
+                str(self.port),
+                f"{self.user}@{self.host}",
+            ]
+            try:
+                result = subprocess.run(
+                    args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError(
+                    f"Failed to resolve SSH host {self.host!r} with `ssh -G`: {exc}"
+                ) from exc
+            if result.returncode != 0:
+                detail = result.stderr.strip() or f"exit {result.returncode}"
+                raise RuntimeError(
+                    f"Failed to resolve SSH host {self.host!r} with `ssh -G`: {detail}"
+                )
+            for line in result.stdout.splitlines():
+                key, _, value = line.partition(" ")
+                if key.lower() == "hostname" and value.strip():
+                    self._effective_host = value.strip()
+                    return self._effective_host
+            raise RuntimeError(f"`ssh -G` returned no HostName for {self.host!r}")
+
     def run_operation(self, operation: str, callback: Callable[[], T]) -> T:
         """Run one coherent SSH operation in FIFO order."""
         return self._dispatcher.call(operation, callback)
@@ -240,6 +287,10 @@ class SSHClient:
 
     def is_closing(self) -> bool:
         return self._dispatcher.is_closing()
+
+    def mark_operation_dirty(self) -> None:
+        """Remember that the current multi-step operation persisted a mutation."""
+        self._dispatcher.set_current_cancel_dirty(True)
 
     def reliability_status(self) -> dict[str, Any]:
         return {
@@ -324,7 +375,24 @@ class SSHClient:
             lambda: self._ssh_command_unlocked(command, timeout),
         )
 
-    def _ssh_command_unlocked(self, command: str, timeout: int) -> str:
+    def probe_fresh_session(self, command: str, timeout: int = 10) -> str:
+        """Run a probe through a new SSH transport rather than a multiplexed master."""
+        return self.run_operation(
+            "fresh-session-probe",
+            lambda: self._ssh_command_unlocked(
+                command,
+                timeout,
+                fresh_connection=True,
+            ),
+        )
+
+    def _ssh_command_unlocked(
+        self,
+        command: str,
+        timeout: int,
+        *,
+        fresh_connection: bool = False,
+    ) -> str:
         operation = self._command_operation(command)
         trace = self._trace_start(operation)
         returncode = None
@@ -333,6 +401,7 @@ class SSHClient:
         ssh_args = [
             "ssh",
             *self._auth_ssh_options(),
+            *(_FRESH_CONNECTION_OPTIONS if fresh_connection else []),
             "-o",
             "ConnectTimeout=5",
             "-o",
@@ -641,7 +710,7 @@ class SSHClient:
         try:
             output = self._ssh_command(
                 f"for f in {XOCHITL_PATH}/*.metadata; do "
-                f'echo "===FILE===$(basename $f .metadata)"; cat "$f" 2>/dev/null; '
+                f'echo; echo "===FILE===$(basename $f .metadata)"; cat "$f" 2>/dev/null; '
                 f"done",
                 timeout=60,
             )
@@ -863,7 +932,7 @@ class SSHClient:
         try:
             output = self._ssh_command(
                 f"for f in {XOCHITL_PATH}/*.content; do "
-                f'echo "===FILE===$(basename $f .content)"; cat "$f" 2>/dev/null; '
+                f'echo; echo "===FILE===$(basename $f .content)"; cat "$f" 2>/dev/null; '
                 f"done",
                 timeout=60,
             )
