@@ -2,7 +2,8 @@
 """
 Tests for reMarkable MCP Server
 
-Tests the 4 intent-based tools using FastMCP's testing capabilities.
+Focused handler tests call MCPServer directly. Dual-era protocol behavior is
+covered through SDK v2's first-class in-memory Client in test_mcp_v2.py.
 """
 
 import json
@@ -16,6 +17,7 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 import requests
+from mcp import Client
 
 from remarkable_mcp.api import (
     get_item_path,
@@ -32,6 +34,22 @@ from remarkable_mcp.responses import (
     make_response,
 )
 from remarkable_mcp.server import mcp
+
+
+async def _call_tool(name: str, arguments: dict):
+    """Call a tool directly for focused handler tests."""
+    return await mcp.call_tool(name, arguments)
+
+
+async def _list_tools():
+    """List registered tools for focused schema tests."""
+    return await mcp.list_tools()
+
+
+async def _list_resources():
+    """List registered resources for focused schema tests."""
+    return await mcp.list_resources()
+
 
 # =============================================================================
 # Test Fixtures
@@ -93,7 +111,7 @@ class TestMCPServerInitialization:
     @pytest.mark.asyncio
     async def test_tools_registered(self):
         """Test that all expected tools are registered."""
-        tools = await mcp.list_tools()
+        tools = await _list_tools()
         tool_names = [tool.name for tool in tools]
 
         expected_tools = [
@@ -116,23 +134,23 @@ class TestMCPServerInitialization:
         ``remarkable_author`` is SSH-only and therefore hidden in cloud mode, so
         the default (cloud) surface is 13 tools, not 14.
         """
-        tools = await mcp.list_tools()
+        tools = await _list_tools()
         assert len(tools) == 13, f"Expected 13 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
         """Test that tools have proper schemas."""
-        tools = await mcp.list_tools()
+        tools = await _list_tools()
 
         for tool in tools:
             assert tool.name, "Tool should have a name"
             assert tool.description, "Tool should have a description"
-            assert hasattr(tool, "inputSchema"), "Tool should have inputSchema"
+            assert hasattr(tool, "input_schema"), "Tool should have input_schema"
 
     @pytest.mark.asyncio
     async def test_all_tools_have_xml_docstrings(self):
         """Test that all tools have XML-structured documentation."""
-        tools = await mcp.list_tools()
+        tools = await _list_tools()
 
         for tool in tools:
             # Check for XML tags in description
@@ -276,8 +294,8 @@ class TestRemarkableStatus:
         mock_get_rmapi.return_value = mock_client
         mock_client.get_meta_items.return_value = []
 
-        result = await mcp.call_tool("remarkable_status", {})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_status", {})
+        data = json.loads(result.content[0].text)
 
         assert data["authenticated"] is True
         assert "transport" in data
@@ -293,8 +311,8 @@ class TestRemarkableStatus:
         mock_get_rmapi.return_value = mock_client
         mock_client.get_meta_items.return_value = []
 
-        result = await mcp.call_tool("remarkable_status", {})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_status", {})
+        data = json.loads(result.content[0].text)
 
         assert "write_enabled" in data
         assert "capabilities" in data
@@ -327,8 +345,8 @@ class TestRemarkableStatus:
         """Test status when not authenticated."""
         mock_get_rmapi.side_effect = RuntimeError("Failed to authenticate")
 
-        result = await mcp.call_tool("remarkable_status", {})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_status", {})
+        data = json.loads(result.content[0].text)
 
         assert data["authenticated"] is False
         assert "error" in data
@@ -351,8 +369,8 @@ class TestRemarkableStatus:
         mock_client.get_meta_items.return_value = []
         mock_get_rmapi.return_value = mock_client
 
-        result = await mcp.call_tool("remarkable_status", {})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_status", {})
+        data = json.loads(result.content[0].text)
 
         assert data["authenticated"] is True
         assert data["transport"] == "cloud"
@@ -379,8 +397,8 @@ class TestRemarkableBrowse:
         mock_get_rmapi.return_value = mock_client
         mock_client.get_meta_items.return_value = []
 
-        result = await mcp.call_tool("remarkable_browse", {"path": "/"})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_browse", {"path": "/"})
+        data = json.loads(result.content[0].text)
 
         assert data["mode"] == "browse"
         assert data["path"] == "/"
@@ -402,8 +420,8 @@ class TestRemarkableBrowse:
 
         mock_client.get_meta_items.return_value = [mock_doc]
 
-        result = await mcp.call_tool("remarkable_browse", {"query": "Test"})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_browse", {"query": "Test"})
+        data = json.loads(result.content[0].text)
 
         assert data["mode"] == "search"
         assert data["query"] == "Test"
@@ -416,8 +434,8 @@ class TestRemarkableBrowse:
         """Test error handling in browse."""
         mock_get_rmapi.side_effect = RuntimeError("Connection failed")
 
-        result = await mcp.call_tool("remarkable_browse", {"path": "/"})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_browse", {"path": "/"})
+        data = json.loads(result.content[0].text)
 
         assert "_error" in data
         assert data["_error"]["type"] == "browse_failed"
@@ -439,8 +457,8 @@ class TestRemarkableRecent:
         mock_get_rmapi.return_value = mock_client
         mock_client.get_meta_items.return_value = []
 
-        result = await mcp.call_tool("remarkable_recent", {})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_recent", {})
+        data = json.loads(result.content[0].text)
 
         assert "count" in data
         assert "documents" in data
@@ -454,8 +472,8 @@ class TestRemarkableRecent:
         mock_get_rmapi.return_value = mock_client
         mock_client.get_meta_items.return_value = []
 
-        result = await mcp.call_tool("remarkable_recent", {"limit": 5})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_recent", {"limit": 5})
+        data = json.loads(result.content[0].text)
 
         assert "count" in data
         assert "documents" in data
@@ -469,9 +487,9 @@ class TestRemarkableRecent:
         mock_client.get_meta_items.return_value = []
 
         # Test with limit > 50
-        result = await mcp.call_tool("remarkable_recent", {"limit": 100})
+        result = await _call_tool("remarkable_recent", {"limit": 100})
         # Should not raise an error
-        data = json.loads(result[0][0].text)
+        data = json.loads(result.content[0].text)
         assert "count" in data
 
     @pytest.mark.asyncio
@@ -480,8 +498,8 @@ class TestRemarkableRecent:
         """Test error handling in recent."""
         mock_get_rmapi.side_effect = RuntimeError("Connection failed")
 
-        result = await mcp.call_tool("remarkable_recent", {})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_recent", {})
+        data = json.loads(result.content[0].text)
 
         assert "_error" in data
         assert data["_error"]["type"] == "recent_failed"
@@ -518,8 +536,8 @@ class TestRemarkableRecent:
 
         # Simulate get_file_type returning "pdf"
         with patch("remarkable_mcp.tools.get_file_type", return_value="pdf"):
-            result = await mcp.call_tool("remarkable_recent", {"include_preview": True})
-        data = json.loads(result[0][0].text)
+            result = await _call_tool("remarkable_recent", {"include_preview": True})
+        data = json.loads(result.content[0].text)
 
         # Should not crash with AttributeError; may return empty preview but no error
         assert "_error" not in data
@@ -556,8 +574,8 @@ class TestRemarkableRecent:
             FakeDoc("c", "Aware Newest", datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)),
         ]
 
-        result = await mcp.call_tool("remarkable_recent", {})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_recent", {})
+        data = json.loads(result.content[0].text)
 
         assert "_error" not in data
         names = [d["name"] for d in data["documents"]]
@@ -609,8 +627,8 @@ class TestRemarkableSearch:
             zf.writestr("doc-mcp-1.content", '{"fileType": "notebook"}')
         mock_client.download.return_value = zip_buffer.getvalue()
 
-        result = await mcp.call_tool("remarkable_search", {"query": "mcp", "limit": 2})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_search", {"query": "mcp", "limit": 2})
+        data = json.loads(result.content[0].text)
 
         # Top-level call must succeed (not surface a coroutine TypeError)
         assert "_error" not in data, f"Unexpected top-level error: {data.get('_error')}"
@@ -630,8 +648,8 @@ class TestRemarkableSearch:
         mock_get_rmapi.return_value = mock_client
         mock_client.get_meta_items.return_value = []
 
-        result = await mcp.call_tool("remarkable_search", {"query": "nonexistent-xyz"})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_search", {"query": "nonexistent-xyz"})
+        data = json.loads(result.content[0].text)
 
         assert "_error" in data
         assert data["_error"]["type"] == "no_documents_found"
@@ -653,8 +671,8 @@ class TestRemarkableRead:
         mock_get_rmapi.return_value = mock_client
         mock_client.get_meta_items.return_value = []
 
-        result = await mcp.call_tool("remarkable_read", {"document": "NonExistent"})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_read", {"document": "NonExistent"})
+        data = json.loads(result.content[0].text)
 
         assert "_error" in data
         assert data["_error"]["type"] == "document_not_found"
@@ -666,8 +684,8 @@ class TestRemarkableRead:
         """Test error handling in read."""
         mock_get_rmapi.side_effect = RuntimeError("Connection failed")
 
-        result = await mcp.call_tool("remarkable_read", {"document": "Test"})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_read", {"document": "Test"})
+        data = json.loads(result.content[0].text)
 
         assert "_error" in data
         assert data["_error"]["type"] == "read_failed"
@@ -681,8 +699,8 @@ class TestRemarkableRead:
         mock_client.get_meta_items.return_value = [mock_document]
 
         # Search for something similar but not exact
-        result = await mcp.call_tool("remarkable_read", {"document": "Test Doc"})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_read", {"document": "Test Doc"})
+        data = json.loads(result.content[0].text)
 
         # Should get a not found error with suggestions
         assert "_error" in data
@@ -725,8 +743,8 @@ class TestRemarkableRead:
 
         # This should NOT raise "the JSON object must be str, bytes or bytearray, not coroutine"
         # Previously failed because remarkable_read() was called without 'await'
-        result = await mcp.call_tool("remarkable_read", {"document": "Quick sheets"})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_read", {"document": "Quick sheets"})
+        data = json.loads(result.content[0].text)
 
         # Should return a valid response (not a coroutine error)
         assert (
@@ -775,10 +793,10 @@ class TestRemarkableRead:
             "tags": [],
         }
 
-        result = await mcp.call_tool(
+        result = await _call_tool(
             "remarkable_read", {"document": "Annotated PDF", "content_type": "annotations"}
         )
-        data = json.loads(result[0][0].text)
+        data = json.loads(result.content[0].text)
 
         assert "_error" not in data, f"Unexpected error: {data}"
         assert "Page 2: handwritten notes" in data["content"]
@@ -824,10 +842,10 @@ class TestRemarkableRead:
             "tags": [],
         }
 
-        result = await mcp.call_tool(
+        result = await _call_tool(
             "remarkable_read", {"document": "Annotated PDF", "content_type": "annotations"}
         )
-        data = json.loads(result[0][0].text)
+        data = json.loads(result.content[0].text)
 
         assert "_error" not in data
         assert "Page 3: handwritten notes, 1 highlight" in data["content"]
@@ -850,8 +868,8 @@ class TestRemarkableImage:
         mock_get_rmapi.return_value = mock_client
         mock_client.get_meta_items.return_value = []
 
-        result = await mcp.call_tool("remarkable_image", {"document": "NonExistent"})
-        data = json.loads(result[0].text)
+        result = await _call_tool("remarkable_image", {"document": "NonExistent"})
+        data = json.loads(result.content[0].text)
 
         assert "_error" in data
         assert data["_error"]["type"] == "document_not_found"
@@ -863,8 +881,8 @@ class TestRemarkableImage:
         """Test error handling in image tool."""
         mock_get_rmapi.side_effect = RuntimeError("Connection failed")
 
-        result = await mcp.call_tool("remarkable_image", {"document": "Test"})
-        data = json.loads(result[0].text)
+        result = await _call_tool("remarkable_image", {"document": "Test"})
+        data = json.loads(result.content[0].text)
 
         assert "_error" in data
         assert data["_error"]["type"] == "image_failed"
@@ -878,8 +896,8 @@ class TestRemarkableImage:
         mock_client.get_meta_items.return_value = [mock_document]
 
         # Search for something similar but not exact
-        result = await mcp.call_tool("remarkable_image", {"document": "Test Doc"})
-        data = json.loads(result[0].text)
+        result = await _call_tool("remarkable_image", {"document": "Test Doc"})
+        data = json.loads(result.content[0].text)
 
         # Should get a not found error with suggestions
         assert "_error" in data
@@ -888,12 +906,12 @@ class TestRemarkableImage:
     @pytest.mark.asyncio
     async def test_image_compatibility_parameter_in_schema(self):
         """Test that remarkable_image tool has the compatibility parameter in its schema."""
-        tools = await mcp.list_tools()
+        tools = await _list_tools()
         image_tool = next(t for t in tools if t.name == "remarkable_image")
 
         # Check that compatibility parameter exists in the input schema
-        assert "compatibility" in image_tool.inputSchema.get("properties", {})
-        compat_schema = image_tool.inputSchema["properties"]["compatibility"]
+        assert "compatibility" in image_tool.input_schema.get("properties", {})
+        compat_schema = image_tool.input_schema["properties"]["compatibility"]
         assert compat_schema.get("type") == "boolean"
         assert compat_schema.get("default") is False
 
@@ -913,17 +931,17 @@ class TestRemarkableImage:
         mock_client.download.return_value = document_zip
 
         with _cairo_unavailable():
-            embedded = await mcp.call_tool(
+            embedded = await _call_tool(
                 "remarkable_image",
                 {"document": "Test Document"},
             )
-            compatible = await mcp.call_tool(
+            compatible = await _call_tool(
                 "remarkable_image",
                 {"document": "Test Document", "compatibility": True},
             )
 
-        assert any(isinstance(content, EmbeddedResource) for content in embedded)
-        compatible_data = json.loads(compatible[0].text)
+        assert any(isinstance(content, EmbeddedResource) for content in embedded.content)
+        compatible_data = json.loads(compatible.content[0].text)
         assert compatible_data["mime_type"] == "image/png"
         assert compatible_data["image_base64"]
 
@@ -939,12 +957,12 @@ class TestMergedRendering:
     @pytest.mark.asyncio
     async def test_render_merged_parameter_in_schema(self):
         """Test that remarkable_image tool has the render_merged parameter in its schema."""
-        tools = await mcp.list_tools()
+        tools = await _list_tools()
         image_tool = next(t for t in tools if t.name == "remarkable_image")
 
         # Check that render_merged parameter exists in the input schema
-        assert "render_merged" in image_tool.inputSchema.get("properties", {})
-        merged_schema = image_tool.inputSchema["properties"]["render_merged"]
+        assert "render_merged" in image_tool.input_schema.get("properties", {})
+        merged_schema = image_tool.input_schema["properties"]["render_merged"]
         assert merged_schema.get("type") == "boolean"
         assert merged_schema.get("default") is False
 
@@ -980,7 +998,7 @@ class TestMergedRendering:
             mock_tmp.name = "/tmp/test.zip"
             mock_tmpfile.return_value = mock_tmp
             with patch("pathlib.Path.unlink"):
-                result = await mcp.call_tool(
+                result = await _call_tool(
                     "remarkable_image",
                     {
                         "document": "Test Document",
@@ -989,7 +1007,7 @@ class TestMergedRendering:
                     },
                 )
 
-        data = json.loads(result[0].text)
+        data = json.loads(result.content[0].text)
         # Should fall back to annotation-only since no PDF underlay
         assert data.get("merged") is False
 
@@ -1017,7 +1035,7 @@ class TestMergedRendering:
             mock_tmp.name = "/tmp/test.zip"
             mock_tmpfile.return_value = mock_tmp
             with patch("pathlib.Path.unlink"):
-                result = await mcp.call_tool(
+                result = await _call_tool(
                     "remarkable_image",
                     {
                         "document": "Test Document",
@@ -1027,7 +1045,7 @@ class TestMergedRendering:
                     },
                 )
 
-        data = json.loads(result[0].text)
+        data = json.loads(result.content[0].text)
         # SVG should return successfully but merged=False
         assert data.get("merged") is False
         assert "render_merged is only supported with PNG" in data.get("_hint", "")
@@ -1061,7 +1079,7 @@ class TestMergedRendering:
             mock_tmp.name = "/tmp/test.zip"
             mock_tmpfile.return_value = mock_tmp
             with patch("pathlib.Path.unlink"):
-                result = await mcp.call_tool(
+                result = await _call_tool(
                     "remarkable_image",
                     {
                         "document": "Test Document",
@@ -1070,7 +1088,7 @@ class TestMergedRendering:
                     },
                 )
 
-        data = json.loads(result[0].text)
+        data = json.loads(result.content[0].text)
         assert data.get("merged") is True
         assert data.get("resource_uri", "").endswith(".merged.png")
         hint = data.get("_hint", "")
@@ -1284,12 +1302,12 @@ class TestRenderTabletPdfFallback:
             mock_tmp.name = "/tmp/test.zip"
             mock_tmpfile.return_value = mock_tmp
             with patch("pathlib.Path.unlink"):
-                result = await mcp.call_tool(
+                result = await _call_tool(
                     "remarkable_image",
                     {"document": "Test Document", "page": 2, "compatibility": True},
                 )
 
-        data = json.loads(result[0].text)
+        data = json.loads(result.content[0].text)
         assert "_error" not in data
         assert data.get("render_source") == "tablet_pdf"
         assert data.get("image_base64")
@@ -1329,12 +1347,12 @@ class TestRenderTabletPdfFallback:
             mock_tmp.name = "/tmp/test.zip"
             mock_tmpfile.return_value = mock_tmp
             with patch("pathlib.Path.unlink"):
-                result = await mcp.call_tool(
+                result = await _call_tool(
                     "remarkable_image",
                     {"document": "Test Document", "page": 1, "compatibility": True},
                 )
 
-        data = json.loads(result[0].text)
+        data = json.loads(result.content[0].text)
         assert data["_error"]["type"] == "render_failed"
         # The misleading "v5 / rmc" message is gone; guidance is actionable
         suggestion = data["_error"]["suggestion"].lower()
@@ -1380,12 +1398,12 @@ class TestRenderTabletPdfFallback:
             mock_tmp.name = "/tmp/test.zip"
             mock_tmpfile.return_value = mock_tmp
             with patch("pathlib.Path.unlink"):
-                result = await mcp.call_tool(
+                result = await _call_tool(
                     "remarkable_image",
                     {"document": "Test Document", "page": 1, "compatibility": True},
                 )
 
-        data = json.loads(result[0].text)
+        data = json.loads(result.content[0].text)
         assert "_error" not in data
         assert data.get("image_base64")
         mock_full.assert_called_once()
@@ -1456,7 +1474,7 @@ class TestE2E:
     @pytest.mark.asyncio
     async def test_server_lists_all_tools(self):
         """Test that server can list all tools (e2e)."""
-        tools = await mcp.list_tools()
+        tools = await _list_tools()
 
         assert len(tools) == 13
 
@@ -1475,17 +1493,17 @@ class TestE2E:
         mock_client.get_meta_items.return_value = []
 
         # Call status tool
-        result = await mcp.call_tool("remarkable_status", {})
+        result = await _call_tool("remarkable_status", {})
 
         # Verify we get valid JSON back
-        data = json.loads(result[0][0].text)
+        data = json.loads(result.content[0].text)
         assert "authenticated" in data
         assert "_hint" in data
 
     @pytest.mark.asyncio
     async def test_tool_parameters_schema(self):
         """Test that tool parameters have proper schemas."""
-        tools = await mcp.list_tools()
+        tools = await _list_tools()
 
         # Check specific tools exist
         browse_tool = next(t for t in tools if t.name == "remarkable_browse")
@@ -1509,18 +1527,18 @@ class TestE2E:
             mock_client.get_meta_items.return_value = []
 
             # Test status
-            result = await mcp.call_tool("remarkable_status", {})
-            data = json.loads(result[0][0].text)
+            result = await _call_tool("remarkable_status", {})
+            data = json.loads(result.content[0].text)
             assert "_hint" in data
 
             # Test browse
-            result = await mcp.call_tool("remarkable_browse", {"path": "/"})
-            data = json.loads(result[0][0].text)
+            result = await _call_tool("remarkable_browse", {"path": "/"})
+            data = json.loads(result.content[0].text)
             assert "_hint" in data or "_error" in data
 
             # Test recent
-            result = await mcp.call_tool("remarkable_recent", {})
-            data = json.loads(result[0][0].text)
+            result = await _call_tool("remarkable_recent", {})
+            data = json.loads(result.content[0].text)
             assert "_hint" in data or "_error" in data
 
 
@@ -1546,8 +1564,8 @@ class TestResponseConsistency:
         ]
 
         for tool_name, args in tools_to_test:
-            result = await mcp.call_tool(tool_name, args)
-            data = json.loads(result[0][0].text)
+            result = await _call_tool(tool_name, args)
+            data = json.loads(result.content[0].text)
 
             # Either success with _hint or error with _error
             has_hint = "_hint" in data
@@ -1573,9 +1591,8 @@ class TestCapabilityChecking:
         """Test get_client_capabilities returns None without valid context."""
         from remarkable_mcp.capabilities import get_client_capabilities
 
-        # Create mock context without session
         mock_ctx = Mock()
-        mock_ctx.session = None
+        mock_ctx.client_capabilities = None
 
         result = get_client_capabilities(mock_ctx)
         assert result is None
@@ -1585,8 +1602,7 @@ class TestCapabilityChecking:
         from remarkable_mcp.capabilities import get_client_capabilities
 
         mock_ctx = Mock()
-        mock_ctx.session = Mock()
-        mock_ctx.session.client_params = None
+        mock_ctx.client_capabilities = None
 
         result = get_client_capabilities(mock_ctx)
         assert result is None
@@ -1600,9 +1616,7 @@ class TestCapabilityChecking:
         mock_caps = ClientCapabilities(sampling=SamplingCapability())
 
         mock_ctx = Mock()
-        mock_ctx.session = Mock()
-        mock_ctx.session.client_params = Mock()
-        mock_ctx.session.client_params.capabilities = mock_caps
+        mock_ctx.client_capabilities = mock_caps
 
         result = get_client_capabilities(mock_ctx)
         assert result is not None
@@ -1617,9 +1631,7 @@ class TestCapabilityChecking:
         mock_caps = ClientCapabilities(sampling=SamplingCapability())
 
         mock_ctx = Mock()
-        mock_ctx.session = Mock()
-        mock_ctx.session.client_params = Mock()
-        mock_ctx.session.client_params.capabilities = mock_caps
+        mock_ctx.client_capabilities = mock_caps
 
         result = client_supports_sampling(mock_ctx)
         assert result is True
@@ -1633,9 +1645,7 @@ class TestCapabilityChecking:
         mock_caps = ClientCapabilities(sampling=None)
 
         mock_ctx = Mock()
-        mock_ctx.session = Mock()
-        mock_ctx.session.client_params = Mock()
-        mock_ctx.session.client_params.capabilities = mock_caps
+        mock_ctx.client_capabilities = mock_caps
 
         result = client_supports_sampling(mock_ctx)
         assert result is False
@@ -1650,15 +1660,13 @@ class TestCapabilityChecking:
         mock_caps = ClientCapabilities(elicitation=ElicitationCapability())
 
         mock_ctx = Mock()
-        mock_ctx.session = Mock()
-        mock_ctx.session.client_params = Mock()
-        mock_ctx.session.client_params.capabilities = mock_caps
+        mock_ctx.client_capabilities = mock_caps
 
         assert client_supports_elicitation(mock_ctx) is True
 
         # Test with elicitation disabled
         mock_caps = ClientCapabilities(elicitation=None)
-        mock_ctx.session.client_params.capabilities = mock_caps
+        mock_ctx.client_capabilities = mock_caps
 
         assert client_supports_elicitation(mock_ctx) is False
 
@@ -1672,15 +1680,13 @@ class TestCapabilityChecking:
         mock_caps = ClientCapabilities(roots=RootsCapability())
 
         mock_ctx = Mock()
-        mock_ctx.session = Mock()
-        mock_ctx.session.client_params = Mock()
-        mock_ctx.session.client_params.capabilities = mock_caps
+        mock_ctx.client_capabilities = mock_caps
 
         assert client_supports_roots(mock_ctx) is True
 
         # Test with roots disabled
         mock_caps = ClientCapabilities(roots=None)
-        mock_ctx.session.client_params.capabilities = mock_caps
+        mock_ctx.client_capabilities = mock_caps
 
         assert client_supports_roots(mock_ctx) is False
 
@@ -1694,16 +1700,14 @@ class TestCapabilityChecking:
         mock_caps = ClientCapabilities(experimental={"my_feature": {}})
 
         mock_ctx = Mock()
-        mock_ctx.session = Mock()
-        mock_ctx.session.client_params = Mock()
-        mock_ctx.session.client_params.capabilities = mock_caps
+        mock_ctx.client_capabilities = mock_caps
 
         assert client_supports_experimental(mock_ctx, "my_feature") is True
         assert client_supports_experimental(mock_ctx, "other_feature") is False
 
         # Test with no experimental features
         mock_caps = ClientCapabilities(experimental=None)
-        mock_ctx.session.client_params.capabilities = mock_caps
+        mock_ctx.client_capabilities = mock_caps
 
         assert client_supports_experimental(mock_ctx, "my_feature") is False
 
@@ -1714,10 +1718,10 @@ class TestCapabilityChecking:
         mock_ctx = Mock()
         mock_ctx.session = Mock()
         mock_ctx.session.client_params = Mock()
-        mock_ctx.session.client_params.clientInfo = Mock()
-        mock_ctx.session.client_params.clientInfo.name = "Test Client"
-        mock_ctx.session.client_params.clientInfo.version = "1.0.0"
-        mock_ctx.session.client_params.protocolVersion = "2024-11-05"
+        mock_ctx.session.client_params.client_info = Mock()
+        mock_ctx.session.client_params.client_info.name = "Test Client"
+        mock_ctx.session.client_params.client_info.version = "1.0.0"
+        mock_ctx.protocol_version = "2024-11-05"
 
         result = get_client_info(mock_ctx)
         assert result is not None
@@ -1732,8 +1736,8 @@ class TestCapabilityChecking:
         mock_ctx = Mock()
         mock_ctx.session = Mock()
         mock_ctx.session.client_params = Mock()
-        mock_ctx.session.client_params.clientInfo = None
-        mock_ctx.session.client_params.protocolVersion = "2024-11-05"
+        mock_ctx.session.client_params.client_info = None
+        mock_ctx.protocol_version = "2024-11-05"
 
         result = get_client_info(mock_ctx)
         assert result is not None
@@ -1746,9 +1750,7 @@ class TestCapabilityChecking:
         from remarkable_mcp.capabilities import get_protocol_version
 
         mock_ctx = Mock()
-        mock_ctx.session = Mock()
-        mock_ctx.session.client_params = Mock()
-        mock_ctx.session.client_params.protocolVersion = "2024-11-05"
+        mock_ctx.protocol_version = "2024-11-05"
 
         result = get_protocol_version(mock_ctx)
         assert result == "2024-11-05"
@@ -1758,7 +1760,7 @@ class TestCapabilityChecking:
         from remarkable_mcp.capabilities import get_protocol_version
 
         mock_ctx = Mock()
-        mock_ctx.session = None
+        mock_ctx.protocol_version = None
 
         result = get_protocol_version(mock_ctx)
         assert result is None
@@ -1845,9 +1847,7 @@ class TestSamplingOCR:
             # Create mock context with sampling capability
             mock_caps = ClientCapabilities(sampling=SamplingCapability())
             mock_ctx = Mock()
-            mock_ctx.session = Mock()
-            mock_ctx.session.client_params = Mock()
-            mock_ctx.session.client_params.capabilities = mock_caps
+            mock_ctx.client_capabilities = mock_caps
 
             # Should return False because backend is "auto", not "sampling"
             result = should_use_sampling_ocr(mock_ctx)
@@ -1871,9 +1871,7 @@ class TestSamplingOCR:
             # Create mock context with sampling capability
             mock_caps = ClientCapabilities(sampling=SamplingCapability())
             mock_ctx = Mock()
-            mock_ctx.session = Mock()
-            mock_ctx.session.client_params = Mock()
-            mock_ctx.session.client_params.capabilities = mock_caps
+            mock_ctx.client_capabilities = mock_caps
 
             result = should_use_sampling_ocr(mock_ctx)
             assert result is True
@@ -1898,9 +1896,7 @@ class TestSamplingOCR:
             # Create mock context WITHOUT sampling capability
             mock_caps = ClientCapabilities(sampling=None)
             mock_ctx = Mock()
-            mock_ctx.session = Mock()
-            mock_ctx.session.client_params = Mock()
-            mock_ctx.session.client_params.capabilities = mock_caps
+            mock_ctx.client_capabilities = mock_caps
 
             result = should_use_sampling_ocr(mock_ctx)
             assert result is False
@@ -2008,8 +2004,8 @@ class TestTagSupport:
 
         with patch("remarkable_mcp.tools.get_rmapi", return_value=mock_client):
             with patch("remarkable_mcp.tools._is_cloud_archived", return_value=False):
-                result = await mcp.call_tool("remarkable_browse", {"path": "/"})
-                data = json.loads(result[0][0].text)
+                result = await _call_tool("remarkable_browse", {"path": "/"})
+                data = json.loads(result.content[0].text)
 
                 assert data["mode"] == "browse"
                 assert len(data["documents"]) == 1
@@ -2042,8 +2038,8 @@ class TestTagSupport:
 
         with patch("remarkable_mcp.tools.get_rmapi", return_value=mock_client):
             with patch("remarkable_mcp.tools._is_cloud_archived", return_value=False):
-                result = await mcp.call_tool("remarkable_browse", {"path": "/", "tags": ["work"]})
-                data = json.loads(result[0][0].text)
+                result = await _call_tool("remarkable_browse", {"path": "/", "tags": ["work"]})
+                data = json.loads(result.content[0].text)
 
                 assert data["mode"] == "browse"
                 assert len(data["documents"]) == 1
@@ -2067,8 +2063,8 @@ class TestTagSupport:
 
         with patch("remarkable_mcp.tools.get_rmapi", return_value=mock_client):
             with patch("remarkable_mcp.tools._is_cloud_archived", return_value=False):
-                result = await mcp.call_tool("remarkable_browse", {"query": "meeting"})
-                data = json.loads(result[0][0].text)
+                result = await _call_tool("remarkable_browse", {"query": "meeting"})
+                data = json.loads(result.content[0].text)
 
                 assert data["mode"] == "search"
                 assert len(data["results"]) == 1
@@ -2100,10 +2096,10 @@ class TestTagSupport:
 
         with patch("remarkable_mcp.tools.get_rmapi", return_value=mock_client):
             with patch("remarkable_mcp.tools._is_cloud_archived", return_value=False):
-                result = await mcp.call_tool(
+                result = await _call_tool(
                     "remarkable_browse", {"query": "meeting", "tags": ["work"]}
                 )
-                data = json.loads(result[0][0].text)
+                data = json.loads(result.content[0].text)
 
                 assert data["mode"] == "search"
                 assert len(data["results"]) == 1
@@ -2565,8 +2561,8 @@ class TestUSBWebInterface:
             mock_client.get_meta_items.return_value = [mock_doc]
             mock_get_rmapi.return_value = mock_client
 
-            result = await mcp.call_tool("remarkable_status", {})
-            data = json.loads(result[0][0].text)
+            result = await _call_tool("remarkable_status", {})
+            data = json.loads(result.content[0].text)
 
             assert data["authenticated"] is True
             assert data["transport"] == "usb-web"
@@ -2988,7 +2984,7 @@ class TestWriteTools:
         therefore hidden in cloud mode (the mode these tests import). See
         ``test_author_only_registered_in_ssh_mode`` for its gating.
         """
-        tools = await mcp.list_tools()
+        tools = await _list_tools()
         tool_names = [tool.name for tool in tools]
 
         write_tool_names = [
@@ -3017,7 +3013,7 @@ class TestWriteTools:
             register_write_tools()
 
         try:
-            tools = await mcp.list_tools()
+            tools = await _list_tools()
             tool_names = [tool.name for tool in tools]
 
             write_tool_names = [
@@ -3094,13 +3090,13 @@ class TestWriteTools:
                     )
                     mock_get_rmapi.return_value = mock_client
 
-                    result = await mcp.call_tool(
+                    result = await _call_tool(
                         "remarkable_delete",
                         {
                             "document": "Test Doc",
                         },
                     )
-                    data = json.loads(result[0][0].text)
+                    data = json.loads(result.content[0].text)
                     assert data["deleted"] is True
                     assert data["name"] == "Test Doc"
                     # Verify metadata was written with deleted=True
@@ -3132,7 +3128,7 @@ class TestWriteTools:
         with patch.dict(os.environ, env, clear=True):
             register_write_tools()
             try:
-                tools = await mcp.list_tools()
+                tools = await _list_tools()
                 names = {t.name for t in tools}
                 assert "remarkable_upload" in names
                 assert "remarkable_mkdir" in names
@@ -3158,7 +3154,7 @@ class TestWriteTools:
             register_write_tools()
 
         try:
-            tools = await mcp.list_tools()
+            tools = await _list_tools()
             write_tools = [
                 t
                 for t in tools
@@ -3209,11 +3205,11 @@ class TestWriteTools:
                 mock_client.upload_document.return_value = mock_doc
 
                 with patch("remarkable_mcp.write_tools.get_rmapi", return_value=mock_client):
-                    result = await mcp.call_tool(
+                    result = await _call_tool(
                         "remarkable_upload",
                         {"file_path": pdf_path, "document_name": "My Doc"},
                     )
-                data = json.loads(result[0][0].text)
+                data = json.loads(result.content[0].text)
                 assert data["uploaded"] is True
                 assert data["transport"] == "cloud"
                 assert data["uuid"] == "new-doc-id"
@@ -3244,7 +3240,7 @@ class TestWriteTools:
         with patch.dict(os.environ, env, clear=True):
             register_write_tools()
             try:
-                tools = await mcp.list_tools()
+                tools = await _list_tools()
                 names = {t.name for t in tools}
                 assert "remarkable_upload" in names  # upload works on USB web
                 assert "remarkable_mkdir" not in names
@@ -3275,7 +3271,7 @@ class TestWriteTools:
         with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
             register_write_tools()
             try:
-                names = {t.name for t in await mcp.list_tools()}
+                names = {t.name for t in await _list_tools()}
                 assert "remarkable_author" in names
             finally:
                 mcp._tool_manager._tools.pop("remarkable_author", None)
@@ -3286,7 +3282,7 @@ class TestWriteTools:
         with patch.dict(os.environ, env, clear=True):
             register_write_tools()
             try:
-                names = {t.name for t in await mcp.list_tools()}
+                names = {t.name for t in await _list_tools()}
                 assert "remarkable_author" not in names
             finally:
                 for name in [
@@ -3305,7 +3301,7 @@ class TestWriteTools:
         with patch.dict(os.environ, env, clear=True):
             register_write_tools()
             try:
-                names = {t.name for t in await mcp.list_tools()}
+                names = {t.name for t in await _list_tools()}
                 assert "remarkable_author" not in names
             finally:
                 mcp._tool_manager._tools.pop("remarkable_author", None)
@@ -3359,7 +3355,7 @@ class TestMarkdownPDFWriteback:
             patch.dict(os.environ, env, clear=True),
             patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
         ):
-            result = await mcp.call_tool(
+            result = await _call_tool(
                 "remarkable_markdown_to_pdf",
                 {
                     "markdown": "# Notes\n\n- One\n- Two",
@@ -3367,7 +3363,7 @@ class TestMarkdownPDFWriteback:
                 },
             )
 
-        data = json.loads(result[0][0].text)
+        data = json.loads(result.content[0].text)
         assert data["uploaded"] is True
         assert data["name"] == "Team Notes"
         assert data["transport"] == "cloud"
@@ -3407,7 +3403,7 @@ class TestMarkdownPDFWriteback:
                 return_value=False,
             ) as maybe_restart,
         ):
-            result = await mcp.call_tool(
+            result = await _call_tool(
                 "remarkable_markdown_to_pdf",
                 {
                     "markdown": "# Deferred",
@@ -3416,7 +3412,7 @@ class TestMarkdownPDFWriteback:
                 },
             )
 
-        data = json.loads(result[0][0].text)
+        data = json.loads(result.content[0].text)
         assert data["uploaded"] is True
         assert data["refresh_pending"] is True
         assert "remarkable_refresh" in data["_hint"]
@@ -3468,7 +3464,7 @@ class TestMarkdownPDFWriteback:
                 side_effect=capture_upload,
             ),
         ):
-            result = await mcp.call_tool(
+            result = await _call_tool(
                 "remarkable_markdown_to_pdf",
                 {
                     "markdown": "# Portable",
@@ -3476,7 +3472,7 @@ class TestMarkdownPDFWriteback:
                 },
             )
 
-        data = json.loads(result[0][0].text)
+        data = json.loads(result.content[0].text)
         assert data["uploaded"] is True
         assert captured == {
             "local_name": "document.pdf",
@@ -3524,8 +3520,8 @@ class TestCloudWriteDispatch:
                 client.get_meta_items.return_value = []
                 client.create_folder.return_value = new_folder
                 with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
-                    result = await mcp.call_tool("remarkable_mkdir", {"folder_name": "Projects"})
-                data = json.loads(result[0][0].text)
+                    result = await _call_tool("remarkable_mkdir", {"folder_name": "Projects"})
+                data = json.loads(result.content[0].text)
                 assert data["created"] is True
                 assert data["transport"] == "cloud"
                 assert data["uuid"] == "folder-xyz"
@@ -3544,11 +3540,11 @@ class TestCloudWriteDispatch:
                 client = Mock(spec=["get_meta_items", "rename"])
                 client.get_meta_items.return_value = [target]
                 with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
-                    result = await mcp.call_tool(
+                    result = await _call_tool(
                         "remarkable_rename",
                         {"document": "Old Name", "new_name": "New Name"},
                     )
-                data = json.loads(result[0][0].text)
+                data = json.loads(result.content[0].text)
                 assert data["renamed"] is True
                 assert data["transport"] == "cloud"
                 client.rename.assert_called_once_with("doc-1", "New Name")
@@ -3567,11 +3563,11 @@ class TestCloudWriteDispatch:
                 client = Mock(spec=["get_meta_items", "move"])
                 client.get_meta_items.return_value = [target, dest]
                 with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
-                    result = await mcp.call_tool(
+                    result = await _call_tool(
                         "remarkable_move",
                         {"document": "Report", "dest_folder": "Archive"},
                     )
-                data = json.loads(result[0][0].text)
+                data = json.loads(result.content[0].text)
                 assert data["moved"] is True
                 assert data["transport"] == "cloud"
                 client.move.assert_called_once_with("doc-1", "fold-1")
@@ -3590,8 +3586,8 @@ class TestCloudWriteDispatch:
                 client = Mock(spec=["get_meta_items", "delete"])
                 client.get_meta_items.return_value = [target]
                 with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
-                    result = await mcp.call_tool("remarkable_delete", {"document": "Old Notes"})
-                data = json.loads(result[0][0].text)
+                    result = await _call_tool("remarkable_delete", {"document": "Old Notes"})
+                data = json.loads(result.content[0].text)
                 assert data["deleted"] is True
                 assert data["transport"] == "cloud"
                 client.delete.assert_called_once_with("doc-1")
@@ -3618,8 +3614,8 @@ class TestCloudWriteDispatch:
                         return_value=False,
                     ),
                 ):
-                    result = await mcp.call_tool("remarkable_delete", {"document": "Old Notes"})
-                data = json.loads(result[0][0].text)
+                    result = await _call_tool("remarkable_delete", {"document": "Old Notes"})
+                data = json.loads(result.content[0].text)
                 assert data["_error"]["type"] == "confirmation_unavailable"
                 client.delete.assert_not_called()
             finally:
@@ -3644,8 +3640,8 @@ class TestCloudWriteDispatch:
                         return_value=False,
                     ),
                 ):
-                    result = await mcp.call_tool("remarkable_delete", {"document": "Old Notes"})
-                data = json.loads(result[0][0].text)
+                    result = await _call_tool("remarkable_delete", {"document": "Old Notes"})
+                data = json.loads(result.content[0].text)
                 assert data["deleted"] is True
                 client.delete.assert_called_once_with("doc-1")
             finally:
@@ -3653,29 +3649,34 @@ class TestCloudWriteDispatch:
 
     @pytest.mark.asyncio
     async def test_cloud_delete_cancelled_by_elicitation(self):
-        """When the user declines elicitation, delete is aborted and nothing changes."""
+        """Modern multi-round elicitation cancellation leaves the device untouched."""
+        from mcp.client import ClientRequestContext
+        from mcp.types import ElicitRequestParams, ElicitResult
+
         from remarkable_mcp.write_tools import register_write_tools
+
+        async def decline(
+            context: ClientRequestContext, params: ElicitRequestParams
+        ) -> ElicitResult:
+            return ElicitResult(action="decline")
 
         with patch.dict(os.environ, self._cloud_env(), clear=True):
             register_write_tools()
             try:
                 client = Mock(spec=["get_meta_items", "delete"])
-                decline = Mock()
-                decline.action = "decline"
-                decline.data = None
                 with (
                     patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+                    patch("remarkable_mcp.resources.start_background_loader", return_value=None),
                     patch(
-                        "remarkable_mcp.write_tools.client_supports_elicitation",
-                        return_value=True,
-                    ),
-                    patch(
-                        "mcp.server.fastmcp.Context.elicit",
-                        new=AsyncMock(return_value=decline),
+                        "remarkable_mcp.resources.stop_background_loader",
+                        new_callable=AsyncMock,
                     ),
                 ):
-                    result = await mcp.call_tool("remarkable_delete", {"document": "Old Notes"})
-                data = json.loads(result[0][0].text)
+                    async with Client(mcp, elicitation_callback=decline) as mcp_client:
+                        result = await mcp_client.call_tool(
+                            "remarkable_delete", {"document": "Old Notes"}
+                        )
+                data = json.loads(result.content[0].text)
                 assert data["deleted"] is False
                 assert data["cancelled"] is True
                 client.delete.assert_not_called()
@@ -4252,9 +4253,7 @@ def _ctx_with_extensions(extensions):
         {"extensions": extensions} if extensions is not None else {}
     )
     ctx = Mock()
-    ctx.session = Mock()
-    ctx.session.client_params = Mock()
-    ctx.session.client_params.capabilities = caps
+    ctx.client_capabilities = caps
     return ctx
 
 
@@ -4685,7 +4684,7 @@ class TestRenderCanvasPage:
         result = await _render_canvas_page("Notes", 2, None)
 
         assert isinstance(result, types.CallToolResult)
-        sc = result.structuredContent
+        sc = result.structured_content
         assert sc["page"] == 2
         assert sc["total_pages"] == 3
         assert sc["document_name"] == "Notes"
@@ -4755,14 +4754,14 @@ class TestRegisterAppTools:
 
     @pytest.mark.asyncio
     async def test_register_app_tools_adds_canvas(self, monkeypatch):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server import MCPServer
 
         import remarkable_mcp.app_canvas as app_canvas
         import remarkable_mcp.server as server_mod
 
         # register_app_tools imports mcp from server at call time, so redirect
         # that global to a throwaway server to avoid mutating the real one.
-        local = FastMCP("test-app")
+        local = MCPServer("test-app")
         monkeypatch.setattr(server_mod, "mcp", local)
 
         app_canvas.register_app_tools()
@@ -4772,7 +4771,7 @@ class TestRegisterAppTools:
         canvas = next(t for t in tools if t.name == "remarkable_canvas")
         assert canvas.meta["ui"]["resourceUri"] == "ui://remarkable/canvas"
         # No output schema so we can return either CallToolResult or an error string.
-        assert canvas.outputSchema is None
+        assert canvas.output_schema is None
         resources = await local.list_resources()
         assert any(str(r.uri) == "ui://remarkable/canvas" for r in resources)
 
@@ -4794,13 +4793,13 @@ class TestCanvasRegisteredByDefault:
 
     @pytest.mark.asyncio
     async def test_canvas_tool_present_on_default_server(self):
-        tools = await mcp.list_tools()
+        tools = await _list_tools()
         names = [t.name for t in tools]
         assert "remarkable_canvas" in names
 
     @pytest.mark.asyncio
     async def test_canvas_resource_present_on_default_server(self):
-        resources = await mcp.list_resources()
+        resources = await _list_resources()
         assert any(str(r.uri) == "ui://remarkable/canvas" for r in resources)
 
     @pytest.mark.asyncio
@@ -4811,8 +4810,8 @@ class TestCanvasRegisteredByDefault:
         mock_get_rmapi.return_value = mock_client
         mock_client.get_meta_items.return_value = []
 
-        result = await mcp.call_tool("remarkable_status", {})
-        data = json.loads(result[0][0].text)
+        result = await _call_tool("remarkable_status", {})
+        data = json.loads(result.content[0].text)
         assert "app_enabled" not in data
 
 
@@ -4917,7 +4916,9 @@ class TestCLIFlags:
     def test_default_transport_security_requires_proxy_header_rewrite(self):
         from mcp.server.transport_security import TransportSecurityMiddleware
 
-        middleware = TransportSecurityMiddleware(mcp.settings.transport_security)
+        from remarkable_mcp.server import _transport_security_for_host
+
+        middleware = TransportSecurityMiddleware(_transport_security_for_host("127.0.0.1"))
         assert middleware._validate_host("mcp.example.com") is False
         assert middleware._validate_host("127.0.0.1:8000") is True
         assert middleware._validate_origin("https://openwebui.example.com") is False
@@ -4928,26 +4929,24 @@ class TestCLIFlags:
 
         import remarkable_mcp.server as server
 
-        previous_host = mcp.settings.host
-        previous_port = mcp.settings.port
-        previous_security = mcp.settings.transport_security
-        try:
-            with patch.object(mcp, "run") as fastmcp_run:
-                server.run(
-                    transport="streamable-http",
-                    host="0.0.0.0",
-                    port=9000,
-                )
-            fastmcp_run.assert_called_once_with(transport="streamable-http")
-            middleware = TransportSecurityMiddleware(mcp.settings.transport_security)
-            assert middleware._validate_host("0.0.0.0:9000") is True
-            assert middleware._validate_origin("http://0.0.0.0:3000") is True
-            assert middleware._validate_host("mcp.example.com") is False
-            assert middleware._validate_origin("https://openwebui.example.com") is False
-        finally:
-            mcp.settings.host = previous_host
-            mcp.settings.port = previous_port
-            mcp.settings.transport_security = previous_security
+        security = server._transport_security_for_host("0.0.0.0")
+        with patch.object(mcp, "run") as mcp_run:
+            server.run(
+                transport="streamable-http",
+                host="0.0.0.0",
+                port=9000,
+            )
+        mcp_run.assert_called_once_with(
+            transport="streamable-http",
+            host="0.0.0.0",
+            port=9000,
+            transport_security=security,
+        )
+        middleware = TransportSecurityMiddleware(security)
+        assert middleware._validate_host("0.0.0.0:9000") is True
+        assert middleware._validate_origin("http://0.0.0.0:3000") is True
+        assert middleware._validate_host("mcp.example.com") is False
+        assert middleware._validate_origin("https://openwebui.example.com") is False
 
     def test_read_only_instructions_do_not_advertise_markdown_writeback(self):
         from remarkable_mcp.server import _build_instructions
@@ -5023,18 +5022,18 @@ class TestCanvasWrite:
     @pytest.mark.asyncio
     async def test_empty_strokes_rejected(self):
         with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
-            result = await mcp.call_tool(
+            result = await _call_tool(
                 "remarkable_author",
                 {"method": "draw", "document": "Sketchbook", "page": 1, "strokes": []},
             )
-            data = json.loads(result[0][0].text)
+            data = json.loads(result.content[0].text)
             assert data["_error"]["type"] == "no_strokes"
 
     @pytest.mark.asyncio
     async def test_unknown_method_is_educational(self):
         with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
-            result = await mcp.call_tool("remarkable_author", {"method": "frobnicate"})
-            data = json.loads(result[0][0].text)
+            result = await _call_tool("remarkable_author", {"method": "frobnicate"})
+            data = json.loads(result.content[0].text)
             assert data["_error"]["type"] == "unknown_method"
             assert "draw" in data["_error"]["did_you_mean"]
 
@@ -5077,7 +5076,7 @@ class TestCanvasWrite:
                 strokes_mod, "append_strokes", lambda original, strokes: original + b"NEW"
             ),
         ):
-            result = await mcp.call_tool(
+            result = await _call_tool(
                 "remarkable_author",
                 {
                     "method": "draw",
@@ -5086,7 +5085,7 @@ class TestCanvasWrite:
                     "strokes": [{"points": [[0.1, 0.2], [0.8, 0.2]], "tool": "fineliner"}],
                 },
             )
-            data = json.loads(result[0][0].text)
+            data = json.loads(result.content[0].text)
             assert data["written"] is True
             assert data["created_overlay"] is True
             rm = f"{wt.XOCHITL_PATH}/doc-abc/page-1.rm"
@@ -5142,7 +5141,7 @@ class TestCanvasWrite:
                 strokes_mod, "append_strokes", lambda original, strokes: original + b"NEW"
             ),
         ):
-            result = await mcp.call_tool(
+            result = await _call_tool(
                 "remarkable_author",
                 {
                     "method": "draw",
@@ -5158,7 +5157,7 @@ class TestCanvasWrite:
                     "ui_submitted": True,
                 },
             )
-            data = json.loads(result[0][0].text)
+            data = json.loads(result.content[0].text)
             assert data["written"] is True
             assert data["page"] == 1
             assert data["total_pages"] == 2
@@ -5213,7 +5212,7 @@ class TestCanvasWrite:
                 strokes_mod, "append_strokes", lambda original, strokes: original + b"NEW"
             ),
         ):
-            result = await mcp.call_tool(
+            result = await _call_tool(
                 "remarkable_author",
                 {
                     "method": "draw",
@@ -5222,7 +5221,7 @@ class TestCanvasWrite:
                     "strokes": [{"points": [[0.1, 0.2], [0.8, 0.2]], "tool": "highlighter"}],
                 },
             )
-            data = json.loads(result[0][0].text)
+            data = json.loads(result.content[0].text)
             assert data["written"] is True
             assert "caveat" in data and "EPUB" in data["caveat"]
 
@@ -5263,10 +5262,10 @@ class TestCanvasWrite:
             patch.object(wt, "_restart_xochitl") as mock_restart,
             patch.object(wt, "_invalidate_client_cache", lambda c: None),
         ):
-            result = await mcp.call_tool(
+            result = await _call_tool(
                 "remarkable_author", {"method": "add_page", "document": "Sketchbook"}
             )
-            data = json.loads(result[0][0].text)
+            data = json.loads(result.content[0].text)
             assert data["added"] is True
             assert data["page_added"] == 2
             assert data["total_pages"] == 2
@@ -5298,10 +5297,10 @@ class TestCanvasWrite:
             patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
             patch.object(wt, "get_rmapi", lambda: client),
         ):
-            result = await mcp.call_tool(
+            result = await _call_tool(
                 "remarkable_author", {"method": "add_page", "document": "Sketchbook"}
             )
-            data = json.loads(result[0][0].text)
+            data = json.loads(result.content[0].text)
             assert data["_error"]["type"] == "not_a_notebook"
 
     @pytest.mark.asyncio
@@ -5325,10 +5324,10 @@ class TestCanvasWrite:
             patch.object(wt, "_restart_xochitl") as mock_restart,
             patch.object(wt, "_invalidate_client_cache", lambda c: None),
         ):
-            result = await mcp.call_tool(
+            result = await _call_tool(
                 "remarkable_author", {"method": "create_document", "name": "My notes"}
             )
-            data = json.loads(result[0][0].text)
+            data = json.loads(result.content[0].text)
             assert data["created"] is True
             assert data["document"] == "My notes"
             assert data["total_pages"] == 1
@@ -5359,18 +5358,18 @@ class TestCanvasWrite:
             patch.object(wt, "_restart_xochitl"),
             patch.object(wt, "_invalidate_client_cache", lambda c: None),
         ):
-            result = await mcp.call_tool(
+            result = await _call_tool(
                 "remarkable_author",
                 {"method": "create_document", "name": "My notes", "text": "Agenda"},
             )
-            data = json.loads(result[0][0].text)
+            data = json.loads(result.content[0].text)
             assert data["has_text"] is True
 
     @pytest.mark.asyncio
     async def test_create_document_requires_name(self):
         with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
-            result = await mcp.call_tool("remarkable_author", {"method": "create_document"})
-            data = json.loads(result[0][0].text)
+            result = await _call_tool("remarkable_author", {"method": "create_document"})
+            data = json.loads(result.content[0].text)
             assert data["_error"]["type"] == "missing_parameter"
 
 
@@ -5707,11 +5706,11 @@ class TestDeferRestart:
                 patch("remarkable_mcp.write_tools._restart_xochitl") as mock_restart,
                 patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
             ):
-                result = await mcp.call_tool(
+                result = await _call_tool(
                     "remarkable_upload",
                     {"file_path": str(pdf), "defer_restart": True},
                 )
-                data = json.loads(result[0][0].text)
+                data = json.loads(result.content[0].text)
                 assert data["uploaded"] is True
                 assert data["refresh_pending"] is True
                 mock_restart.assert_not_called()
@@ -5738,11 +5737,11 @@ class TestDeferRestart:
                 patch("remarkable_mcp.write_tools._defer_restart_enabled", return_value=False),
                 patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
             ):
-                result = await mcp.call_tool(
+                result = await _call_tool(
                     "remarkable_upload",
                     {"file_path": str(pdf)},
                 )
-                data = json.loads(result[0][0].text)
+                data = json.loads(result.content[0].text)
                 assert data["uploaded"] is True
                 assert data["refresh_pending"] is False
                 mock_restart.assert_called_once_with(client)
@@ -5756,7 +5755,7 @@ class TestDeferRestart:
         with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
             register_write_tools()
         try:
-            tools = await mcp.list_tools()
+            tools = await _list_tools()
             assert "remarkable_refresh" in [t.name for t in tools]
 
             client = self._make_ssh_client()
@@ -5765,8 +5764,8 @@ class TestDeferRestart:
                 patch("remarkable_mcp.write_tools._restart_xochitl") as mock_restart,
                 patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
             ):
-                result = await mcp.call_tool("remarkable_refresh", {})
-                data = json.loads(result[0][0].text)
+                result = await _call_tool("remarkable_refresh", {})
+                data = json.loads(result.content[0].text)
                 assert data["refreshed"] is True
                 mock_restart.assert_called_once_with(client)
         finally:
@@ -5781,7 +5780,7 @@ class TestDeferRestart:
         with patch.dict(os.environ, env, clear=True):
             register_write_tools()
             try:
-                tools = await mcp.list_tools()
+                tools = await _list_tools()
                 assert "remarkable_refresh" not in [t.name for t in tools]
             finally:
                 self._cleanup_tools()

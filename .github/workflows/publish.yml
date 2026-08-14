@@ -47,7 +47,7 @@ jobs:
         run: uv sync --extra dev
       
       - name: Run tests
-        run: uv run pytest test_server.py -v
+        run: uv run pytest -v
       
       - name: Run linting
         run: uv run ruff check .

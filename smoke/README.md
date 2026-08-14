@@ -4,6 +4,8 @@
 deterministic, no-AI diagnostic that drives the *real* `remarkable-mcp` server
 over the MCP protocol (stdio, via the official `mcp` client SDK — no models, no
 mocks) and exercises **every available tool in every available transport**.
+The SDK 2.x `Client` probes modern discovery first and falls back to the legacy
+initialize handshake, so the harness also checks real protocol negotiation.
 
 It answers one question quickly: *"does each mode this machine can reach actually
 work, tool by tool?"*

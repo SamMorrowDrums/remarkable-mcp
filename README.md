@@ -15,6 +15,9 @@ Your reMarkable tablet is a powerful tool for thinking, note-taking, and researc
 - **Portable page rendering** — Renders notebook SVG and PDF pages with bundled Python dependencies only, then automatically falls back to a source PDF when local stroke parsing can't handle a page (USB/SSH use the tablet's own PDF export; cloud uses the original source PDF)
 - **Markdown writeback** — Render Markdown as a paginated PDF and upload it with a chosen document name
 - **OpenWebUI integration** — Run a local Streamable HTTP endpoint without a separate bridge script
+- **MCP 2026 compatibility** — Built on the stable MCP Python SDK 2.x; one
+  `MCPServer` handles 2026-07-28 requests and every earlier SDK-supported
+  protocol revision
 - **Smart search** — Find content across your entire library
 - **Second brain integration** — Use with Obsidian, note-taking apps, or any AI workflow
 
@@ -351,6 +354,12 @@ uvx remarkable-mcp --usb --http
 The bind address and port can also be set with `--host` / `--port` or
 `REMARKABLE_MCP_HOST` / `REMARKABLE_MCP_PORT`.
 
+The server uses MCP Python SDK 2.x's dual-era endpoint. Modern
+`2026-07-28` requests are sessionless; older clients continue to use the
+initialize handshake and legacy MCP sessions on the same `/mcp` route. The
+reMarkable token and selected tablet transport remain process-local CLI/env
+configuration and are never inferred from MCP HTTP authorization headers.
+
 > [!WARNING]
 > Streamable HTTP has **no built-in authentication**. It binds to
 > `127.0.0.1` by default and is intended for a local OpenWebUI instance. A
@@ -362,7 +371,7 @@ The bind address and port can also be set with `--host` / `--port` or
 ### Remote access through an authenticated reverse proxy
 
 Keep remarkable-mcp on its default loopback bind and put the proxy on the same
-host. FastMCP's DNS-rebinding protection only permits loopback `Host` and
+host. MCPServer's DNS-rebinding protection only permits loopback `Host` and
 `Origin` values by default. A proxy that forwards its public hostname unchanged
 will therefore receive **421 Misdirected Request**; a public browser `Origin`
 will receive **403 Forbidden**.
@@ -380,7 +389,7 @@ location /mcp {
     proxy_buffering off;
     proxy_read_timeout 3600s;
 
-    # Required by FastMCP's default DNS-rebinding protection.
+    # Required by MCPServer's default DNS-rebinding protection.
     proxy_set_header Host 127.0.0.1:8000;
     proxy_set_header Origin "";
 }
@@ -553,6 +562,11 @@ Set `REMARKABLE_OCR_BACKEND` in your MCP config:
 
 Uses your MCP client's AI model for OCR. Works with clients that support MCP sampling (VS Code + Copilot, Claude Desktop, etc.).
 
+On modern `2026-07-28` connections, the server returns a multi-round input
+request and the client retries the tool with the sampled OCR result. On legacy
+connections, the same resolver uses the established server-to-client sampling
+request. This compatibility routing is handled by MCP SDK 2.x.
+
 **Pros:**
 - No additional API keys needed
 - Quality depends on your client's model (GPT-4, Claude, etc.)
@@ -693,7 +707,7 @@ Or set the environment variable:
 
 - **Upload registers in cloud, SSH, and USB web mode** — local-directory mode never exposes write tools.
 - **mkdir, move, rename, delete register in cloud and SSH modes only** — they are not exposed on USB web (the tablet's USB web firmware has no folder/move/rename/delete endpoints), keeping the tool list scoped to what the active transport actually supports.
-- **Delete prompts for confirmation when possible** — if the client supports MCP elicitation, `remarkable_delete` asks the user to confirm before deleting. If the client can't show a prompt, the delete is **refused** (not performed) unless `REMARKABLE_SKIP_CONFIRM=1` is set — so write-on-by-default can't silently delete from clients that lack elicitation. In cloud mode delete moves the item to the trash (recoverable from your device); set `REMARKABLE_SKIP_CONFIRM=1` to allow deletes without a prompt in automated setups. All write tools carry `ToolAnnotations(readOnlyHint=False)` (and `destructiveHint=True` for delete) so an agent harness can gate writes at the MCP layer.
+- **Delete prompts for confirmation when possible** — if the client supports MCP elicitation, `remarkable_delete` asks the user to confirm before deleting. MCP SDK 2.x carries that prompt as a multi-round input request for `2026-07-28` clients and as push elicitation for legacy clients. If the client can't show a prompt, the delete is **refused** (not performed) unless `REMARKABLE_SKIP_CONFIRM=1` is set — so write-on-by-default can't silently delete from clients that lack elicitation. In cloud mode delete moves the item to the trash (recoverable from your device); set `REMARKABLE_SKIP_CONFIRM=1` to allow deletes without a prompt in automated setups. All write tools carry `ToolAnnotations(read_only_hint=False)` (and `destructive_hint=True` for delete) so an agent harness can gate writes at the MCP layer.
 - After each write operation in SSH mode, the tablet UI (`xochitl`) restarts automatically to reflect changes; the call waits for it to come back before returning so the next write doesn't race a restarting daemon. For bulk operations, pass `defer_restart=True` to each write — or set `REMARKABLE_DEFER_RESTART=1` — and call `remarkable_refresh()` once at the end, so the batch triggers a single restart instead of one per write (each restart forces a full document-store rescan).
 
 ### Examples
@@ -751,7 +765,7 @@ remarkable_author(method="create_document", name="Meeting notes", text="Agenda\n
 
 An interactive page viewer built on the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) extension (SEP-1865). Clients that support MCP Apps (such as ChatGPT, Claude, VS Code, and the MCP Inspector) render a canvas in a side panel where you can view a document page and navigate through it.
 
-There is **no flag to enable it** — the `remarkable_canvas` tool and its `ui://remarkable/canvas` resource are always registered, and the capability is negotiated automatically at the MCP `initialize` handshake. App-capable clients open the interactive canvas; every other client simply receives the rendered page as an image, so the tool is safe and useful everywhere.
+There is **no flag to enable it** — the `remarkable_canvas` tool and its `ui://remarkable/canvas` resource are always registered, and the capability is negotiated automatically in client capabilities (modern discovery or a legacy initialize handshake). App-capable clients open the interactive canvas; every other client simply receives the rendered page as an image, so the tool is safe and useful everywhere.
 
 This registers one tool:
 
@@ -761,7 +775,7 @@ This registers one tool:
 
 How it behaves:
 
-- **App-capable clients** open the canvas (declared at `ui://remarkable/canvas`, MIME `text/html;profile=mcp-app`) and can page through the document via the MCP Apps postMessage bridge — the server delivers each rendered page in the tool result's `structuredContent`.
+- **App-capable clients** open the canvas (declared at `ui://remarkable/canvas`, MIME `text/html;profile=mcp-app`) and can page through the document via the MCP Apps postMessage bridge — the server delivers each rendered page in the wire result's `structuredContent` (`structured_content` in Python).
 - **Other clients** still get the rendered page back as an embedded PNG image, so the tool is useful everywhere; it just won't open the interactive panel. The `_meta.ui` / `ui://` metadata is inert to clients that don't advertise the MCP Apps UI extension.
 
 ### Drawing and authoring from the canvas
@@ -907,7 +921,7 @@ Treat your reMarkable as a second brain that AI can access. Combined with tools 
 git clone https://github.com/SamMorrowDrums/remarkable-mcp.git
 cd remarkable-mcp
 uv sync --all-extras
-uv run pytest test_server.py -v
+uv run pytest -v
 ```
 
 📖 **[Development Guide](docs/development.md)**

@@ -7,16 +7,22 @@ USB web) and do not modify any documents.
 """
 
 import base64
+import logging
 import os
 import re
 import tempfile
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Annotated, List, Literal, Optional
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context, Resolve, Sample
 from mcp.types import (
     BlobResourceContents,
+    CreateMessageResult,
     EmbeddedResource,
     TextContent,
     TextResourceContents,
@@ -32,6 +38,7 @@ from remarkable_mcp.api import (
     get_items_by_parent,
     get_rmapi,
 )
+from remarkable_mcp.capabilities import client_supports_sampling
 from remarkable_mcp.concurrency import run_blocking
 from remarkable_mcp.extract import (
     cache_page_ocr,
@@ -53,10 +60,109 @@ from remarkable_mcp.extract import (
 from remarkable_mcp.responses import make_error, make_response
 from remarkable_mcp.sampling import (
     get_ocr_backend,
-    ocr_via_sampling,
-    should_use_sampling_ocr,
+    make_ocr_sample,
+    sampling_result_text,
 )
 from remarkable_mcp.server import mcp
+
+logger = logging.getLogger(__name__)
+
+_SAMPLING_PAGE_CACHE_TTL = 600.0
+_SAMPLING_PAGE_CACHE_MAX = 8
+
+
+@dataclass(frozen=True)
+class _PreparedImageSampling:
+    """Rendered page retained across modern multi-round resolver retries."""
+
+    cache_key: tuple
+    total_pages: int
+    png_data: bytes
+    merged_note: Optional[str]
+    is_merged: bool
+    rendered_via_pdf: bool
+
+
+@dataclass(frozen=True)
+class _PreparedReadSampling:
+    """Notebook page retained across modern multi-round resolver retries."""
+
+    cache_key: tuple
+    total_pages: int
+    png_data: Optional[bytes]
+    cached_text: Optional[str]
+    content: Optional[dict]
+
+
+_sampling_page_cache: OrderedDict[
+    tuple, tuple[float, _PreparedImageSampling | _PreparedReadSampling]
+] = OrderedDict()
+_sampling_page_cache_lock = threading.Lock()
+
+
+def _sampling_document_revision(document) -> tuple:
+    """Build a stable revision token from metadata supplied by each transport."""
+    revision = []
+    for field in ("ModifiedClient", "Version", "version", "last_modified"):
+        value = getattr(document, field, None)
+        if isinstance(value, datetime):
+            value = value.isoformat()
+        if isinstance(value, (str, int, float, bool)):
+            revision.append((field, value))
+    return tuple(revision)
+
+
+def _image_sampling_cache_key(document, page: int, background: str, render_merged: bool) -> tuple:
+    return (
+        "image",
+        str(document.ID),
+        _sampling_document_revision(document),
+        page,
+        background,
+        render_merged,
+    )
+
+
+def _get_prepared_page(
+    key: tuple,
+) -> Optional[_PreparedImageSampling | _PreparedReadSampling]:
+    now = time.monotonic()
+    with _sampling_page_cache_lock:
+        cached = _sampling_page_cache.get(key)
+        if cached is None:
+            return None
+        created, prepared = cached
+        if now - created > _SAMPLING_PAGE_CACHE_TTL:
+            del _sampling_page_cache[key]
+            return None
+        _sampling_page_cache.move_to_end(key)
+        return prepared
+
+
+def _cache_prepared_page(
+    prepared: _PreparedImageSampling | _PreparedReadSampling,
+) -> None:
+    with _sampling_page_cache_lock:
+        _sampling_page_cache[prepared.cache_key] = (time.monotonic(), prepared)
+        _sampling_page_cache.move_to_end(prepared.cache_key)
+        while len(_sampling_page_cache) > _SAMPLING_PAGE_CACHE_MAX:
+            _sampling_page_cache.popitem(last=False)
+
+
+def _read_sampling_cache_key(
+    document,
+    page: int,
+    content_type: Literal["text", "raw", "annotations"],
+    include_ocr: bool,
+) -> tuple:
+    return (
+        "read",
+        str(document.ID),
+        _sampling_document_revision(document),
+        page,
+        content_type,
+        include_ocr,
+    )
 
 
 def _get_root_path() -> str:
@@ -118,12 +224,30 @@ def _resolve_root_path(path: str) -> str:
     return root + path
 
 
+def _find_target_document(collection, items_by_id: dict, document: str):
+    """Find an in-scope document by display name or full path."""
+    root = _get_root_path()
+    actual_document = _resolve_root_path(document) if document.startswith("/") else document
+    document_lower = actual_document.lower().strip("/")
+    for item in collection:
+        if item.is_folder:
+            continue
+        item_path = get_item_path(item, items_by_id)
+        if not _is_within_root(item_path, root):
+            continue
+        if item.VissibleName.lower() == document_lower:
+            return item
+        if item_path.lower().strip("/") == document_lower:
+            return item
+    return None
+
+
 # Base annotations for read-only operations
 _BASE_ANNOTATIONS = {
-    "readOnlyHint": True,
-    "destructiveHint": False,
-    "idempotentHint": True,
-    "openWorldHint": False,  # Private cloud account, not open world
+    "read_only_hint": True,
+    "destructive_hint": False,
+    "idempotent_hint": True,
+    "open_world_hint": False,  # Private cloud account, not open world
 }
 
 # Unique annotations for each tool with descriptive titles
@@ -279,6 +403,94 @@ def _ocr_png_google_vision(png_path: Path) -> Optional[str]:
     return None
 
 
+async def _prepare_read_sampling(
+    document: str,
+    content_type: Literal["text", "raw", "annotations"],
+    page: int,
+    include_ocr: bool,
+    ctx: Context,
+) -> Optional[_PreparedReadSampling]:
+    """Prepare one notebook page for an era-portable sampling request."""
+    if (
+        content_type == "raw"
+        or get_ocr_backend() != "sampling"
+        or not client_supports_sampling(ctx)
+    ):
+        return None
+
+    try:
+        client = get_rmapi()
+        collection = await run_blocking(client.get_meta_items)
+        items_by_id = get_items_by_id(collection)
+        target_doc = _find_target_document(collection, items_by_id, document)
+        if target_doc is None:
+            return None
+
+        file_type = await run_blocking(get_file_type, client, target_doc)
+        if file_type in ("pdf", "epub"):
+            return None
+
+        page = max(1, page)
+        cache_key = _read_sampling_cache_key(target_doc, page, content_type, include_ocr)
+        prepared = _get_prepared_page(cache_key)
+        if isinstance(prepared, _PreparedReadSampling):
+            return prepared
+
+        cached_text = await run_blocking(get_cached_page_ocr, target_doc.ID, page, "sampling")
+
+        raw_doc = await run_blocking(client.download, target_doc)
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(raw_doc)
+            tmp_path = Path(tmp.name)
+        try:
+            page_count = await run_blocking(get_document_page_count, tmp_path)
+            if page > page_count:
+                return None
+
+            content = None
+            if not include_ocr:
+                content = await run_blocking(
+                    extract_text_from_document_zip,
+                    tmp_path,
+                    include_ocr=False,
+                    doc_id=target_doc.ID,
+                )
+                if content.get("typed_text") or content.get("highlights"):
+                    return None
+
+            png_data = None
+            if cached_text is None:
+                png_data = await run_blocking(render_page_from_document_zip, tmp_path, page)
+                if png_data is None:
+                    return None
+
+            prepared = _PreparedReadSampling(
+                cache_key=cache_key,
+                total_pages=page_count,
+                png_data=png_data,
+                cached_text=cached_text,
+                content=content,
+            )
+            _cache_prepared_page(prepared)
+            return prepared
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    except Exception as exc:
+        # Sampling is an optional enhancement. Let the tool body preserve its
+        # educational connection/render error or use the configured local fallback.
+        logger.debug("Could not prepare sampling OCR for remarkable_read: %s", exc)
+        return None
+
+
+def _resolve_read_sampling(
+    prepared_read: Annotated[Optional[_PreparedReadSampling], Resolve(_prepare_read_sampling)],
+) -> Sample | None:
+    """Build one era-portable sampling request from the retained page."""
+    if prepared_read is None or prepared_read.png_data is None:
+        return None
+    return make_ocr_sample(prepared_read.png_data)
+
+
 @mcp.tool(annotations=READ_ANNOTATIONS)
 async def remarkable_read(
     document: str,
@@ -287,6 +499,12 @@ async def remarkable_read(
     grep: Optional[str] = None,
     include_ocr: bool = False,
     ctx: Optional[Context] = None,
+    prepared_read: Annotated[
+        Optional[_PreparedReadSampling], Resolve(_prepare_read_sampling)
+    ] = None,
+    sampling_result: Annotated[
+        Optional[CreateMessageResult], Resolve(_resolve_read_sampling)
+    ] = None,
 ) -> str:
     """
     <usecase>Read and extract text content from a reMarkable document.</usecase>
@@ -336,27 +554,8 @@ async def remarkable_read(
         page_size = DEFAULT_PAGE_SIZE
 
         root = _get_root_path()
-        # Resolve user-provided path to actual device path
-        actual_document = _resolve_root_path(document) if document.startswith("/") else document
-
-        # Find the document by name or path (case-insensitive, not folders)
         documents = [item for item in collection if not item.is_folder]
-        target_doc = None
-        document_lower = actual_document.lower().strip("/")
-
-        for doc in documents:
-            doc_path = get_item_path(doc, items_by_id)
-            # Filter by root path
-            if not _is_within_root(doc_path, root):
-                continue
-            # Match by name (case-insensitive)
-            if doc.VissibleName.lower() == document_lower:
-                target_doc = doc
-                break
-            # Also try matching by full path (case-insensitive)
-            if doc_path.lower().strip("/") == document_lower:
-                target_doc = doc
-                break
+        target_doc = _find_target_document(collection, items_by_id, document)
 
         if not target_doc:
             # Find similar documents for suggestion (only within root)
@@ -377,6 +576,12 @@ async def remarkable_read(
 
         doc_path = get_item_path(target_doc, items_by_id)
         file_type = await run_blocking(get_file_type, client, target_doc)
+        expected_read_key = _read_sampling_cache_key(target_doc, page, content_type, include_ocr)
+        prepared_sampling = (
+            prepared_read
+            if prepared_read is not None and prepared_read.cache_key == expected_read_key
+            else None
+        )
 
         # Collect content based on content_type
         text_parts = []
@@ -415,75 +620,31 @@ async def remarkable_read(
         ocr_backend_used = None  # Track which OCR backend was used
         content = None  # Will hold extraction result
         total_notebook_pages = 0  # Track total pages for sampling mode
+        sampling_auto_enabled = False
 
         if content_type in ("text", "annotations"):
             # For notebooks (no PDF/EPUB), use page-based pagination
             is_notebook = file_type not in ("pdf", "epub")
 
-            # Determine if we should use sampling OCR
-            use_sampling = is_notebook and include_ocr and ctx and should_use_sampling_ocr(ctx)
+            use_sampling = is_notebook and prepared_sampling is not None
+            sampling_auto_enabled = use_sampling and not include_ocr
 
-            # For sampling OCR: use per-page caching and only OCR requested page
             if use_sampling:
-                # Check per-page cache first
-                cached_text = await run_blocking(
-                    get_cached_page_ocr, target_doc.ID, page, "sampling"
-                )
-                if cached_text is not None:
-                    # We have cached OCR for this page
-                    # Still need to get total page count
-                    raw_doc = await run_blocking(client.download, target_doc)
-                    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                        tmp.write(raw_doc)
-                        tmp_path = Path(tmp.name)
-                    try:
-                        total_notebook_pages = await run_blocking(get_document_page_count, tmp_path)
-                    finally:
-                        tmp_path.unlink(missing_ok=True)
-
-                    # Build notebook_pages list with just the cached page
+                total_notebook_pages = prepared_sampling.total_pages
+                content = prepared_sampling.content
+                ocr_text = prepared_sampling.cached_text or sampling_result_text(sampling_result)
+                if ocr_text is not None:
+                    if prepared_sampling.cached_text is None:
+                        await run_blocking(
+                            cache_page_ocr,
+                            target_doc.ID,
+                            page,
+                            "sampling",
+                            ocr_text,
+                        )
                     notebook_pages = [""] * total_notebook_pages
-                    notebook_pages[page - 1] = cached_text
+                    notebook_pages[page - 1] = ocr_text
                     ocr_backend_used = "sampling"
-                else:
-                    # No cache - render and OCR just the requested page
-                    raw_doc = await run_blocking(client.download, target_doc)
-                    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                        tmp.write(raw_doc)
-                        tmp_path = Path(tmp.name)
-
-                    try:
-                        total_notebook_pages = await run_blocking(get_document_page_count, tmp_path)
-
-                        if page > total_notebook_pages:
-                            return make_error(
-                                error_type="page_out_of_range",
-                                message=f"Page {page} does not exist. "
-                                f"Document has {total_notebook_pages} notebook page(s).",
-                                suggestion=f"Use page=1 to {total_notebook_pages} "
-                                "to read different pages.",
-                            )
-
-                        # Render just the requested page
-                        png_data = await run_blocking(render_page_from_document_zip, tmp_path, page)
-                        if png_data:
-                            # OCR the single page
-                            ocr_text = await ocr_via_sampling(ctx, png_data)
-                            if ocr_text:
-                                # Cache the result
-                                await run_blocking(
-                                    cache_page_ocr,
-                                    target_doc.ID,
-                                    page,
-                                    "sampling",
-                                    ocr_text,
-                                )
-                                # Build notebook_pages list
-                                notebook_pages = [""] * total_notebook_pages
-                                notebook_pages[page - 1] = ocr_text
-                                ocr_backend_used = "sampling"
-                    finally:
-                        tmp_path.unlink(missing_ok=True)
 
             # For non-sampling: check full document cache or extract all
             if not use_sampling and is_notebook and include_ocr:
@@ -643,15 +804,18 @@ async def remarkable_read(
                 ),
             }
 
-            # Add OCR backend info if OCR was used
-            if include_ocr and ocr_backend_used:
+            if ocr_backend_used:
                 result["ocr_backend"] = ocr_backend_used
+            if sampling_auto_enabled:
+                result["_ocr_auto_enabled"] = True
 
             if grep:
                 result["grep"] = grep
                 result["grep_matches"] = grep_matches
 
             hint_parts = [f"Notebook page {page}/{total_pages}."]
+            if sampling_auto_enabled:
+                hint_parts.insert(0, "OCR auto-enabled (notebook had no typed text).")
             if has_more:
                 doc_name = target_doc.VissibleName
                 hint_parts.append(f"Next: remarkable_read('{doc_name}', page={page + 1}).")
@@ -714,6 +878,7 @@ async def remarkable_read(
                 grep=grep,
                 include_ocr=True,  # Enable OCR automatically
                 ctx=ctx,  # Pass context for sampling OCR
+                sampling_result=sampling_result,
             )
             result_data = json.loads(ocr_result)
             if "_error" not in result_data:
@@ -1560,6 +1725,128 @@ async def remarkable_status() -> str:
         return make_response(result, hint)
 
 
+async def _render_png_page(
+    client,
+    target_doc,
+    tmp_path: Path,
+    page: int,
+    background: str,
+    render_merged: bool,
+) -> tuple[Optional[bytes], Optional[str], bool, bool]:
+    """Render a PNG with the same fallbacks used by remarkable_image."""
+    merged_note = None
+    is_merged = False
+    if render_merged:
+        png_data, merged_note = await run_blocking(
+            render_merged_page_from_document_zip,
+            tmp_path,
+            page,
+            background_color=background,
+        )
+        is_merged = png_data is not None and merged_note is None
+    else:
+        png_data = await run_blocking(
+            render_page_from_document_zip,
+            tmp_path,
+            page,
+            background_color=background,
+        )
+
+    rendered_via_pdf = False
+    if png_data is None:
+        png_data, has_source_pdf = await run_blocking(
+            render_mapped_pdf_page_from_document_zip, tmp_path, page
+        )
+        rendered_via_pdf = png_data is not None
+        if png_data is None and not has_source_pdf:
+            pdf_bytes = await run_blocking(download_raw_file, client, target_doc, "pdf")
+            if pdf_bytes:
+                png_data = await run_blocking(render_tablet_pdf_page_to_png, pdf_bytes, page)
+                rendered_via_pdf = png_data is not None
+
+    if png_data is None:
+        full = await run_blocking(
+            render_page_full_page_from_document_zip,
+            tmp_path,
+            page,
+            background_color=background,
+        )
+        if full is not None:
+            png_data = full[0]
+
+    return png_data, merged_note, is_merged, rendered_via_pdf
+
+
+async def _prepare_image_sampling(
+    document: str,
+    page: int,
+    background: Optional[str],
+    output_format: str,
+    include_ocr: bool,
+    render_merged: bool,
+    ctx: Context,
+) -> Optional[_PreparedImageSampling]:
+    """Render and retain one page across all rounds of a sampling tool call."""
+    if (
+        not include_ocr
+        or output_format.lower() != "png"
+        or get_ocr_backend() != "sampling"
+        or not client_supports_sampling(ctx)
+    ):
+        return None
+
+    try:
+        if background is None:
+            background = await run_blocking(get_background_color)
+        client = get_rmapi()
+        collection = await run_blocking(client.get_meta_items)
+        items_by_id = get_items_by_id(collection)
+        target_doc = _find_target_document(collection, items_by_id, document)
+        if target_doc is None:
+            return None
+
+        cache_key = _image_sampling_cache_key(target_doc, page, background, render_merged)
+        prepared = _get_prepared_page(cache_key)
+        if isinstance(prepared, _PreparedImageSampling):
+            return prepared
+
+        raw_doc = await run_blocking(client.download, target_doc)
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(raw_doc)
+            tmp_path = Path(tmp.name)
+        try:
+            page_count = await run_blocking(get_document_page_count, tmp_path)
+            if page < 1 or page > page_count:
+                return None
+            png_data, merged_note, is_merged, rendered_via_pdf = await _render_png_page(
+                client, target_doc, tmp_path, page, background, render_merged
+            )
+            if png_data is None:
+                return None
+            prepared = _PreparedImageSampling(
+                cache_key=cache_key,
+                total_pages=page_count,
+                png_data=png_data,
+                merged_note=merged_note,
+                is_merged=is_merged,
+                rendered_via_pdf=rendered_via_pdf,
+            )
+            _cache_prepared_page(prepared)
+            return prepared
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.debug("Could not prepare sampling OCR for remarkable_image: %s", exc)
+        return None
+
+
+def _resolve_image_sampling(
+    prepared_image: Annotated[Optional[_PreparedImageSampling], Resolve(_prepare_image_sampling)],
+) -> Sample | None:
+    """Build one era-portable sampling request from the retained page."""
+    return make_ocr_sample(prepared_image.png_data) if prepared_image else None
+
+
 @mcp.tool(annotations=IMAGE_ANNOTATIONS)
 async def remarkable_image(
     document: str,
@@ -1570,6 +1857,12 @@ async def remarkable_image(
     include_ocr: bool = False,
     render_merged: bool = False,
     ctx: Optional[Context] = None,
+    prepared_image: Annotated[
+        Optional[_PreparedImageSampling], Resolve(_prepare_image_sampling)
+    ] = None,
+    sampling_result: Annotated[
+        Optional[CreateMessageResult], Resolve(_resolve_image_sampling)
+    ] = None,
 ):
     """
     <usecase>Get an image of a specific page from a reMarkable document.</usecase>
@@ -1641,27 +1934,8 @@ async def remarkable_image(
         items_by_id = get_items_by_id(collection)
 
         root = _get_root_path()
-        # Resolve user-provided path to actual device path
-        actual_document = _resolve_root_path(document) if document.startswith("/") else document
-
-        # Find the document by name or path (case-insensitive, not folders)
         documents = [item for item in collection if not item.is_folder]
-        target_doc = None
-        document_lower = actual_document.lower().strip("/")
-
-        for doc in documents:
-            doc_path = get_item_path(doc, items_by_id)
-            # Filter by root path
-            if not _is_within_root(doc_path, root):
-                continue
-            # Match by name (case-insensitive)
-            if doc.VissibleName.lower() == document_lower:
-                target_doc = doc
-                break
-            # Also try matching by full path (case-insensitive)
-            if doc_path.lower().strip("/") == document_lower:
-                target_doc = doc
-                break
+        target_doc = _find_target_document(collection, items_by_id, document)
 
         if not target_doc:
             # Find similar documents for suggestion (only within root)
@@ -1680,24 +1954,38 @@ async def remarkable_image(
                 did_you_mean=similar if similar else None,
             )
 
-        # Download the document
-        raw_doc = await run_blocking(client.download, target_doc)
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-            tmp.write(raw_doc)
-            tmp_path = Path(tmp.name)
+        format_lower = output_format.lower()
+        if format_lower not in ("png", "svg"):
+            return make_error(
+                error_type="invalid_format",
+                message=f"Invalid format: '{output_format}'. Supported formats: png, svg",
+                suggestion="Use output_format='png' for raster or 'svg' for vectors.",
+            )
+
+        expected_prepared_key = _image_sampling_cache_key(
+            target_doc, page, background, render_merged
+        )
+        prepared = (
+            prepared_image
+            if format_lower == "png"
+            and prepared_image is not None
+            and prepared_image.cache_key == expected_prepared_key
+            else None
+        )
+
+        tmp_path = None
+        if prepared is None:
+            raw_doc = await run_blocking(client.download, target_doc)
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                tmp.write(raw_doc)
+                tmp_path = Path(tmp.name)
 
         try:
-            # Validate format parameter
-            format_lower = output_format.lower()
-            if format_lower not in ("png", "svg"):
-                return make_error(
-                    error_type="invalid_format",
-                    message=f"Invalid format: '{output_format}'. Supported formats: png, svg",
-                    suggestion="Use output_format='png' for raster or 'svg' for vectors.",
-                )
-
-            # Get total page count
-            total_pages = await run_blocking(get_document_page_count, tmp_path)
+            total_pages = (
+                prepared.total_pages
+                if prepared is not None
+                else await run_blocking(get_document_page_count, tmp_path)
+            )
 
             if total_pages == 0:
                 return make_error(
@@ -1725,6 +2013,7 @@ async def remarkable_image(
             is_merged = False
 
             if format_lower == "svg":
+                assert tmp_path is not None
                 if render_merged:
                     merged_note = (
                         "render_merged is only supported with PNG format; "
@@ -1774,7 +2063,7 @@ async def remarkable_image(
                     # Return SVG as embedded TextResourceContents with info hint
                     text_resource = TextResourceContents(
                         uri=resource_uri,
-                        mimeType="image/svg+xml",
+                        mime_type="image/svg+xml",
                         text=svg_content,
                     )
                     embedded = EmbeddedResource(type="resource", resource=text_resource)
@@ -1787,61 +2076,26 @@ async def remarkable_image(
                     info = TextContent(type="text", text=info_text)
                     return [info, embedded]
             else:
-                # PNG format
-                if render_merged:
-                    png_data, merged_note = await run_blocking(
-                        render_merged_page_from_document_zip,
-                        tmp_path,
-                        page,
-                        background_color=background,
-                    )
-                    is_merged = png_data is not None and merged_note is None
+                if prepared is not None:
+                    png_data = prepared.png_data
+                    merged_note = prepared.merged_note
+                    is_merged = prepared.is_merged
+                    rendered_via_pdf = prepared.rendered_via_pdf
                 else:
-                    png_data = await run_blocking(
-                        render_page_from_document_zip,
+                    assert tmp_path is not None
+                    (
+                        png_data,
+                        merged_note,
+                        is_merged,
+                        rendered_via_pdf,
+                    ) = await _render_png_page(
+                        client,
+                        target_doc,
                         tmp_path,
                         page,
-                        background_color=background,
+                        background,
+                        render_merged,
                     )
-
-                # Portable fallback: the local stroke renderer can fail to
-                # produce an image for empty pages or newer .rm block formats.
-                # In that case we rasterize the requested page from the document's
-                # source PDF. USB/SSH expose the tablet's natively-rendered (merged)
-                # PDF; cloud exposes the original source PDF — either covers the
-                # failure cases above. Both SVG and PDF rasterization use PyMuPDF,
-                # which needs no system Cairo. Notebooks have no PDF, so
-                # download_raw_file returns None and this safely no-ops.
-                # Credit: ljdutel (#95).
-                rendered_via_pdf = False
-                if png_data is None:
-                    png_data, has_source_pdf = await run_blocking(
-                        render_mapped_pdf_page_from_document_zip, tmp_path, page
-                    )
-                    rendered_via_pdf = png_data is not None
-                    if png_data is None and not has_source_pdf:
-                        pdf_bytes = await run_blocking(download_raw_file, client, target_doc, "pdf")
-                        if pdf_bytes:
-                            png_data = await run_blocking(
-                                render_tablet_pdf_page_to_png, pdf_bytes, page
-                            )
-                            rendered_via_pdf = png_data is not None
-
-                # Blank-page fallback: the stroke renderer returns None for a
-                # notebook page with no drawable strokes (e.g. a freshly-created
-                # or blank page). The interactive canvas already renders such
-                # pages full-bleed at their own paper size; do the same here so a
-                # blank page yields a blank image instead of render_failed,
-                # keeping remarkable_image consistent with remarkable_canvas.
-                if png_data is None:
-                    full = await run_blocking(
-                        render_page_full_page_from_document_zip,
-                        tmp_path,
-                        page,
-                        background_color=background,
-                    )
-                    if full is not None:
-                        png_data = full[0]
 
                 if png_data is None:
                     return make_error(
@@ -1862,8 +2116,8 @@ async def remarkable_image(
                 if include_ocr:
                     # Try sampling-based OCR if configured and available
                     # This sends the image to the client's LLM to extract text
-                    if ctx and should_use_sampling_ocr(ctx):
-                        ocr_text = await ocr_via_sampling(ctx, png_data)
+                    if get_ocr_backend() == "sampling":
+                        ocr_text = sampling_result_text(sampling_result)
                         if ocr_text:
                             ocr_backend_used = "sampling"
 
@@ -1945,7 +2199,7 @@ async def remarkable_image(
                     # Return PNG as embedded BlobResourceContents with info hint
                     blob_resource = BlobResourceContents(
                         uri=resource_uri,
-                        mimeType="image/png",
+                        mime_type="image/png",
                         blob=png_base64,
                     )
                     embedded = EmbeddedResource(type="resource", resource=blob_resource)
@@ -1970,7 +2224,8 @@ async def remarkable_image(
                     return [info, embedded]
 
         finally:
-            tmp_path.unlink(missing_ok=True)
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
     except Exception as e:
         return make_error(

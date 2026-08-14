@@ -28,7 +28,7 @@ import logging
 from typing import Optional
 
 from mcp import types
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 
 from remarkable_mcp.capabilities import APP_UI_MIME, client_supports_apps
 
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 CANVAS_RESOURCE_URI = "ui://remarkable/canvas"
 
 # Read-only viewer annotations (no device mutation in this phase).
-CANVAS_ANNOTATIONS = types.ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+CANVAS_ANNOTATIONS = types.ToolAnnotations(read_only_hint=True, open_world_hint=False)
 
 
 # The canvas app: a self-contained, dependency-free HTML/JS surface that speaks
@@ -817,7 +817,7 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
     }
 
     resource_uri = f"remarkableimg:///{doc_path.lstrip('/')}.page-{page}.png"
-    blob = types.BlobResourceContents(uri=resource_uri, mimeType="image/png", blob=png_base64)
+    blob = types.BlobResourceContents(uri=resource_uri, mime_type="image/png", blob=png_base64)
     # Audience split (MCP content annotations): the rendered page image is for the
     # USER (it's large base64 the model never needs to read), while a lean text
     # digest carries the page/doc/writable facts the model may want — keeping the
@@ -861,7 +861,7 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
     )
     return types.CallToolResult(
         content=[info, image],
-        structuredContent=structured,
+        structured_content=structured,
     )
 
 

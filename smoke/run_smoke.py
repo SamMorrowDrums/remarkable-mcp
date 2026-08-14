@@ -54,7 +54,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
-from mcp import ClientSession, StdioServerParameters
+from mcp import Client, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -216,7 +216,7 @@ def _parse_payload(result) -> dict:
                 return json.loads(text)
             except (json.JSONDecodeError, TypeError):
                 continue
-    structured = getattr(result, "structuredContent", None)
+    structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
         return structured
     return {}
@@ -265,7 +265,7 @@ async def call_tool(session, tool, args, timeout):
     except Exception as exc:  # noqa: BLE001 - report any client/transport error
         return {}, True, f"{type(exc).__name__}: {exc}"
     payload = _parse_payload(result)
-    return payload, bool(getattr(result, "isError", False)), None
+    return payload, bool(getattr(result, "is_error", False)), None
 
 
 def classify_ok(payload, is_error, exc, ok_error_types=()):
@@ -602,47 +602,46 @@ async def run_mode(mode: str, rec: Recorder, read_only: bool):
     )
 
     try:
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await asyncio.wait_for(session.initialize(), 60)
+        async with Client(stdio_client(params)) as session:
+            # Client auto-negotiates 2026-07-28 and falls back to initialize
+            # when this smoke harness is pointed at a legacy server.
+            # status decides availability for real (handles fallback / auth).
+            payload, is_err, exc = await call_tool(
+                session, "remarkable_status", {}, TIMEOUTS["remarkable_status"]
+            )
+            authed = isinstance(payload, dict) and payload.get("authenticated") is True
+            transport = payload.get("transport") if isinstance(payload, dict) else None
+            fell_back = (
+                bool(payload.get("fell_back_to_cloud")) if isinstance(payload, dict) else False
+            )
+            want_transport = spec["transport"]
 
-                # status decides availability for real (handles fallback / auth).
-                payload, is_err, exc = await call_tool(
-                    session, "remarkable_status", {}, TIMEOUTS["remarkable_status"]
+            if exc or not authed or transport != want_transport or fell_back:
+                detail = exc or (
+                    f"authenticated={authed} transport={transport} "
+                    f"expected={want_transport} fell_back={fell_back}"
                 )
-                authed = isinstance(payload, dict) and payload.get("authenticated") is True
-                transport = payload.get("transport") if isinstance(payload, dict) else None
-                fell_back = (
-                    bool(payload.get("fell_back_to_cloud")) if isinstance(payload, dict) else False
-                )
-                want_transport = spec["transport"]
+                rec.mode_unavailable(mode, f"status check failed: {detail}")
+                return
 
-                if exc or not authed or transport != want_transport or fell_back:
-                    detail = exc or (
-                        f"authenticated={authed} transport={transport} "
-                        f"expected={want_transport} fell_back={fell_back}"
-                    )
-                    rec.mode_unavailable(mode, f"status check failed: {detail}")
-                    return
+            rec.ensure_mode(mode, transport, payload.get("document_count"), "connected")
+            rec.record(
+                mode, "remarkable_status", PASS, "", _detail_for("remarkable_status", payload)
+            )
 
-                rec.ensure_mode(mode, transport, payload.get("document_count"), "connected")
-                rec.record(
-                    mode, "remarkable_status", PASS, "", _detail_for("remarkable_status", payload)
-                )
+            # tools/list is the source of truth for what this mode supports.
+            tools_result = await asyncio.wait_for(session.list_tools(), 30)
+            registered = {t.name for t in tools_result.tools}
+            rec.modes[mode]["registered_tools"] = sorted(registered)
+            _mark_hidden_tools_na(mode, rec, registered)
 
-                # tools/list is the source of truth for what this mode supports.
-                tools_result = await asyncio.wait_for(session.list_tools(), 30)
-                registered = {t.name for t in tools_result.tools}
-                rec.modes[mode]["registered_tools"] = sorted(registered)
-                _mark_hidden_tools_na(mode, rec, registered)
-
-                await run_read_phase(session, mode, rec, registered)
-                if read_only:
-                    for tool in WRITE_TOOLS:
-                        if tool in registered:
-                            rec.record(mode, tool, SKIP, "write phase skipped (--read-only)")
-                else:
-                    await run_write_phase(session, mode, rec, registered)
+            await run_read_phase(session, mode, rec, registered)
+            if read_only:
+                for tool in WRITE_TOOLS:
+                    if tool in registered:
+                        rec.record(mode, tool, SKIP, "write phase skipped (--read-only)")
+            else:
+                await run_write_phase(session, mode, rec, registered)
     except Exception as exc:  # noqa: BLE001
         rec.mode_unavailable(mode, f"server launch/session error: {type(exc).__name__}: {exc}")
 

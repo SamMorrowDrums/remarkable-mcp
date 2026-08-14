@@ -19,7 +19,7 @@ cd remarkable-mcp
 uv sync --all-extras
 
 # Verify setup
-uv run pytest test_server.py -v
+uv run pytest -v
 ```
 
 ## Project Structure
@@ -29,7 +29,7 @@ remarkable-mcp/
 ├── server.py              # Entry point (backwards compatible)
 ├── remarkable_mcp/        # Main package
 │   ├── __init__.py
-│   ├── server.py          # FastMCP server initialization
+│   ├── server.py          # MCPServer initialization
 │   ├── api.py             # reMarkable Cloud API helpers
 │   ├── ssh.py             # SSH transport implementation
 │   ├── extract.py         # Text extraction utilities
@@ -37,7 +37,8 @@ remarkable-mcp/
 │   ├── tools.py           # MCP tools with annotations
 │   ├── resources.py       # MCP resources
 │   └── prompts.py         # MCP prompts
-├── test_server.py         # Test suite
+├── test_server.py         # Main unit test suite
+├── test_mcp_v2.py         # Modern/legacy protocol compatibility tests
 ├── pyproject.toml         # Project config and dependencies
 ├── docs/                  # Documentation
 └── README.md              # Main documentation
@@ -47,7 +48,7 @@ remarkable-mcp/
 
 ```bash
 # Run all tests
-uv run pytest test_server.py -v
+uv run pytest -v
 
 # Run specific test class
 uv run pytest test_server.py -v -k "TestClassName"
@@ -98,7 +99,7 @@ Branch protection is enabled on `main` - all changes must go through pull reques
 3. Add tests in `test_server.py`
 4. Update the tools table in README.md
 5. Update `docs/tools.md` with detailed documentation
-6. Run tests: `uv run pytest test_server.py -v`
+6. Run tests: `uv run pytest -v`
 
 ### Tool Design Principles
 
@@ -113,9 +114,9 @@ Example tool structure:
 ```python
 EXAMPLE_ANNOTATIONS = ToolAnnotations(
     title="Descriptive Tool Name",  # Shown in VS Code
-    readOnlyHint=True,
-    destructiveHint=False,
-    idempotentHint=True,
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
 )
 
 @mcp.tool(annotations=EXAMPLE_ANNOTATIONS)
@@ -162,7 +163,7 @@ The workflow automatically:
 
 | Package | Purpose |
 |---------|---------|
-| `mcp` | Model Context Protocol SDK |
+| `mcp>=2,<3` | Stable Model Context Protocol Python SDK 2.x |
 | `requests` | HTTP client for reMarkable Cloud API |
 | `paramiko` | SSH client for direct tablet access |
 | `rmscene` | Native .rm file parser for text extraction |

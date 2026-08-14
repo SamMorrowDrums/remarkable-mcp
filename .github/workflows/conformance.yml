@@ -1,4 +1,4 @@
-name: Conformance Test
+name: MCP Interface Conformance
 
 on:
   workflow_dispatch:
@@ -27,7 +27,12 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - uses: SamMorrowDrums/mcp-conformance-action@v3
+      - uses: SamMorrowDrums/mcp-server-diff@v3
         with:
-          install_command: uv sync
+          install_command: uv sync --frozen
           start_command: uv run python server.py
+          server_timeout: "30"
+          fail_on_diff: "false"
+          # Keep the probe hermetic: registration never reaches a real account.
+          env_vars: |
+            REMARKABLE_TOKEN={}

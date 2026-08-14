@@ -1,110 +1,102 @@
-# MCP Capability Negotiation
+# MCP Protocol and Capability Compatibility
 
-This server supports the MCP capability negotiation protocol. During the initialization handshake, clients declare their capabilities and the server responds with its supported features.
+remarkable-mcp uses stable MCP Python SDK 2.x. A single `MCPServer` serves both
+protocol eras:
 
-## Overview
+- `2026-07-28` clients use `server/discover`, sessionless requests, and
+  multi-round input results.
+- Clients negotiating `2025-11-25` or any earlier revision supported by the SDK
+  continue to use the initialize handshake and legacy sessions.
 
-When an MCP client connects, both sides exchange capability information:
+The same stdio process or Streamable HTTP `/mcp` endpoint handles both. No
+protocol-version flag or separate deployment is required.
 
-1. **Client → Server**: Client sends its capabilities (sampling, elicitation, roots, etc.)
-2. **Server → Client**: Server responds with its supported features
-3. **Tools adapt**: Tools can check client capabilities and adjust behavior accordingly
+## Client capabilities
 
-This enables features like:
-- **Sampling OCR**: Using the client's LLM for handwriting recognition
-- **Adaptive responses**: Returning embedded resources or URIs based on client support
-
-## Checking Client Capabilities
-
-Tools can check what the connected client supports using the capability utilities:
+Handlers receive the SDK v2 `Context` explicitly and can inspect the
+capabilities attached to that request:
 
 ```python
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
+
 from remarkable_mcp.capabilities import (
-    get_client_capabilities,
-    client_supports_sampling,
     client_supports_elicitation,
+    client_supports_sampling,
+    get_client_capabilities,
     get_client_info,
 )
 
+
 @mcp.tool()
 async def my_tool(ctx: Context) -> str:
-    # Check if client supports specific features
     if client_supports_sampling(ctx):
-        # Client can handle LLM sampling requests
-        pass
-
+        ...
     if client_supports_elicitation(ctx):
-        # Client can handle interactive user prompts
-        pass
+        ...
 
-    # Get full capabilities object
-    caps = get_client_capabilities(ctx)
-
-    # Get client info (name, version, protocol)
-    info = get_client_info(ctx)
-
+    capabilities = get_client_capabilities(ctx)
+    client = get_client_info(ctx)
     return "result"
 ```
 
-## Available Capability Checks
-
 | Function | Description |
 |----------|-------------|
-| `get_client_capabilities(ctx)` | Get the full ClientCapabilities object |
-| `client_supports_sampling(ctx)` | Check if client supports LLM sampling |
-| `client_supports_elicitation(ctx)` | Check if client supports user prompts |
-| `client_supports_roots(ctx)` | Check if client supports filesystem roots |
-| `client_supports_experimental(ctx, feature)` | Check for experimental features |
-| `get_client_info(ctx)` | Get client name, version, protocol |
-| `get_protocol_version(ctx)` | Get negotiated protocol version |
+| `get_client_capabilities(ctx)` | Return the request's `ClientCapabilities` |
+| `client_supports_sampling(ctx)` | Check for LLM sampling |
+| `client_supports_elicitation(ctx)` | Check for form/user elicitation |
+| `client_supports_roots(ctx)` | Check for filesystem roots |
+| `client_supports_experimental(ctx, feature)` | Check an experimental capability |
+| `get_client_info(ctx)` | Return client name, version, and protocol when supplied |
+| `get_protocol_version(ctx)` | Return the negotiated protocol revision |
+| `get_client_extensions(ctx)` | Return protocol extensions such as MCP Apps |
+| `client_supports_apps(ctx)` | Check for the MCP Apps UI extension |
 
-## Sampling Capability
+## Multi-round compatibility
 
-The most commonly used capability is **sampling**, which allows the server to request LLM completions from the client.
+MCP `2026-07-28` removes server-initiated requests. Sampling, roots, and
+elicitation therefore cannot be sent back over a modern request's transport.
+MCP SDK 2.x provides `Resolve` dependencies with `Sample`, `ListRoots`, and
+`Elicit` results:
 
-### How It Works
+- On a modern connection, the server returns an `InputRequiredResult`; the
+  client answers it and retries the original tool with sealed `requestState`.
+- On a legacy connection, the same resolver uses the established
+  server-to-client request.
 
-1. Server checks `client_supports_sampling(ctx)`
-2. If supported, server can call `ctx.session.create_message(...)` 
-3. Client's LLM processes the request and returns results
-4. Server uses the response (e.g., OCR results from an image)
+remarkable-mcp uses this compatibility layer for sampling OCR and destructive
+delete confirmation. Tool schemas do not expose the hidden resolver parameters.
+If the client does not advertise the required capability, OCR falls back to its
+configured local/provider backend and delete fails closed.
 
-### Use in remarkable-mcp
+`MCPServer` protects multi-round request state with a process-local key by
+default. This is appropriate for stdio and the supported single-process HTTP
+runner. A future multi-worker deployment must configure shared
+`RequestStateSecurity` keys and sticky routing for legacy sessions.
 
-When `REMARKABLE_OCR_BACKEND=sampling` is configured:
+## Embedded resources and structured output
 
-```python
-# In remarkable_image tool
-if include_ocr and client_supports_sampling(ctx):
-    ocr_text = await ocr_via_sampling(ctx, png_data)
-    # Returns handwriting transcription from client's LLM
-```
+Embedded text/image resources are part of the base protocol and require no
+separate capability. `remarkable_image` returns `EmbeddedResource` content by
+default and retains `compatibility=True` for clients that need a JSON/data-URI
+fallback.
 
-This allows OCR without external API keys — the client's own AI model handles it.
+The MCP Apps canvas keeps both:
 
-## Embedded Resource Support
+- embedded PNG content for ordinary clients;
+- `structuredContent` on the wire (`structured_content` in Python) for the app.
 
-The MCP protocol does not have a specific capability flag for embedded resources in tool responses. Support for `EmbeddedResource` and `ImageContent` in tool results is part of the base protocol.
+The `io.modelcontextprotocol/ui` extension controls whether a client renders the
+`ui://remarkable/canvas` HTML resource; clients without it still receive the
+image.
 
-All clients supporting protocol version `2024-11-05` or later should handle embedded resources, though actual client implementations may vary. The `remarkable_image` tool includes a `compatibility` parameter to return resource URIs instead of embedded resources for clients that may not fully support them.
+## Authentication and process state
 
-## Protocol Versions
+MCP HTTP authorization headers are not used to select a reMarkable account or
+transport. `REMARKABLE_TOKEN`, CLI flags, and the documented reMarkable
+environment variables configure one process-local client. That client and its
+transport resolution are protected by locks and shared safely by modern
+stateless requests and legacy sessions in the same process.
 
-| Version | Notable Features |
-|---------|------------------|
-| `2024-11-05` | Embedded resources, sampling |
-| Earlier | Basic tool calls only |
-
-Check the negotiated version:
-
-```python
-version = get_protocol_version(ctx)
-```
-
-## Best Practices
-
-1. **Always check capabilities** before using advanced features
-2. **Provide fallbacks** when capabilities are unavailable
-3. **Use `compatibility` flags** for features that may not be universally supported
-4. **Log capability info** for debugging connection issues
+Streamable HTTP continues to bind to loopback by default and enforces strict
+Host/Origin allowlists. See the README's reverse-proxy guidance before exposing
+it remotely.

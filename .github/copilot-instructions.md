@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This is an MCP (Model Context Protocol) server that provides access to reMarkable tablet data. It's a Python project using FastMCP.
+This is an MCP (Model Context Protocol) server that provides access to reMarkable tablet data. It's a Python project using MCP Python SDK 2.x `MCPServer`.
 
 ## Git Workflow
 
@@ -47,7 +47,7 @@ uv add --dev <package>
 **Always run tests with:**
 
 ```bash
-uv run pytest test_server.py -v
+uv run pytest -v
 ```
 
 For specific test patterns:
@@ -56,10 +56,10 @@ For specific test patterns:
 uv run pytest test_server.py -v -k "TestClassName"
 
 # Run with coverage
-uv run pytest test_server.py -v --cov=server
+uv run pytest -v --cov=remarkable_mcp
 
 # Skip slow tests if any
-uv run pytest test_server.py -v -m "not slow"
+uv run pytest -v -m "not slow"
 ```
 
 **Important:** Tests use `pytest-asyncio` for async testing. All async tests should use the `@pytest.mark.asyncio` decorator.
@@ -89,7 +89,7 @@ uv run ruff check .
 uv run ruff format --check .
 
 # 3. Run tests (REQUIRED - CI will fail without this)
-uv run pytest test_server.py -v
+uv run pytest -v
 ```
 
 **Fix issues automatically:**
@@ -110,7 +110,7 @@ remarkable-mcp/
 ├── server.py              # Entry point (backwards compatible)
 ├── remarkable_mcp/        # Main package
 │   ├── __init__.py
-│   ├── server.py          # FastMCP server initialization
+│   ├── server.py          # MCPServer initialization
 │   ├── api.py             # reMarkable Cloud API helpers
 │   ├── extract.py         # Text extraction utilities
 │   ├── responses.py       # Response formatting
@@ -208,7 +208,7 @@ async def test_with_mock(mock_get_rmapi):
 2. Add tests in `test_server.py`
 3. Update README.md tools table
 4. Update README.md examples if relevant
-5. Run tests: `uv run pytest test_server.py -v`
+5. Run tests: `uv run pytest -v`
 
 ### Updating Dependencies
 
