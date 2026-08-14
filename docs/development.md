@@ -166,7 +166,7 @@ The workflow automatically:
 | `requests` | HTTP client for reMarkable Cloud API |
 | `paramiko` | SSH client for direct tablet access |
 | `rmscene` | Native .rm file parser for text extraction |
-| `pymupdf` | PDF text extraction, rendering, and Markdown PDF generation |
+| `pymupdf` | PDF text extraction, Cairo-free SVG/PDF rendering, and Markdown PDF generation |
 | `markdown-it-py` | Safe Markdown-to-HTML parsing for PDF writeback |
 | `ebooklib` | EPUB text extraction |
 | `pytesseract` | OCR fallback |

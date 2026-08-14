@@ -12,7 +12,7 @@ Your reMarkable tablet is a powerful tool for thinking, note-taking, and researc
 - **Typed text extraction** — Native support for Type Folio and typed annotations
 - **Handwriting OCR** — Convert handwritten notes to searchable text
 - **PDF & EPUB support** — Extract text plus an index of annotated pages, highlights, and notes
-- **Robust page rendering** — Renders pages locally and automatically falls back to a source PDF when the local stroke renderer can't (USB/SSH use the tablet's own PDF export; cloud uses the original source PDF), so images work across firmware versions and even without system graphics libraries installed
+- **Portable page rendering** — Renders notebook SVG and PDF pages with bundled Python dependencies only, then automatically falls back to a source PDF when local stroke parsing can't handle a page (USB/SSH use the tablet's own PDF export; cloud uses the original source PDF)
 - **Markdown writeback** — Render Markdown as a paginated PDF and upload it with a chosen document name
 - **OpenWebUI integration** — Run a local Streamable HTTP endpoint without a separate bridge script
 - **Smart search** — Find content across your entire library
@@ -27,6 +27,8 @@ Whether you're researching, writing, or developing ideas, remarkable-mcp lets yo
 ### Prerequisite: install `uv`
 
 The commands below use `uvx`, which is included with [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
+Page images are rasterized with PyMuPDF; no system Cairo, browser, or graphics
+runtime needs to be installed on macOS, Linux, or Windows.
 
 #### macOS and Linux
 
@@ -498,12 +500,11 @@ remarkable_image("Logo Sketch", background="#00000000")
 remarkable_image("Diagram", compatibility=True)
 ```
 
-> **Note:** PNG rendering automatically falls back to a source PDF when the
-> local stroke renderer can't produce an image (empty pages, newer `.rm`
-> formats, or a machine without `libcairo`). USB and SSH modes use the tablet's
-> native PDF export; cloud mode uses the document's original source PDF. This
-> keeps `remarkable_image` working across firmware versions and platforms.
-> Cloud mode has no native export, so it relies on the local renderer.
+> **Note:** PNG rendering uses PyMuPDF for both notebook SVGs and PDF pages, so
+> `remarkable_image` does not require Cairo, Inkscape, Chromium, or another
+> system graphics runtime. If local stroke parsing cannot handle a page, USB
+> and SSH modes fall back to the tablet's native PDF export and cloud mode falls
+> back to an original source PDF when one exists.
 
 ---
 

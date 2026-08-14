@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -896,6 +897,36 @@ class TestRemarkableImage:
         assert compat_schema.get("type") == "boolean"
         assert compat_schema.get("default") is False
 
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_image_response_formats_work_without_cairo(self, mock_get_rmapi, mock_document):
+        """Cairo-free rendering preserves embedded and compatibility responses."""
+        from mcp.types import EmbeddedResource
+
+        from remarkable_mcp import notebooks
+
+        document_zip = _make_notebook_zip(notebooks.page_rm_bytes("Portable rendering"))
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_document.is_folder = False
+        mock_client.get_meta_items.return_value = [mock_document]
+        mock_client.download.return_value = document_zip
+
+        with _cairo_unavailable():
+            embedded = await mcp.call_tool(
+                "remarkable_image",
+                {"document": "Test Document"},
+            )
+            compatible = await mcp.call_tool(
+                "remarkable_image",
+                {"document": "Test Document", "compatibility": True},
+            )
+
+        assert any(isinstance(content, EmbeddedResource) for content in embedded)
+        compatible_data = json.loads(compatible[0].text)
+        assert compatible_data["mime_type"] == "image/png"
+        assert compatible_data["image_base64"]
+
 
 # =============================================================================
 # Test Merged Rendering
@@ -1061,6 +1092,140 @@ def _make_synthetic_pdf(pages: int = 2) -> bytes:
     return data
 
 
+def _make_notebook_zip(rm_bytes: bytes, pdf_bytes: bytes | None = None) -> bytes:
+    """Build a one-page native notebook archive, optionally with a PDF underlay."""
+    import io
+
+    output = io.BytesIO()
+    page_entry = {"id": "page-1"}
+    if pdf_bytes is not None:
+        page_entry["redir"] = {"value": 0}
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr("doc.content", json.dumps({"cPages": {"pages": [page_entry]}}))
+        archive.writestr("page-1.rm", rm_bytes)
+        if pdf_bytes is not None:
+            archive.writestr("doc.pdf", pdf_bytes)
+    return output.getvalue()
+
+
+@contextmanager
+def _cairo_unavailable():
+    """Fail any accidental Cairo import while allowing all other imports."""
+    import builtins
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name.split(".", 1)[0].lower() in {"cairo", "cairocffi", "cairosvg"}:
+            raise ImportError(f"{name} intentionally unavailable")
+        return original_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=guarded_import):
+        yield
+
+
+class TestCairoFreeRasterization:
+    """SVG-to-PNG paths must work with no Cairo installation."""
+
+    def test_svg_stream_preserves_dimensions_background_and_alpha(self):
+        import io
+
+        from PIL import Image
+
+        from remarkable_mcp.extract import _svg_string_to_png
+
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" '
+            'viewBox="0 0 120 80"><rect x="30" y="20" width="60" height="40" '
+            'fill="#D02030"/></svg>'
+        )
+        with _cairo_unavailable():
+            opaque = _svg_string_to_png(svg, 360, 240, "#FBFBFB")
+            transparent = _svg_string_to_png(svg, 180, 120, None)
+
+        assert opaque is not None and opaque.startswith(b"\x89PNG\r\n\x1a\n")
+        opaque_image = Image.open(io.BytesIO(opaque))
+        assert opaque_image.size == (360, 240)
+        assert opaque_image.mode == "RGB"
+        assert opaque_image.getpixel((0, 0)) == (251, 251, 251)
+        red, green, blue = opaque_image.getpixel((180, 120))
+        assert red > 150 and green < 100 and blue < 100
+
+        assert transparent is not None and transparent.startswith(b"\x89PNG\r\n\x1a\n")
+        transparent_image = Image.open(io.BytesIO(transparent))
+        assert transparent_image.size == (180, 120)
+        assert transparent_image.mode == "RGBA"
+        assert transparent_image.getpixel((0, 0))[3] == 0
+
+    def test_native_notebook_page_rasterizes_without_cairo(self, tmp_path):
+        import io
+
+        from PIL import Image
+
+        from remarkable_mcp import notebooks
+        from remarkable_mcp.extract import (
+            CONTENT_MARGIN,
+            render_page_from_document_zip,
+            render_page_from_document_zip_svg,
+        )
+
+        archive_path = tmp_path / "notebook.zip"
+        archive_path.write_bytes(_make_notebook_zip(notebooks.page_rm_bytes("Notebook page")))
+
+        with _cairo_unavailable():
+            svg = render_page_from_document_zip_svg(archive_path, page=1)
+            png = render_page_from_document_zip(
+                archive_path,
+                page=1,
+                background_color="#FFFFFF",
+            )
+
+        assert svg is not None
+        assert png is not None and png.startswith(b"\x89PNG\r\n\x1a\n")
+        image = Image.open(io.BytesIO(png))
+        viewbox = svg.split('viewBox="', 1)[1].split('"', 1)[0].split()
+        expected_size = (
+            int(float(viewbox[2])) + 2 * CONTENT_MARGIN,
+            int(float(viewbox[3])) + 2 * CONTENT_MARGIN,
+        )
+        assert image.size == expected_size
+        assert image.mode == "RGB"
+        assert sum(image.convert("L").histogram()[:128]) > 0
+
+    def test_annotated_pdf_overlay_rasterizes_without_cairo(self, tmp_path):
+        import io
+
+        from PIL import Image, ImageChops
+
+        from remarkable_mcp import notebooks
+        from remarkable_mcp.extract import (
+            _render_pdf_page_to_png,
+            render_merged_page_from_document_zip,
+        )
+
+        pdf = _make_synthetic_pdf(1)
+        archive_path = tmp_path / "annotated.zip"
+        archive_path.write_bytes(
+            _make_notebook_zip(
+                notebooks.page_rm_bytes("Overlay"),
+                pdf_bytes=pdf,
+            )
+        )
+
+        with _cairo_unavailable():
+            png, note = render_merged_page_from_document_zip(archive_path, page=1)
+            bare_pdf_png = _render_pdf_page_to_png(pdf, 0, 890, 1188)
+
+        assert note is None
+        assert png is not None and png.startswith(b"\x89PNG\r\n\x1a\n")
+        image = Image.open(io.BytesIO(png))
+        assert image.size == (890, 1188)
+        assert image.mode == "RGB"
+        assert bare_pdf_png is not None
+        bare_pdf_image = Image.open(io.BytesIO(bare_pdf_png)).convert("RGB")
+        assert ImageChops.difference(image, bare_pdf_image).getbbox() is not None
+
+
 class TestRenderTabletPdfFallback:
     """Tests for the portable tablet-PDF render fallback (issue #95/#102/#94)."""
 
@@ -1107,7 +1272,7 @@ class TestRenderTabletPdfFallback:
         mock_client.get_meta_items.return_value = [mock_document]
         mock_client.download.return_value = b"fake zip"
         mock_page_count.return_value = 2
-        # Local stroke renderer fails (e.g. empty page or missing libcairo)
+        # Local stroke renderer fails (for example, an empty page).
         mock_render.return_value = None
         # Tablet exposes a natively-rendered PDF
         mock_download_raw.return_value = _make_synthetic_pdf(2)
@@ -1174,7 +1339,7 @@ class TestRenderTabletPdfFallback:
         # The misleading "v5 / rmc" message is gone; guidance is actionable
         suggestion = data["_error"]["suggestion"].lower()
         assert "v5" not in suggestion
-        assert "cairo" in suggestion or "native pdf" in suggestion
+        assert "pymupdf" in suggestion
 
     @pytest.mark.asyncio
     @patch("remarkable_mcp.tools.render_page_full_page_from_document_zip")
@@ -4219,14 +4384,14 @@ class TestFullPageRender:
             rm_tmp.write(data)
             rm_path = Path(rm_tmp.name)
         try:
-            result = render_rm_file_full_page_png(rm_path, background_color="#FFFFFF")
+            with _cairo_unavailable():
+                result = render_rm_file_full_page_png(rm_path, background_color="#FFFFFF")
             assert result is not None
             png, (w, h) = result
             # The fixture has no SceneInfo -> fall back to the standard page extent.
             assert (round(w), round(h)) == (1404, 1872)
             im = Image.open(_io.BytesIO(png))
-            # PNG aspect must match the page aspect so [0,1] maps linearly.
-            assert abs(im.size[0] / im.size[1] - w / h) < 0.01
+            assert im.size == (1404, 1872)
         finally:
             rm_path.unlink(missing_ok=True)
 
@@ -4254,18 +4419,21 @@ class TestFullPageRender:
                 zf.writestr("p1.rm", rm_bytes)  # p2.rm intentionally absent
 
             # Page 1 has a drawable layer -> rendered from its .rm.
-            r1 = render_page_full_page_from_document_zip(zpath, 1, background_color="#FFFFFF")
+            with _cairo_unavailable():
+                r1 = render_page_full_page_from_document_zip(zpath, 1, background_color="#FFFFFF")
             assert r1 is not None
             png1, size1 = r1
-            assert Image.open(_io.BytesIO(png1)).size[0] > 0
+            assert Image.open(_io.BytesIO(png1)).size == (1404, 1872)
 
             # Page 2 exists in cPages but has no .rm -> a BLANK full page is
             # rendered (not None). If pages were addressed by filesystem .rm
             # order this would be out of range (only one .rm file exists).
-            r2 = render_page_full_page_from_document_zip(zpath, 2, background_color="#FFFFFF")
+            with _cairo_unavailable():
+                r2 = render_page_full_page_from_document_zip(zpath, 2, background_color="#FFFFFF")
             assert r2 is not None
-            _png2, size2 = r2
+            png2, size2 = r2
             assert size2 == size1  # blank page sized to the document's paper size
+            assert Image.open(_io.BytesIO(png2)).size == (1404, 1872)
 
             # Page 3 is not in cPages -> out of range.
             assert render_page_full_page_from_document_zip(zpath, 3) is None
@@ -4315,7 +4483,8 @@ class TestFullPageRender:
             rm_tmp.write(nb.page_rm_bytes("Hello world"))
             rm_path = Path(rm_tmp.name)
         try:
-            result = render_rm_file_full_page_png(rm_path, background_color="#FFFFFF")
+            with _cairo_unavailable():
+                result = render_rm_file_full_page_png(rm_path, background_color="#FFFFFF")
             assert result is not None
             png, _ = result
             im = Image.open(_io.BytesIO(png)).convert("L")

@@ -198,7 +198,7 @@ def _make_image_resource(client, document):
             if png_data is None:
                 raise RuntimeError(
                     f"Failed to render page {page_num}. "
-                    "Make sure 'rmc' and 'cairosvg' are installed."
+                    "Reinstall remarkable-mcp to restore rmscene and PyMuPDF."
                 )
             return png_data
         finally:
