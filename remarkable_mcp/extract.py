@@ -42,6 +42,71 @@ def _rm_to_svg(rm_file_path: Path, output_svg_path: Path) -> bool:
 REMARKABLE_WIDTH = 1404
 REMARKABLE_HEIGHT = 1872
 
+# PDF points per stroke unit, keyed by the per-page SceneInfo.paper_size grid.
+# The 1404x1872 value was calibrated against a device PDF export. The Paper Pro
+# value follows its panel DPI and remains a best-effort calibration until a
+# ground-truth export reporting that grid is available. Devices that normalize
+# Paper Pro scenes to 1404x1872 continue to use the calibrated value.
+_DEVICE_POINTS_PER_UNIT = {
+    (1404, 1872): 0.3177,
+    (1620, 2160): 0.3144,
+}
+REMARKABLE_PDF_POINTS_PER_UNIT = 0.3177
+
+
+def _points_per_unit(paper_size: Optional[Tuple[float, float]]) -> float:
+    """Return PDF points per stroke unit for a SceneInfo paper grid."""
+    if paper_size:
+        key = (int(round(paper_size[0])), int(round(paper_size[1])))
+        if key in _DEVICE_POINTS_PER_UNIT:
+            return _DEVICE_POINTS_PER_UNIT[key]
+    return REMARKABLE_PDF_POINTS_PER_UNIT
+
+
+def _annotation_page_viewbox(
+    pdf_w_pt: float,
+    pdf_h_pt: float,
+    points_per_unit: float,
+    *,
+    centered_x: bool = True,
+) -> Tuple[float, float, float, float]:
+    """Return the stroke-space rectangle occupied by a PDF page."""
+    view_w = pdf_w_pt / points_per_unit
+    view_h = pdf_h_pt / points_per_unit
+    view_x = -view_w / 2.0 if centered_x else 0.0
+    return view_x, 0.0, view_w, view_h
+
+
+def _rewrite_svg_root(
+    svg_content: str,
+    *,
+    viewbox: Tuple[float, float, float, float],
+    width: int,
+    height: int,
+) -> str:
+    """Rewrite only root SVG geometry, leaving path stroke widths untouched."""
+    import re
+
+    root_match = re.search(r"<svg\b[^>]*>", svg_content, re.IGNORECASE)
+    if root_match is None:
+        return svg_content
+
+    root = root_match.group(0)
+    values = {
+        "viewBox": " ".join(f"{value:.2f}" for value in viewbox),
+        "width": str(width),
+        "height": str(height),
+    }
+    for name, value in values.items():
+        pattern = rf'(?<![-\w]){name}="[^"]*"'
+        if re.search(pattern, root):
+            root = re.sub(pattern, f'{name}="{value}"', root, count=1)
+        else:
+            root = root[:-1] + f' {name}="{value}">'
+
+    return svg_content[: root_match.start()] + root + svg_content[root_match.end() :]
+
+
 # Standard reMarkable background color (light cream/gray)
 # Can be overridden via REMARKABLE_BACKGROUND_COLOR environment variable
 _DEFAULT_BACKGROUND_COLOR = "#FBFBFB"
@@ -603,9 +668,27 @@ def _v6_paths_from_blocks(blocks: list, anchor_pos: Optional[dict] = None) -> Tu
         if not hasattr(block, "item") or not hasattr(block.item, "value"):
             continue
         line = block.item.value
+        dx, dy = group_offsets.get(getattr(block, "parent_id", None), (0.0, 0.0))
+
+        # Text highlights are GlyphRange items: they carry `rectangles`
+        # (highlight boxes over selected text) rather than stroke `points`.
+        # Emit a translucent filled rect per rectangle in the highlight colour.
+        if getattr(line, "rectangles", None):
+            hl_color = getattr(line, "color", 9)
+            hl_color = hl_color.value if hasattr(hl_color, "value") else hl_color
+            hl_fill = COLOR_MAP.get(hl_color, "#FFD700")
+            for r in line.rectangles:
+                paths.append(
+                    f'<rect x="{r.x + dx:.1f}" y="{r.y + dy:.1f}" '
+                    f'width="{r.w:.1f}" height="{r.h:.1f}" '
+                    f'fill="{hl_fill}" opacity="0.35" stroke="none"/>'
+                )
+                all_coords.append((r.x + dx, r.y + dy))
+                all_coords.append((r.x + dx + r.w, r.y + dy + r.h))
+            continue
+
         if not hasattr(line, "points") or not line.points:
             continue
-        dx, dy = group_offsets.get(getattr(block, "parent_id", None), (0.0, 0.0))
 
         tool = line.tool if hasattr(line, "tool") else None
         color = line.color if hasattr(line, "color") else 0
@@ -1183,6 +1266,49 @@ def _get_ordered_rm_files(tmpdir_path: Path) -> List[Path]:
     return rm_files
 
 
+def _get_page_order(tmpdir_path: Path) -> List[str]:
+    """Return the ordered list of page ids from the .content file.
+
+    formatVersion 2 stores them under ``cPages.pages[].id``; formatVersion 1 as
+    a flat ``pages`` list of ids. Returns an empty list if unavailable. This is
+    the full page order (including pages that have no strokes), unlike
+    ``_get_ordered_rm_files`` which is compacted to pages that do.
+    """
+    for content_file in tmpdir_path.glob("*.content"):
+        try:
+            data = json.loads(content_file.read_text())
+            if "cPages" in data and "pages" in data["cPages"]:
+                return [p.get("id") for p in data["cPages"]["pages"] if p.get("id")]
+            if isinstance(data.get("pages"), list):
+                return [p for p in data["pages"] if isinstance(p, str)]
+        except Exception:
+            pass
+        break
+    return []
+
+
+def _select_rm_file_for_page(tmpdir_path: Path, rm_files: List[Path], page: int) -> Optional[Path]:
+    """Return the .rm stroke file for a 1-based page, matched by page id.
+
+    ``_get_ordered_rm_files`` is compacted (only pages that actually have
+    strokes), so indexing it by page number pairs the wrong ink with a page
+    whenever an earlier page is un-annotated. Map through the full ``.content``
+    page order and match by id instead. Returns None when the page has no
+    strokes (a page with a PDF underlay but no annotation), or when the page is
+    out of range; callers should treat None as "no annotation layer".
+    """
+    page_order = _get_page_order(tmpdir_path)
+    if page_order:
+        if 1 <= page <= len(page_order):
+            page_id = page_order[page - 1]
+            return next((p for p in rm_files if p.stem == page_id), None)
+        return None
+    # No page order available (unusual): fall back to positional selection.
+    if 1 <= page <= len(rm_files):
+        return rm_files[page - 1]
+    return None
+
+
 def render_page_from_document_zip_svg(
     zip_path: Path, page: int = 1, background_color: Optional[str] = None
 ) -> Optional[str]:
@@ -1206,12 +1332,12 @@ def render_page_from_document_zip_svg(
 
         rm_files = _get_ordered_rm_files(tmpdir_path)
 
-        # Validate page number
-        if page < 1 or page > len(rm_files):
+        # Select the page's .rm by id (see _select_rm_file_for_page); None means
+        # the page has no annotation layer.
+        target_rm_file = _select_rm_file_for_page(tmpdir_path, rm_files, page)
+        if target_rm_file is None:
             return None
 
-        # Render the requested page
-        target_rm_file = rm_files[page - 1]
         return render_rm_file_to_svg(target_rm_file, background_color=background_color)
 
 
@@ -1238,12 +1364,12 @@ def render_page_from_document_zip(
 
         rm_files = _get_ordered_rm_files(tmpdir_path)
 
-        # Validate page number
-        if page < 1 or page > len(rm_files):
+        # Select the page's .rm by id (see _select_rm_file_for_page); None means
+        # the page has no annotation layer.
+        target_rm_file = _select_rm_file_for_page(tmpdir_path, rm_files, page)
+        if target_rm_file is None:
             return None
 
-        # Render the requested page
-        target_rm_file = rm_files[page - 1]
         return render_rm_file_to_png(target_rm_file, background_color=background_color)
 
 
@@ -1283,22 +1409,18 @@ def render_page_full_page_from_document_zip(
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(tmpdir_path)
 
-        rm_glob = list(tmpdir_path.glob("**/*.rm"))
+        rm_files = _get_ordered_rm_files(tmpdir_path)
+        page_order = _get_page_order(tmpdir_path)
 
-        entries = _read_cpages_entries(tmpdir_path)
-        page_ids = [e.get("id") for e in entries if isinstance(e, dict) and e.get("id")]
-
-        if page_ids:
-            if page < 1 or page > len(page_ids):
+        if page_order:
+            if page < 1 or page > len(page_order):
                 return None
-            page_id = page_ids[page - 1]
-            rm_file = next((p for p in rm_glob if p.stem == page_id), None)
+            rm_file = _select_rm_file_for_page(tmpdir_path, rm_files, page)
         else:
-            # No cPages metadata: fall back to filesystem/page order of .rm files.
-            ordered = _get_ordered_rm_files(tmpdir_path)
-            if page < 1 or page > len(ordered):
+            # No page metadata: fall back to filesystem order of .rm files.
+            if page < 1 or page > len(rm_files):
                 return None
-            rm_file = ordered[page - 1]
+            rm_file = rm_files[page - 1]
 
         if rm_file is not None and rm_file.exists():
             return render_rm_file_full_page_png(rm_file, background_color=background_color)
@@ -1307,7 +1429,7 @@ def render_page_full_page_from_document_zip(
         # render a blank full page at the document's paper size so the viewer
         # still shows it. (The write tool will return no_page_layer until the
         # page has a drawable layer / has been added via remarkable_add_page.)
-        paper_w, paper_h = _document_paper_size(rm_glob)
+        paper_w, paper_h = _document_paper_size(rm_files)
         svg = _svg_full_page([], paper_w, paper_h)
         scale = FULL_PAGE_TARGET_LONG_EDGE / max(paper_w, paper_h)
         png = _svg_string_to_png(
@@ -1373,6 +1495,73 @@ def _pdf_page_index_for_cpages_entry(entry: Dict[str, Any]) -> Optional[int]:
             return int(redir["value"])
         except (ValueError, TypeError):
             return None
+    return None
+
+
+def _read_redirection_page_map(tmpdir_path: Path) -> List[Any]:
+    """Read the legacy (formatVersion 1) redirectionPageMap from .content.
+
+    formatVersion 1 documents have no cPages structure; instead the reMarkable
+    page -> original PDF page mapping is a flat list where the index is the
+    0-based reMarkable page and the value is the 0-based PDF page index (-1 for
+    user-added pages). Many cloud-imported PDFs use this layout.
+
+    Returns the list, or an empty list if not found.
+    """
+    content_file = next(tmpdir_path.glob("*.content"), None)
+    if content_file is None:
+        return []
+    try:
+        data = json.loads(content_file.read_text())
+        rpm = data.get("redirectionPageMap")
+        if isinstance(rpm, list):
+            return rpm
+    except Exception:
+        pass
+    return []
+
+
+def _resolve_pdf_page_index(tmpdir_path: Path, page: int) -> Optional[int]:
+    """Resolve the 0-based PDF page index for a 1-based reMarkable page.
+
+    Handles both document layouts:
+    - formatVersion 2: ``cPages.pages[i].redir.value``
+    - formatVersion 1: ``redirectionPageMap[i]`` (legacy; used by many
+      cloud-imported PDFs)
+
+    Returns None only when the page genuinely has no PDF underlay (a user-added
+    page). This lets render_merged composite annotations onto imported PDFs that
+    use either layout, instead of falling back to an annotation-only render.
+
+    When cPages entries exist they are authoritative: an entry without ``redir``
+    is a user-added page, and we must NOT fall through to a redirectionPageMap a
+    v1->v2 migrated document may still carry — its stale, order-shifted indices
+    could composite the wrong PDF page under a user-added page.
+    """
+    # formatVersion 2 (cPages) — authoritative when present
+    entries = _read_cpages_entries(tmpdir_path)
+    if entries:
+        if 1 <= page <= len(entries):
+            return _pdf_page_index_for_cpages_entry(entries[page - 1])
+        return None
+
+    # formatVersion 1 (redirectionPageMap)
+    rpm = _read_redirection_page_map(tmpdir_path)
+    if rpm:
+        if 1 <= page <= len(rpm):
+            val = rpm[page - 1]
+            if isinstance(val, int) and val >= 0:
+                return val
+        return None
+
+    # Some formatVersion 1 documents (including files uploaded by this server)
+    # contain a flat page-id list but omit redirectionPageMap. With no explicit
+    # user-added-page markers, the source PDF order is the only authoritative
+    # mapping and is therefore identity.
+    page_order = _get_page_order(tmpdir_path)
+    if page_order and 1 <= page <= len(page_order):
+        return page - 1
+
     return None
 
 
@@ -1462,6 +1651,42 @@ def render_tablet_pdf_page_to_png(
         doc.close()
 
 
+def render_mapped_pdf_page_from_document_zip(
+    zip_path: Path, page: int = 1, target_long_edge: int = 2048
+) -> Tuple[Optional[bytes], bool]:
+    """Render a source-PDF underlay using the document's authoritative page map.
+
+    Returns ``(png, has_source_pdf)``. A source PDF with ``png=None`` means the
+    requested page has no mapped underlay (for example, a user-added page), so
+    callers must not substitute the same ordinal from a native PDF export.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(tmpdir_path)
+        except Exception:
+            return None, False
+
+        pdf_files = list(tmpdir_path.glob("**/*.pdf"))
+        if not pdf_files:
+            return None, False
+
+        pdf_page_index = _resolve_pdf_page_index(tmpdir_path, page)
+        if pdf_page_index is None:
+            return None, True
+
+        content_stems = {path.stem for path in tmpdir_path.glob("*.content")}
+        matching = [path for path in pdf_files if path.stem in content_stems]
+        pdf_path = matching[0] if matching else sorted(pdf_files)[0]
+        png = render_tablet_pdf_page_to_png(
+            pdf_path.read_bytes(),
+            page=pdf_page_index + 1,
+            target_long_edge=target_long_edge,
+        )
+        return png, True
+
+
 def render_merged_page_from_document_zip(
     zip_path: Path,
     page: int = 1,
@@ -1489,7 +1714,6 @@ def render_merged_page_from_document_zip(
         or None. Returns (None, error_note) on failure.
     """
     import io
-    import re
 
     import fitz
     from PIL import Image as PILImage
@@ -1510,10 +1734,14 @@ def render_merged_page_from_document_zip(
         # selection is deterministic.
         pdf_files = list(tmpdir_path.glob("**/*.pdf"))
         if not pdf_files:
+            # Notebook (no PDF underlay): render the page's own strokes,
+            # selected by id so multi-page notebooks with a blank page don't
+            # shift (see _select_rm_file_for_page).
             rm_files = _get_ordered_rm_files(tmpdir_path)
-            if page < 1 or page > len(rm_files):
-                return None, f"Page {page} out of range (document has {len(rm_files)} pages)."
-            png = render_rm_file_to_png(rm_files[page - 1], background_color=background_color)
+            target = _select_rm_file_for_page(tmpdir_path, rm_files, page)
+            if target is None:
+                return None, f"Page {page} has no annotation strokes."
+            png = render_rm_file_to_png(target, background_color=background_color)
             return png, "No PDF underlay found; returned annotation-only render."
 
         content_stems = {p.stem for p in tmpdir_path.glob("*.content")}
@@ -1521,22 +1749,35 @@ def render_merged_page_from_document_zip(
         pdf_path = matching[0] if matching else sorted(pdf_files)[0]
         pdf_bytes = pdf_path.read_bytes()
 
-        # Read cPages to find PDF page mapping
-        cpages = _read_cpages_entries(tmpdir_path)
         rm_files = _get_ordered_rm_files(tmpdir_path)
+        total_pages = len(_get_page_order(tmpdir_path)) or len(rm_files)
 
-        if page < 1 or page > len(rm_files):
-            return None, f"Page {page} out of range (document has {len(rm_files)} pages)."
+        if page < 1 or page > total_pages:
+            return None, f"Page {page} out of range (document has {total_pages} pages)."
 
-        target_rm_file = rm_files[page - 1]
+        # Select the .rm for this page by id (see _select_rm_file_for_page). A
+        # page with no strokes yields None and composites to the bare PDF page.
+        target_rm_file: Optional[Path] = _select_rm_file_for_page(tmpdir_path, rm_files, page)
 
-        # Determine which PDF page this reMarkable page maps to
-        pdf_page_index: Optional[int] = None
-        if cpages and page <= len(cpages):
-            pdf_page_index = _pdf_page_index_for_cpages_entry(cpages[page - 1])
+        def annotation_only(reason: str) -> Tuple[Optional[bytes], Optional[str]]:
+            """Fallback when the PDF side of the merge fails: render just the
+            page's own strokes — or nothing, for a strokeless page (every
+            fallback path must tolerate ``target_rm_file`` being None)."""
+            if target_rm_file is None:
+                return None, f"{reason}; page has no annotation strokes."
+            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
+            return png, f"{reason}; annotation-only render."
+
+        # Determine which PDF page this reMarkable page maps to. Handles both the
+        # formatVersion 2 (cPages.redir) and formatVersion 1 (redirectionPageMap)
+        # layouts; the latter is used by many cloud-imported PDFs, which would
+        # otherwise be misread as user-added pages and rendered annotation-only.
+        pdf_page_index: Optional[int] = _resolve_pdf_page_index(tmpdir_path, page)
 
         if pdf_page_index is None:
             # No redirect — this page may be a user-added blank page
+            if target_rm_file is None:
+                return None, "Page has no PDF underlay and no annotations."
             png = render_rm_file_to_png(target_rm_file, background_color=background_color)
             return png, "Page has no PDF underlay (user-added page); annotation-only render."
 
@@ -1545,8 +1786,7 @@ def render_merged_page_from_document_zip(
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             try:
                 if pdf_page_index >= len(doc):
-                    png = render_rm_file_to_png(target_rm_file, background_color=background_color)
-                    return png, "PDF page index out of range; annotation-only render."
+                    return annotation_only("PDF page index out of range")
 
                 pdf_page = doc[pdf_page_index]
                 pdf_w_pt = pdf_page.rect.width  # PDF width in points
@@ -1554,8 +1794,7 @@ def render_merged_page_from_document_zip(
             finally:
                 doc.close()
         except Exception:
-            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
-            return png, "Could not read PDF dimensions; annotation-only render."
+            return annotation_only("Could not read PDF dimensions")
 
         # Determine output canvas size
         out_w = canvas_width or int(pdf_w_pt * 2)  # 2x for decent resolution
@@ -1564,8 +1803,7 @@ def render_merged_page_from_document_zip(
         # 1. Rasterize the PDF page
         pdf_png = _render_pdf_page_to_png(pdf_bytes, pdf_page_index, out_w, out_h)
         if pdf_png is None:
-            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
-            return png, "PDF rasterization failed; annotation-only render."
+            return annotation_only("PDF rasterization failed")
 
         # 2. Render annotation layer to SVG, then to PNG with transparent background
         ann_svg_path = None
@@ -1575,26 +1813,36 @@ def render_merged_page_from_document_zip(
             with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
                 ann_svg_path = Path(tmp_svg.name)
 
-            if _rm_to_svg(target_rm_file, ann_svg_path):
+            if target_rm_file is not None and _rm_to_svg(target_rm_file, ann_svg_path):
                 # Read the SVG and adjust viewBox to match PDF page bounds.
                 #
-                # rmscene's v6 renderer emits stroke coordinates with the
-                # origin at the top of the page and x=0 in the horizontal
-                # center (so x ranges roughly from -W/2 to +W/2). Setting the
-                # viewBox to (-W_pt/2, 0, W_pt, H_pt) maps that coordinate
-                # system to the PDF page bounds so annotations align. If the
-                # upstream coordinate convention changes, this alignment will
-                # need to be revisited.
+                # rmscene emits stroke/highlight coordinates in the reMarkable
+                # device coordinate grid, NOT in PDF points: x=0 is the horizontal
+                # centre of the page and y=0 the top, and one PDF point is
+                # `_rm_units_per_point()` units (see that function for the scale
+                # and how to make it device-derived). To map the whole page
+                # [0,W]x[0,H] pt into the output canvas, set the SVG viewBox to the
+                # rmscene rectangle that covers it: (-W*k/2, 0, W*k, H*k) with
+                # k = units-per-point. (The previous code assumed k=1, i.e.
+                # rmscene units == points, which placed strokes far outside the
+                # page and filled it black.)
                 svg_content = ann_svg_path.read_text()
 
-                svg_content = re.sub(
-                    r'viewBox="[^"]*"',
-                    f'viewBox="{-pdf_w_pt / 2:.1f} 0 {pdf_w_pt:.1f} {pdf_h_pt:.1f}"',
-                    svg_content,
+                blocks = _v6_blocks(target_rm_file)
+                paper_size = _v6_paper_size(blocks) if blocks is not None else None
+                points_per_unit = _points_per_unit(paper_size)
+                viewbox = _annotation_page_viewbox(
+                    pdf_w_pt,
+                    pdf_h_pt,
+                    points_per_unit,
+                    centered_x=blocks is not None,
                 )
-                # Also set explicit width/height to match output canvas
-                svg_content = re.sub(r'width="[^"]*"', f'width="{out_w}"', svg_content)
-                svg_content = re.sub(r'height="[^"]*"', f'height="{out_h}"', svg_content)
+                svg_content = _rewrite_svg_root(
+                    svg_content,
+                    viewbox=viewbox,
+                    width=out_w,
+                    height=out_h,
+                )
 
                 # Render SVG to PNG with transparent background
                 import cairosvg
@@ -1642,8 +1890,7 @@ def render_merged_page_from_document_zip(
             return buf.getvalue(), merged_note
         except Exception:
             # Last resort: return annotation-only from already-extracted .rm file
-            png = render_rm_file_to_png(target_rm_file, background_color=background_color)
-            return png, "Compositing failed; annotation-only render."
+            return annotation_only("Compositing failed")
 
 
 def get_document_page_count(zip_path: Path) -> int:
@@ -1703,6 +1950,50 @@ def get_document_file_type(zip_path: Path) -> str:
     return ""
 
 
+def _extract_page_annotations(rm_file: Path) -> Tuple[List[str], bool]:
+    """Extract a page's text highlights and whether it has pen strokes.
+
+    reMarkable text highlights are stored as ``GlyphRange`` scene items inside the
+    page's v6 ``.rm`` file (each carries the selected ``text`` and its bounding
+    ``rectangles``); freehand ink is stored as ``Line`` items. The legacy
+    ``.highlights`` JSON scanned elsewhere does not cover current firmware, so
+    read them here.
+
+    Returns ``(highlighted_texts_in_reading_order, has_pen_strokes)``. Returns
+    ``([], False)`` if the file cannot be parsed.
+    """
+    try:
+        import rmscene
+    except Exception:
+        return [], False
+    try:
+        with rm_file.open("rb") as fh:
+            tree = rmscene.read_tree(fh)
+    except Exception:
+        return [], False
+
+    highlights: list = []
+    has_strokes = False
+    try:
+        for item in tree.walk():
+            kind = type(item).__name__
+            if kind == "Line":
+                has_strokes = True
+            elif kind == "GlyphRange":
+                text = getattr(item, "text", None)
+                if not text:
+                    continue
+                rects = getattr(item, "rectangles", None) or []
+                y = rects[0].y if rects else 0.0
+                x = rects[0].x if rects else 0.0
+                highlights.append((y, x, text))
+    except Exception:
+        pass
+
+    highlights.sort(key=lambda t: (t[0], t[1]))  # top-to-bottom, left-to-right
+    return [t[2] for t in highlights], has_strokes
+
+
 def extract_text_from_document_zip(
     zip_path: Path, include_ocr: bool = False, doc_id: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -1717,10 +2008,16 @@ def extract_text_from_document_zip(
     Returns:
         {
             "typed_text": [...],      # From rmscene parsing (list of strings)
-            "highlights": [...],       # From PDF annotations
+            "highlights": [...],       # Highlighted text (GlyphRange + legacy JSON)
             "handwritten_text": [...], # From OCR (if enabled) - one per page, in order
             "pages": int,
             "page_ids": [...],         # Page UUIDs in order
+            "annotated_pages": [       # Only pages that carry annotations
+                {"page": int,          # 1-based page number
+                 "page_id": str,
+                 "has_handwriting": bool,   # page has pen strokes
+                 "highlights": [str]}, # highlighted text on the page
+            ],
             "ocr_backend": str,        # Which OCR backend was used (if any)
         }
     """
@@ -1738,6 +2035,7 @@ def extract_text_from_document_zip(
         "handwritten_text": None,
         "pages": 0,
         "page_ids": [],
+        "annotated_pages": [],
         "ocr_backend": None,
         "tags": [],
     }
@@ -1784,14 +2082,37 @@ def extract_text_from_document_zip(
                 if rm_file not in ordered_rm_files:
                     ordered_rm_files.append(rm_file)
             rm_files = ordered_rm_files
+            result["page_ids"] = page_order
+        else:
             result["page_ids"] = [f.stem for f in rm_files]
 
-        result["pages"] = len(rm_files)
+        result["pages"] = len(page_order) or len(rm_files)
 
         # Extract typed text from .rm files using rmscene
         for rm_file in rm_files:
             text_lines = extract_text_from_rm_file(rm_file)
             result["typed_text"].extend(text_lines)
+
+        # Extract per-page text highlights (GlyphRange items) and note-presence
+        # from the .rm files, indexed by real page number. This powers "show only
+        # the annotated pages / the highlighted text" without paging through the
+        # whole document. (The legacy .highlights JSON scanned below only covers
+        # older firmware exports.)
+        page_pos = {pid: i for i, pid in enumerate(page_order)}
+        for order_pos, rm_file in enumerate(rm_files):
+            page_num = page_pos.get(rm_file.stem, order_pos) + 1
+            page_highlights, has_strokes = _extract_page_annotations(rm_file)
+            if page_highlights or has_strokes:
+                result["annotated_pages"].append(
+                    {
+                        "page": page_num,
+                        "page_id": rm_file.stem,
+                        "has_handwriting": has_strokes,
+                        "highlights": page_highlights,
+                    }
+                )
+                result["highlights"].extend(page_highlights)
+        result["annotated_pages"].sort(key=lambda a: a["page"])
 
         # Extract text from .txt and .md files
         for txt_file in tmpdir_path.glob("**/*.txt"):

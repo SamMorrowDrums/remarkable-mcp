@@ -43,6 +43,7 @@ from remarkable_mcp.extract import (
     get_cached_ocr_result,
     get_cached_page_ocr,
     get_document_page_count,
+    render_mapped_pdf_page_from_document_zip,
     render_merged_page_from_document_zip,
     render_page_from_document_zip,
     render_page_from_document_zip_svg,
@@ -539,9 +540,36 @@ async def remarkable_read(
                 annotation_parts = []
                 if content.get("typed_text"):
                     annotation_parts.extend(content["typed_text"])
-                if content.get("highlights"):
+                # Per-page index of highlights / handwritten notes: surfaces only
+                # the annotated pages (and their highlighted text) so the reader
+                # need not page through the whole document to find them.
+                annotated_pages = content.get("annotated_pages") or []
+                shown_highlights = set()
+                if annotated_pages:
+                    annotation_parts.append("\n--- Annotated pages ---")
+                    for ap in annotated_pages:
+                        marks = []
+                        if ap.get("has_handwriting"):
+                            marks.append("handwritten notes")
+                        n_hl = len(ap.get("highlights") or [])
+                        if n_hl:
+                            marks.append(f"{n_hl} highlight" + ("s" if n_hl != 1 else ""))
+                        annotation_parts.append(
+                            f"Page {ap['page']}: " + (", ".join(marks) or "annotated")
+                        )
+                        for h in ap.get("highlights") or []:
+                            annotation_parts.append(f"  • {h}")
+                            shown_highlights.add(h)
+                # Highlights not covered by the per-page index above — e.g. from
+                # the legacy .highlights JSON (older firmware), which has no page
+                # attribution. Without this, a doc whose pages carry pen strokes
+                # would suppress its legacy highlight text entirely.
+                other_highlights = [
+                    h for h in content.get("highlights") or [] if h not in shown_highlights
+                ]
+                if other_highlights:
                     annotation_parts.append("\n--- Highlights ---")
-                    annotation_parts.extend(content["highlights"])
+                    annotation_parts.extend(other_highlights)
                 if content.get("handwritten_text"):
                     annotation_parts.append("\n--- Handwritten (OCR) ---")
                     annotation_parts.extend(content["handwritten_text"])
@@ -1787,12 +1815,17 @@ async def remarkable_image(
                 # returns None and this safely no-ops. Credit: ljdutel (#95).
                 rendered_via_pdf = False
                 if png_data is None:
-                    pdf_bytes = await run_blocking(download_raw_file, client, target_doc, "pdf")
-                    if pdf_bytes:
-                        png_data = await run_blocking(
-                            render_tablet_pdf_page_to_png, pdf_bytes, page
-                        )
-                        rendered_via_pdf = png_data is not None
+                    png_data, has_source_pdf = await run_blocking(
+                        render_mapped_pdf_page_from_document_zip, tmp_path, page
+                    )
+                    rendered_via_pdf = png_data is not None
+                    if png_data is None and not has_source_pdf:
+                        pdf_bytes = await run_blocking(download_raw_file, client, target_doc, "pdf")
+                        if pdf_bytes:
+                            png_data = await run_blocking(
+                                render_tablet_pdf_page_to_png, pdf_bytes, page
+                            )
+                            rendered_via_pdf = png_data is not None
 
                 # Blank-page fallback: the stroke renderer returns None for a
                 # notebook page with no drawable strokes (e.g. a freshly-created
