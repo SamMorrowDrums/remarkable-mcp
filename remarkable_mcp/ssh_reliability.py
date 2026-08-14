@@ -15,7 +15,7 @@ from remarkable_mcp.operation_queue import (
     OperationCancelled,
     OperationDispatcher,
     OperationQueueClosed,
-    consume_operation_cancel_started,
+    consume_operation_cancel_dirty,
 )
 
 logger = logging.getLogger(__name__)
@@ -206,9 +206,18 @@ class SSHDispatcher(OperationDispatcher):
             )
         return result
 
+    @staticmethod
+    def shutdown_timeout() -> float:
+        return _env_float(
+            "REMARKABLE_SSH_SHUTDOWN_TIMEOUT",
+            5.0,
+            minimum=0.1,
+            maximum=60.0,
+        )
+
     def close(self, timeout: Optional[float] = None) -> None:
         if timeout is None:
-            timeout = _env_float("REMARKABLE_SSH_SHUTDOWN_TIMEOUT", 5.0, minimum=0.1, maximum=60.0)
+            timeout = self.shutdown_timeout()
         super().close(timeout)
 
 
@@ -237,6 +246,7 @@ class SSHRefreshCoordinator:
         )
         self._lock = asyncio.Lock()
         self._generation: Optional[_RefreshGeneration] = None
+        self._generations: dict[int, _RefreshGeneration] = {}
         self._next_generation = 1
         self._deferred_dirty = False
         self._refresh_count = 0
@@ -280,11 +290,16 @@ class SSHRefreshCoordinator:
         except BaseException as exc:
             mutation_error = exc
             if isinstance(exc, asyncio.CancelledError):
-                dirty = bool(consume_operation_cancel_started())
+                dirty = bool(consume_operation_cancel_dirty())
             else:
                 dirty = not isinstance(
                     exc,
-                    (SSHPreExecutionError, SSHJobCancelled, OperationCancelled),
+                    (
+                        SSHPreExecutionError,
+                        SSHJobCancelled,
+                        OperationCancelled,
+                        OperationQueueClosed,
+                    ),
                 )
 
         leader = False
@@ -309,10 +324,17 @@ class SSHRefreshCoordinator:
         except asyncio.CancelledError as exc:
             cancellation = exc
             _uncancel_current_task()
-            if leader:
-                await leader_task
-            else:
-                await asyncio.shield(generation.future)
+            try:
+                if leader:
+                    await leader_task
+                else:
+                    await asyncio.shield(generation.future)
+            except BaseException as drain_error:
+                if not isinstance(drain_error, asyncio.CancelledError):
+                    logger.warning(
+                        "SSH safety refresh failed while preserving cancellation: %s",
+                        drain_error,
+                    )
 
         if cancellation is not None:
             raise cancellation
@@ -373,15 +395,42 @@ class SSHRefreshCoordinator:
                 if self._explicit_future is follower:
                     self._explicit_future = None
 
-    async def close(self) -> None:
+    async def close(self, timeout: float) -> bool:
+        """Stop new generations and give in-flight refresh work a bounded drain."""
         async with self._lock:
             self._closing = True
-            generation = self._generation
+            explicit = self._explicit_future
             self._update_snapshot_locked()
-            if generation is not None and not generation.future.done():
-                generation.future.set_exception(
-                    SSHDispatcherClosed("Server shut down before refresh completed")
-                )
+            futures = [generation.future for generation in self._generations.values()]
+            if explicit is not None and explicit not in futures:
+                futures.append(explicit)
+        if not futures:
+            return True
+
+        waiter = asyncio.gather(*futures, return_exceptions=True)
+        try:
+            results = await asyncio.wait_for(asyncio.shield(waiter), timeout=timeout)
+        except asyncio.TimeoutError:
+            failure = SSHDispatcherClosed(
+                f"Server shutdown timed out after {timeout:.1f}s waiting for refresh"
+            )
+            async with self._lock:
+                self._deferred_dirty = True
+                for future in futures:
+                    if not future.done():
+                        future.set_exception(failure)
+                        future.exception()
+                self._update_snapshot_locked()
+            await waiter
+            logger.warning("%s; explicit refresh is required on the next connection", failure)
+            return False
+
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(
+                result, (SSHDispatcherClosed, asyncio.CancelledError)
+            ):
+                logger.warning("SSH refresh did not complete during shutdown: %s", result)
+        return True
 
     def diagnostics(self) -> dict:
         with self._snapshot_lock:
@@ -406,6 +455,7 @@ class SSHRefreshCoordinator:
                 )
                 self._next_generation += 1
                 self._generation = generation
+                self._generations[generation.number] = generation
             generation.participants += 1
             self._update_snapshot_locked()
             return generation
@@ -446,6 +496,7 @@ class SSHRefreshCoordinator:
                 generation.future.set_result(None)
         finally:
             async with self._lock:
+                self._generations.pop(generation.number, None)
                 if self._generation is generation:
                     self._generation = None
                 self._update_snapshot_locked()

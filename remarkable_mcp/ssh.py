@@ -34,6 +34,7 @@ from remarkable_mcp.ssh_reliability import (
     SSHRefreshCoordinator,
     SSHReliabilityError,
     SSHRemoteCommandError,
+    _uncancel_current_task,
     classify_pre_execution_failure,
 )
 
@@ -226,8 +227,19 @@ class SSHClient:
         """Await one coherent SSH operation without occupying the default executor."""
         return await self._dispatcher.call_async(operation, callback)
 
+    async def run_refresh_operation_async(
+        self,
+        operation: str,
+        callback: Callable[[], T],
+    ) -> T:
+        """Allow a refresh already owed by an in-flight write to drain on shutdown."""
+        return await self._dispatcher.call_async_during_close(operation, callback)
+
     def in_dispatcher_thread(self) -> bool:
         return self._dispatcher.in_worker_thread()
+
+    def is_closing(self) -> bool:
+        return self._dispatcher.is_closing()
 
     def reliability_status(self) -> dict[str, Any]:
         return {
@@ -239,8 +251,42 @@ class SSHClient:
         self._dispatcher.close()
 
     async def aclose(self) -> None:
-        await self._refresh_coordinator.close()
-        await asyncio.to_thread(self._dispatcher.close)
+        timeout = self._dispatcher.shutdown_timeout()
+        self._dispatcher.begin_close()
+        cancellation: Optional[asyncio.CancelledError] = None
+        drain_task = asyncio.create_task(self._refresh_coordinator.close(timeout))
+        try:
+            await asyncio.shield(drain_task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            _uncancel_current_task()
+            await drain_task
+        finally:
+            finish_task = asyncio.create_task(self._finish_dispatcher_close(timeout))
+            try:
+                await asyncio.shield(finish_task)
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
+                _uncancel_current_task()
+                await finish_task
+        if cancellation is not None:
+            raise cancellation
+
+    async def _finish_dispatcher_close(self, timeout: float) -> None:
+        loop = asyncio.get_running_loop()
+        finished = loop.create_future()
+
+        def finish() -> None:
+            try:
+                self._dispatcher.finish_close(timeout)
+            except BaseException as exc:
+                loop.call_soon_threadsafe(finished.set_exception, exc)
+            else:
+                loop.call_soon_threadsafe(finished.set_result, None)
+
+        threading.Thread(target=finish, name="SSH-close", daemon=True).start()
+        await finished
 
     async def run_method_async(
         self,
@@ -411,6 +457,7 @@ class SSHClient:
         cancel_event = self._dispatcher.current_cancel_event()
         while True:
             if cancel_event.is_set():
+                self._dispatcher.set_current_cancel_dirty(False)
                 raise SSHJobCancelled(f"{operation} cancelled before attempt {attempt + 1}")
             attempt += 1
             process = None
@@ -444,7 +491,12 @@ class SSHClient:
                     if self._dispatcher.current_cancel_event().is_set():
                         self._terminate_process(process)
                         stdout, stderr = process.communicate()
-                        raise SSHJobCancelled(f"{operation} cancelled")
+                        failure = self._cancelled_process_failure(
+                            operation, process.returncode, stderr
+                        )
+                        if failure is not None:
+                            raise failure
+                        break
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         self._terminate_process(process)
@@ -455,6 +507,12 @@ class SSHClient:
                         )
                     try:
                         stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                        if cancel_event.is_set():
+                            failure = self._cancelled_process_failure(
+                                operation, process.returncode, stderr
+                            )
+                            if failure is not None:
+                                raise failure
                         break
                     except subprocess.TimeoutExpired:
                         continue
@@ -499,6 +557,7 @@ class SSHClient:
                 delay,
             )
             if cancel_event.wait(delay):
+                self._dispatcher.set_current_cancel_dirty(False)
                 raise SSHJobCancelled(f"{operation} cancelled during retry backoff")
 
     @staticmethod
@@ -516,6 +575,23 @@ class SSHClient:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=1)
+
+    def _cancelled_process_failure(
+        self,
+        operation: str,
+        returncode: Optional[int],
+        stderr: bytes,
+    ) -> Optional[SSHReliabilityError]:
+        if returncode == 0:
+            return None
+        remote_started = _REMOTE_EXECUTION_MARKER in stderr
+        self._dispatcher.set_current_cancel_dirty(remote_started)
+        if remote_started:
+            return SSHExecutionUnknownError(
+                f"{operation} was cancelled after remote execution started; "
+                "the command may have applied and was not retried"
+            )
+        return SSHJobCancelled(f"{operation} cancelled before remote execution started")
 
     @staticmethod
     def _command_failure(

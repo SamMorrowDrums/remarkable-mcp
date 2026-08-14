@@ -4602,6 +4602,43 @@ class TestOperationDispatcher:
         finally:
             dispatcher.close()
 
+    def test_close_cancels_queued_job_without_starting_it(self):
+        from remarkable_mcp.operation_queue import (
+            OperationDispatcher,
+            OperationQueueClosed,
+        )
+
+        dispatcher = OperationDispatcher(name="test", max_concurrency=1)
+        first_started = threading.Event()
+        release_first = threading.Event()
+        ran_second = False
+
+        def first():
+            first_started.set()
+            assert release_first.wait(2)
+
+        def second():
+            nonlocal ran_second
+            ran_second = True
+
+        first_job = dispatcher.submit("first", first)
+        assert first_started.wait(1)
+        second_job = dispatcher.submit("second", second)
+        closer = threading.Thread(target=lambda: dispatcher.close(timeout=1))
+        closer.start()
+        try:
+            with pytest.raises(OperationQueueClosed):
+                second_job.future.result(timeout=1)
+            assert ran_second is False
+            release_first.set()
+            first_job.future.result(timeout=1)
+            closer.join(1)
+            assert not closer.is_alive()
+        finally:
+            release_first.set()
+            closer.join(1)
+            dispatcher.close(timeout=1)
+
 
 class TestSSHReliabilityPolicy:
     @pytest.mark.parametrize(
@@ -4643,6 +4680,23 @@ class TestSSHReliabilityPolicy:
             )
             is None
         )
+
+    def test_successful_process_wins_cancellation_race(self):
+        import remarkable_mcp.ssh as ssh_mod
+        from remarkable_mcp.ssh import SSHClient
+
+        client = SSHClient()
+        try:
+            assert (
+                client._cancelled_process_failure(
+                    "write",
+                    0,
+                    ssh_mod._REMOTE_EXECUTION_MARKER + b"\n",
+                )
+                is None
+            )
+        finally:
+            client.close()
 
     def test_pre_execution_failure_retries_then_succeeds(self, monkeypatch):
         import remarkable_mcp.ssh as ssh_mod
@@ -4951,6 +5005,351 @@ class TestSSHRefreshCoordinator:
         assert isinstance(results[0], asyncio.CancelledError)
         assert results[1] is None
         assert refreshes == 1
+
+    @pytest.mark.asyncio
+    async def test_close_waits_for_superseded_generation(self, monkeypatch):
+        import asyncio
+
+        from remarkable_mcp.ssh_reliability import (
+            SSHExecutionUnknownError,
+            SSHJobCancelled,
+            SSHRefreshCoordinator,
+        )
+
+        monkeypatch.setenv("REMARKABLE_SSH_REFRESH_DEBOUNCE", "0")
+        monkeypatch.setenv("REMARKABLE_SSH_REFRESH_MAX_WAIT", "0.01")
+        coordinator = SSHRefreshCoordinator()
+        first_started = asyncio.Event()
+        second_started = asyncio.Event()
+        release_first = asyncio.Event()
+        release_second = asyncio.Event()
+        refreshes = 0
+
+        async def first_mutation():
+            first_started.set()
+            await release_first.wait()
+            raise SSHExecutionUnknownError("first generation may have persisted")
+
+        async def second_mutation():
+            second_started.set()
+            await release_second.wait()
+            raise SSHJobCancelled("second generation never started")
+
+        async def refresh():
+            nonlocal refreshes
+            refreshes += 1
+
+        first = asyncio.create_task(
+            coordinator.run_write(
+                first_mutation,
+                refresh,
+                deferred=False,
+                persisted=lambda result: True,
+            )
+        )
+        await first_started.wait()
+        await asyncio.sleep(0.02)
+        second = asyncio.create_task(
+            coordinator.run_write(
+                second_mutation,
+                refresh,
+                deferred=False,
+                persisted=lambda result: True,
+            )
+        )
+        await second_started.wait()
+
+        close = asyncio.create_task(coordinator.close(timeout=1))
+        release_second.set()
+        await asyncio.sleep(0)
+        assert close.done() is False
+        release_first.set()
+
+        results = await asyncio.gather(first, second, return_exceptions=True)
+        assert isinstance(results[0], SSHExecutionUnknownError)
+        assert isinstance(results[1], SSHJobCancelled)
+        assert await close is True
+        assert refreshes == 1
+
+
+class TestSSHShutdownCancellation:
+    class Process:
+        def __init__(self, stderr):
+            self.returncode = None
+            self.stderr = stderr
+            self.entered = threading.Event()
+            self.terminated = threading.Event()
+
+        def communicate(self, timeout=None):
+            import subprocess
+
+            self.entered.set()
+            if not self.terminated.is_set():
+                raise subprocess.TimeoutExpired("ssh", timeout)
+            return b"", self.stderr
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+            self.terminated.set()
+
+        def kill(self):
+            self.returncode = -9
+            self.terminated.set()
+
+        def wait(self, timeout=None):
+            assert self.terminated.wait(timeout)
+            return self.returncode
+
+    @staticmethod
+    async def _start_write(client, process):
+        import asyncio
+
+        from remarkable_mcp.write_tools import _refresh_ssh_client
+
+        task = asyncio.create_task(
+            client._refresh_coordinator.run_write(
+                lambda: client.run_operation_async(
+                    "write",
+                    lambda: client._ssh_command_unlocked("touch /tmp/issue-169", 30),
+                ),
+                lambda: _refresh_ssh_client(client),
+                deferred=False,
+                persisted=lambda result: True,
+            )
+        )
+        assert await asyncio.to_thread(process.entered.wait, 1)
+        return task
+
+    @staticmethod
+    def _cached_client(monkeypatch):
+        from remarkable_mcp.ssh import Document, SSHClient
+
+        monkeypatch.setenv("REMARKABLE_SSH_REFRESH_DEBOUNCE", "0")
+        monkeypatch.setenv("REMARKABLE_SSH_SHUTDOWN_TIMEOUT", "1")
+        client = SSHClient()
+        document = Document(id="cached", hash="", name="Cached", doc_type="DocumentType")
+        client._documents = [document]
+        client._documents_by_id = {document.id: document}
+        client._metadata_loaded_all = True
+        client._file_type_cache = {document.id: "pdf"}
+        return client
+
+    @pytest.mark.asyncio
+    async def test_aclose_cancels_before_marker_without_refresh(self, monkeypatch):
+        import remarkable_mcp.ssh as ssh_mod
+        from remarkable_mcp.ssh_reliability import SSHJobCancelled
+
+        client = self._cached_client(monkeypatch)
+        process = self.Process(b"")
+        with (
+            patch.object(ssh_mod.subprocess, "Popen", return_value=process),
+            patch("remarkable_mcp.write_tools._restart_xochitl") as restart,
+        ):
+            task = await self._start_write(client, process)
+            await client.aclose()
+            with pytest.raises(SSHJobCancelled, match="before remote execution"):
+                await task
+            restart.assert_not_called()
+
+        assert client._metadata_loaded_all is True
+        assert client.reliability_status()["refresh"]["refreshes"] == 0
+
+    @pytest.mark.asyncio
+    async def test_aclose_refreshes_once_after_marker_and_invalidates_cache(self, monkeypatch):
+        import remarkable_mcp.api as api
+        import remarkable_mcp.ssh as ssh_mod
+        from remarkable_mcp.ssh_reliability import SSHExecutionUnknownError
+
+        client = self._cached_client(monkeypatch)
+        marker = ssh_mod._REMOTE_EXECUTION_MARKER
+        process = self.Process(marker + b"\n")
+        with (
+            patch.object(ssh_mod.subprocess, "Popen", return_value=process),
+            patch("remarkable_mcp.write_tools._restart_xochitl") as restart,
+            patch.object(api, "_device_client", client),
+        ):
+            task = await self._start_write(client, process)
+            await api.close_device_client()
+            assert api._device_client is None
+            with pytest.raises(SSHExecutionUnknownError, match="was not retried"):
+                await task
+            restart.assert_called_once_with(client, wait_ready=False)
+            await client.aclose()
+            restart.assert_called_once()
+
+        assert client._documents == []
+        assert client._documents_by_id == {}
+        assert client._metadata_loaded_all is False
+        assert client._file_type_cache is None
+        status = client.reliability_status()["refresh"]
+        assert status["refreshes"] == 1
+        assert status["deferred_dirty"] is False
+
+    @pytest.mark.asyncio
+    async def test_close_requires_later_refresh_after_marker(self, monkeypatch):
+        import asyncio
+
+        import remarkable_mcp.ssh as ssh_mod
+        from remarkable_mcp.operation_queue import OperationQueueClosed
+
+        client = self._cached_client(monkeypatch)
+        process = self.Process(ssh_mod._REMOTE_EXECUTION_MARKER + b"\n")
+        with (
+            patch.object(ssh_mod.subprocess, "Popen", return_value=process),
+            patch("remarkable_mcp.write_tools._restart_xochitl") as restart,
+        ):
+            task = await self._start_write(client, process)
+            await asyncio.to_thread(client.close)
+            with pytest.raises(OperationQueueClosed):
+                await task
+            restart.assert_not_called()
+
+        assert client._metadata_loaded_all is False
+        assert client.reliability_status()["refresh"]["deferred_dirty"] is True
+
+    @pytest.mark.asyncio
+    async def test_aclose_retains_dirty_state_when_refresh_fails(self, monkeypatch):
+        import remarkable_mcp.ssh as ssh_mod
+
+        client = self._cached_client(monkeypatch)
+        process = self.Process(ssh_mod._REMOTE_EXECUTION_MARKER + b"\n")
+        with (
+            patch.object(ssh_mod.subprocess, "Popen", return_value=process),
+            patch(
+                "remarkable_mcp.write_tools._restart_xochitl",
+                side_effect=RuntimeError("refresh disconnected"),
+            ) as restart,
+        ):
+            task = await self._start_write(client, process)
+            await client.aclose()
+            with pytest.raises(RuntimeError, match="refresh disconnected"):
+                await task
+            restart.assert_called_once_with(client, wait_ready=False)
+
+        assert client._metadata_loaded_all is False
+        status = client.reliability_status()["refresh"]
+        assert status["refreshes"] == 0
+        assert status["deferred_dirty"] is True
+
+    @pytest.mark.asyncio
+    async def test_task_cancellation_stays_cancelled_after_safety_refresh(self, monkeypatch):
+        import asyncio
+
+        import remarkable_mcp.ssh as ssh_mod
+
+        client = self._cached_client(monkeypatch)
+        process = self.Process(ssh_mod._REMOTE_EXECUTION_MARKER + b"\n")
+        try:
+            with (
+                patch.object(ssh_mod.subprocess, "Popen", return_value=process),
+                patch("remarkable_mcp.write_tools._restart_xochitl") as restart,
+            ):
+                task = await self._start_write(client, process)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                restart.assert_called_once_with(client, wait_ready=True)
+        finally:
+            await client.aclose()
+
+        assert client._metadata_loaded_all is False
+        assert client.reliability_status()["refresh"]["refreshes"] == 1
+
+    @pytest.mark.asyncio
+    async def test_task_cancellation_before_marker_does_not_refresh(self, monkeypatch):
+        import asyncio
+
+        import remarkable_mcp.ssh as ssh_mod
+
+        client = self._cached_client(monkeypatch)
+        process = self.Process(b"")
+        try:
+            with (
+                patch.object(ssh_mod.subprocess, "Popen", return_value=process),
+                patch("remarkable_mcp.write_tools._restart_xochitl") as restart,
+            ):
+                task = await self._start_write(client, process)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                restart.assert_not_called()
+        finally:
+            await client.aclose()
+
+        assert client._metadata_loaded_all is True
+        assert client.reliability_status()["refresh"]["refreshes"] == 0
+
+    @pytest.mark.asyncio
+    async def test_refresh_failure_does_not_replace_task_cancellation(self, monkeypatch):
+        import asyncio
+
+        from remarkable_mcp.write_tools import _refresh_ssh_client
+
+        client = self._cached_client(monkeypatch)
+        refresh_started = threading.Event()
+        release_refresh = threading.Event()
+
+        def failed_refresh(*args, **kwargs):
+            refresh_started.set()
+            assert release_refresh.wait(1)
+            raise RuntimeError("refresh disconnected")
+
+        try:
+            with patch(
+                "remarkable_mcp.write_tools._restart_xochitl",
+                side_effect=failed_refresh,
+            ) as restart:
+                task = asyncio.create_task(
+                    client._refresh_coordinator.run_write(
+                        lambda: client.run_operation_async("write", lambda: "saved"),
+                        lambda: _refresh_ssh_client(client),
+                        deferred=False,
+                        persisted=lambda result: result == "saved",
+                    )
+                )
+                assert await asyncio.to_thread(refresh_started.wait, 1)
+                task.cancel()
+                release_refresh.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                restart.assert_called_once_with(client, wait_ready=True)
+        finally:
+            release_refresh.set()
+            await client.aclose()
+
+        assert client._metadata_loaded_all is False
+        assert client.reliability_status()["refresh"]["deferred_dirty"] is True
+
+    @pytest.mark.asyncio
+    async def test_aclose_preserves_cancellation_until_cleanup_finishes(self, monkeypatch):
+        import asyncio
+
+        client = self._cached_client(monkeypatch)
+        refresh_started = asyncio.Event()
+        release_refresh = asyncio.Event()
+
+        async def refresh():
+            refresh_started.set()
+            await release_refresh.wait()
+
+        refresh_task = asyncio.create_task(client._refresh_coordinator.refresh_explicit(refresh))
+        await refresh_started.wait()
+        close_task = asyncio.create_task(client.aclose())
+        await asyncio.sleep(0)
+        close_task.cancel()
+        await asyncio.sleep(0)
+        assert close_task.done() is False
+
+        release_refresh.set()
+        await refresh_task
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+        status = client.reliability_status()
+        assert status["operations"]["stopping"] is True
+        assert status["refresh"]["refreshes"] == 1
 
 
 async def _async_value(value):
@@ -6968,7 +7367,7 @@ class TestDeferRestart:
             payloads = [json.loads(result.content[0].text) for result in results]
             assert [payload["created"] for payload in payloads] == [True, True]
             assert all(payload["refresh_pending"] is False for payload in payloads)
-            mock_restart.assert_called_once_with(client)
+            mock_restart.assert_called_once_with(client, wait_ready=True)
         finally:
             client.close()
             self._cleanup_tools()
@@ -7002,7 +7401,7 @@ class TestDeferRestart:
             data = json.loads(result.content[0].text)
             assert data["_error"]["type"] == "write_execution_unknown"
             mock_upload.assert_called_once()
-            mock_restart.assert_called_once_with(client)
+            mock_restart.assert_called_once_with(client, wait_ready=True)
         finally:
             client.close()
             self._cleanup_tools()
