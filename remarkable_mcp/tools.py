@@ -104,6 +104,17 @@ def _apply_root_filter(path: str) -> str:
     return path
 
 
+def _is_trashed(item) -> bool:
+    """True when an item lives in the reMarkable trash.
+
+    Trashed documents keep their name, so without this check a trashed
+    document can shadow a live one in by-name resolution (first match wins)
+    and reads silently serve deleted content.
+    """
+    parent = item.Parent if hasattr(item, "Parent") else getattr(item, "parent", "")
+    return parent == "trash"
+
+
 def _resolve_root_path(path: str) -> str:
     """Resolve a user-provided path to the actual path on device.
 
@@ -340,7 +351,9 @@ async def remarkable_read(
         actual_document = _resolve_root_path(document) if document.startswith("/") else document
 
         # Find the document by name or path (case-insensitive, not folders)
-        documents = [item for item in collection if not item.is_folder]
+        documents = [
+            item for item in collection if not item.is_folder and not _is_trashed(item)
+        ]
         target_doc = None
         document_lower = actual_document.lower().strip("/")
 
@@ -1645,7 +1658,9 @@ async def remarkable_image(
         actual_document = _resolve_root_path(document) if document.startswith("/") else document
 
         # Find the document by name or path (case-insensitive, not folders)
-        documents = [item for item in collection if not item.is_folder]
+        documents = [
+            item for item in collection if not item.is_folder and not _is_trashed(item)
+        ]
         target_doc = None
         document_lower = actual_document.lower().strip("/")
 

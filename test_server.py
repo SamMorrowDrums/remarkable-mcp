@@ -672,6 +672,57 @@ class TestRemarkableRead:
         assert "_error" in data
         assert data["_error"]["type"] == "read_failed"
 
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_read_ignores_trashed_namesake(self, mock_get_rmapi):
+        """A trashed document must not shadow a live one with the same name.
+
+        Regression test: a document moved to the trash keeps its name, so it
+        could win by-name resolution (first match) and reads would silently
+        serve the deleted content. Notably easy to hit via the server's own
+        tools: remarkable_delete followed by remarkable_upload of a same-named
+        replacement leaves a trashed namesake ahead of the live document.
+        """
+        trashed = Mock()
+        trashed.VissibleName = "Quick sheets"
+        trashed.ID = "doc-trashed"
+        trashed.Parent = "trash"
+        trashed.ModifiedClient = "2024-01-15T10:30:00Z"
+        trashed.is_folder = False
+        trashed.is_cloud_archived = False
+        trashed.tags = []
+
+        live = Mock()
+        live.VissibleName = "Quick sheets"
+        live.ID = "doc-live"
+        live.Parent = ""
+        live.ModifiedClient = "2024-01-16T10:30:00Z"
+        live.is_folder = False
+        live.is_cloud_archived = False
+        live.tags = []
+
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        # Trashed doc first, so pre-fix first-match resolution would pick it
+        mock_client.get_meta_items.return_value = [trashed, live]
+
+        import io
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr("doc-live.content", '{"fileType": "notebook"}')
+        mock_client.download.return_value = zip_buffer.getvalue()
+        mock_client.download_raw_file.return_value = None
+        mock_client.get_file_type.return_value = "notebook"
+
+        result = await mcp.call_tool("remarkable_read", {"document": "Quick sheets"})
+        data = json.loads(result[0][0].text)
+
+        assert "_error" not in data, f"Unexpected error: {data.get('_error')}"
+        downloaded = mock_client.download.call_args[0][0]
+        assert downloaded.ID == "doc-live", "resolved the trashed namesake instead of the live document"
+
     @pytest.mark.asyncio
     @patch("remarkable_mcp.tools.get_rmapi")
     async def test_read_provides_suggestions(self, mock_get_rmapi, mock_document):
