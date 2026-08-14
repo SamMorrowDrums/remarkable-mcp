@@ -25,6 +25,7 @@ def _document(name: str = "Test Document") -> Mock:
     document.Parent = ""
     document.ModifiedClient = None
     document.is_folder = False
+    document.tags = []
     return document
 
 
@@ -194,6 +195,69 @@ async def test_read_sampling_reuses_prepared_page(monkeypatch, mode: str):
     assert payload["ocr_backend"] == "sampling"
     assert api_client.download.call_count == 1
     assert render_page.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+async def test_read_sampling_reuses_typed_content_without_ocr(monkeypatch, mode: str):
+    """A normal typed read does not download or extract the notebook twice."""
+    from remarkable_mcp import tools
+
+    with tools._sampling_page_cache_lock:
+        tools._sampling_page_cache.clear()
+    monkeypatch.setenv("REMARKABLE_OCR_BACKEND", "sampling")
+    document = _document()
+    api_client = Mock()
+    api_client.get_meta_items.return_value = [document]
+    api_client.download.return_value = b"fixture"
+    extracted = {
+        "typed_text": ["Typed fixture"],
+        "highlights": [],
+        "handwritten_text": [],
+        "annotated_pages": [],
+        "pages": 1,
+    }
+    sample_calls = 0
+
+    async def sample(
+        context: ClientRequestContext, params: CreateMessageRequestParams
+    ) -> CreateMessageResult:
+        nonlocal sample_calls
+        sample_calls += 1
+        return CreateMessageResult(
+            role="assistant",
+            model="fixture-vision",
+            content=TextContent(type="text", text="unexpected"),
+        )
+
+    loader_start, loader_stop = _without_background_loader()
+    with (
+        loader_start,
+        loader_stop,
+        patch("remarkable_mcp.tools.get_rmapi", return_value=api_client),
+        patch("remarkable_mcp.tools.get_file_type", return_value="notebook"),
+        patch("remarkable_mcp.tools.get_cached_page_ocr", return_value=None),
+        patch("remarkable_mcp.tools.get_document_page_count", return_value=1),
+        patch(
+            "remarkable_mcp.tools.extract_text_from_document_zip",
+            return_value=extracted,
+        ) as extract_text,
+        patch("remarkable_mcp.tools.render_page_from_document_zip") as render_page,
+    ):
+        async with Client(mcp, mode=mode, sampling_callback=sample) as client:
+            result = await client.call_tool(
+                "remarkable_read",
+                {"document": "Test Document", "include_ocr": False},
+            )
+
+    payload = json.loads(result.content[0].text)
+    assert "content" in payload, payload
+    assert "Typed fixture" in payload["content"]
+    assert "_ocr_auto_enabled" not in payload
+    assert sample_calls == 0
+    assert api_client.download.call_count == 1
+    assert extract_text.call_count == 1
+    render_page.assert_not_called()
 
 
 @pytest.mark.asyncio

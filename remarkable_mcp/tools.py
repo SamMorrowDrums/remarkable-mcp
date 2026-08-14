@@ -460,7 +460,16 @@ async def _prepare_read_sampling(
                     doc_id=target_doc.ID,
                 )
                 if content.get("typed_text") or content.get("highlights"):
-                    return None
+                    prepared = _PreparedReadSampling(
+                        cache_key=cache_key,
+                        total_pages=page_count,
+                        png_data=None,
+                        cached_text=None,
+                        content=content,
+                        generation_token=cache_key[3],
+                    )
+                    _cache_prepared_page(prepared)
+                    return prepared
 
             png_data = None
             if cached_text is None:
@@ -628,12 +637,21 @@ async def remarkable_read(
             # For notebooks (no PDF/EPUB), use page-based pagination
             is_notebook = file_type not in ("pdf", "epub")
 
-            use_sampling = is_notebook and prepared_sampling is not None
+            if is_notebook and prepared_sampling is not None:
+                total_notebook_pages = prepared_sampling.total_pages
+                content = prepared_sampling.content
+
+            use_sampling = (
+                is_notebook
+                and prepared_sampling is not None
+                and (
+                    prepared_sampling.cached_text is not None
+                    or prepared_sampling.png_data is not None
+                )
+            )
             sampling_auto_enabled = use_sampling and not include_ocr
 
             if use_sampling:
-                total_notebook_pages = prepared_sampling.total_pages
-                content = prepared_sampling.content
                 ocr_text = prepared_sampling.cached_text or sampling_result_text(sampling_result)
                 if ocr_text is not None:
                     if prepared_sampling.cached_text is None:
@@ -663,7 +681,7 @@ async def remarkable_read(
                     content = cached
 
             # If not cached (non-sampling), perform extraction
-            if not notebook_pages and is_notebook:
+            if not notebook_pages and is_notebook and content is None:
                 raw_doc = await run_blocking(client.download, target_doc)
                 with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                     tmp.write(raw_doc)
