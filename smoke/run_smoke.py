@@ -291,7 +291,7 @@ async def diagnostic_stdio_client(params):
 
     stdio_module._create_platform_compatible_process = _capture_process
     try:
-        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as errlog:
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errlog:
             try:
                 async with stdio_module.stdio_client(params, errlog=errlog) as streams:
                     yield (*streams, diagnostics)
@@ -303,7 +303,13 @@ async def diagnostic_stdio_client(params):
 
 def _run_diagnostic_command(args: list[str], timeout: int = 10) -> dict[str, Any]:
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
     return {

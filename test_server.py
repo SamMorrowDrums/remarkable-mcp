@@ -4222,13 +4222,15 @@ class TestSSHCacheConcurrency:
     class AttemptLock:
         def __init__(self):
             self._lock = threading.RLock()
+            self._counter_lock = threading.Lock()
             self.acquisitions = 0
             self.second_attempted = threading.Event()
 
         def __enter__(self):
-            self.acquisitions += 1
-            if self.acquisitions == 2:
-                self.second_attempted.set()
+            with self._counter_lock:
+                self.acquisitions += 1
+                if self.acquisitions == 2:
+                    self.second_attempted.set()
             self._lock.acquire()
             return self
 
