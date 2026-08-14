@@ -296,6 +296,58 @@ def _response_persisted(response: str) -> bool:
     return "_error" not in data
 
 
+def _validate_author_request(
+    method: str,
+    document: Optional[str],
+    page: Optional[int],
+    strokes: Optional[list],
+    name: Optional[str],
+) -> Optional[str]:
+    """Return transport-free validation errors before resolving an SSH client."""
+    if method == "draw":
+        if not document or page is None:
+            return make_error(
+                error_type="missing_parameter",
+                message="draw requires 'document' and 'page'.",
+                suggestion=(
+                    'Call remarkable_author(method="draw", document=..., page=1, strokes=[...]).'
+                ),
+            )
+        if not strokes:
+            return make_error(
+                error_type="no_strokes",
+                message="No strokes provided to write.",
+                suggestion=(
+                    "Pass a non-empty list of stroke dicts, e.g. "
+                    '[{"points": [[0.1,0.2],[0.8,0.2]], '
+                    '"tool": "fineliner", "color": "black"}].'
+                ),
+            )
+        return None
+    if method == "add_page":
+        if not document:
+            return make_error(
+                error_type="missing_parameter",
+                message="add_page requires 'document'.",
+                suggestion='Call remarkable_author(method="add_page", document=...).',
+            )
+        return None
+    if method == "create_document":
+        if not name:
+            return make_error(
+                error_type="missing_parameter",
+                message="create_document requires 'name'.",
+                suggestion=('Call remarkable_author(method="create_document", name="My notes").'),
+            )
+        return None
+    return make_error(
+        error_type="unknown_method",
+        message=f"Unknown method: '{method}'.",
+        suggestion='Use method="draw", "add_page", or "create_document".',
+        did_you_mean=["draw", "add_page", "create_document"],
+    )
+
+
 def _mark_response_refreshed(response: str) -> str:
     try:
         data = json.loads(response)
@@ -1223,6 +1275,16 @@ def register_write_tools():
         </examples>
         """
 
+        validation_error = _validate_author_request(
+            method,
+            document,
+            page,
+            strokes,
+            name,
+        )
+        if validation_error:
+            return validation_error
+
         def _impl() -> str:
             error = _require_write_transport()
             if error:
@@ -1234,12 +1296,7 @@ def register_write_tools():
                 return _author_add_page(document)
             if method == "create_document":
                 return _author_create_document(name, text, folder)
-            return make_error(
-                error_type="unknown_method",
-                message=f"Unknown method: '{method}'.",
-                suggestion='Use method="draw", "add_page", or "create_document".',
-                did_you_mean=["draw", "add_page", "create_document"],
-            )
+            raise AssertionError(f"Validated author method is unsupported: {method}")
 
         ssh_client = _get_ssh_client()
         if isinstance(ssh_client, SSHClient):

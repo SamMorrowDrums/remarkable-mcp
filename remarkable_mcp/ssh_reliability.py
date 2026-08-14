@@ -12,10 +12,10 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, TypeVar
 
 from remarkable_mcp.operation_queue import (
-    OperationAwaitCancelled,
     OperationCancelled,
     OperationDispatcher,
     OperationQueueClosed,
+    consume_operation_cancel_started,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,14 @@ _PRE_EXECUTION_PATTERNS = (
         ),
     ),
 )
+
+
+def _uncancel_current_task() -> None:
+    """Clear one cancellation request when supported (Python 3.11+)."""
+    task = asyncio.current_task()
+    uncancel = getattr(task, "uncancel", None)
+    if callable(uncancel):
+        uncancel()
 
 
 class SSHReliabilityError(RuntimeError):
@@ -271,8 +279,8 @@ class SSHRefreshCoordinator:
             dirty = persisted(result)
         except BaseException as exc:
             mutation_error = exc
-            if isinstance(exc, OperationAwaitCancelled):
-                dirty = exc.started
+            if isinstance(exc, asyncio.CancelledError):
+                dirty = bool(consume_operation_cancel_started())
             else:
                 dirty = not isinstance(
                     exc,
@@ -300,9 +308,7 @@ class SSHRefreshCoordinator:
                 await asyncio.shield(generation.future)
         except asyncio.CancelledError as exc:
             cancellation = exc
-            task = asyncio.current_task()
-            if task is not None:
-                task.uncancel()
+            _uncancel_current_task()
             if leader:
                 await leader_task
             else:
@@ -334,9 +340,7 @@ class SSHRefreshCoordinator:
             await asyncio.shield(refresh_task)
         except asyncio.CancelledError as exc:
             cancellation = exc
-            task = asyncio.current_task()
-            if task is not None:
-                task.uncancel()
+            _uncancel_current_task()
             try:
                 await refresh_task
             except BaseException as refresh_exc:

@@ -314,10 +314,9 @@ async def lifespan(app: FastMCP) -> AsyncIterator[None]:
     finally:
         # Stop background loader on shutdown (if running)
         await stop_background_loader(task)
-        if ssh_mode:
-            from remarkable_mcp.api import close_device_client
+        from remarkable_mcp.api import close_device_client
 
-            await close_device_client()
+        await close_device_client()
 
 
 # Initialize FastMCP server with lifespan and instructions

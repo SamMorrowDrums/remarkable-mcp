@@ -4598,10 +4598,7 @@ class TestOperationDispatcher:
         import asyncio
         import time
 
-        from remarkable_mcp.operation_queue import (
-            OperationAwaitCancelled,
-            OperationDispatcher,
-        )
+        from remarkable_mcp.operation_queue import OperationDispatcher
 
         dispatcher = OperationDispatcher(name="test", max_concurrency=1)
         first_started = threading.Event()
@@ -4628,9 +4625,8 @@ class TestOperationDispatcher:
             await asyncio.sleep(0)
             release_first.set()
             first_job.future.result(timeout=2)
-            with pytest.raises(OperationAwaitCancelled) as exc_info:
+            with pytest.raises(asyncio.CancelledError):
                 await task
-            assert exc_info.value.started is False
             assert ran_second is False
         finally:
             dispatcher.close()
@@ -4751,7 +4747,6 @@ class TestSSHReliabilityPolicy:
         import time
 
         import remarkable_mcp.ssh as ssh_mod
-        from remarkable_mcp.operation_queue import OperationAwaitCancelled
         from remarkable_mcp.ssh import SSHClient
 
         class Process:
@@ -4791,7 +4786,7 @@ class TestSSHReliabilityPolicy:
                 assert time.monotonic() < deadline
                 await asyncio.sleep(0.01)
             task.cancel()
-            with pytest.raises(OperationAwaitCancelled):
+            with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, timeout=1)
             assert time.monotonic() - started < 1
             assert calls == 1
@@ -4800,6 +4795,12 @@ class TestSSHReliabilityPolicy:
 
 
 class TestSSHRefreshCoordinator:
+    def test_uncancel_helper_is_python_310_compatible(self):
+        from remarkable_mcp.ssh_reliability import _uncancel_current_task
+
+        with patch("remarkable_mcp.ssh_reliability.asyncio.current_task", return_value=object()):
+            _uncancel_current_task()
+
     @pytest.mark.asyncio
     async def test_concurrent_writes_share_one_refresh(self, monkeypatch):
         import asyncio
@@ -4884,20 +4885,21 @@ class TestSSHRefreshCoordinator:
 
     @pytest.mark.asyncio
     async def test_not_started_cancellation_does_not_refresh(self):
-        from remarkable_mcp.operation_queue import OperationAwaitCancelled
+        import asyncio
+
         from remarkable_mcp.ssh_reliability import SSHRefreshCoordinator
 
         coordinator = SSHRefreshCoordinator()
         refreshes = 0
 
         async def cancelled_mutation():
-            raise OperationAwaitCancelled(started=False)
+            raise asyncio.CancelledError()
 
         async def refresh():
             nonlocal refreshes
             refreshes += 1
 
-        with pytest.raises(OperationAwaitCancelled):
+        with pytest.raises(asyncio.CancelledError):
             await coordinator.run_write(
                 cancelled_mutation,
                 refresh,
@@ -6035,7 +6037,13 @@ class TestCanvasWrite:
 
     @pytest.mark.asyncio
     async def test_empty_strokes_rejected(self):
-        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch(
+                "remarkable_mcp.write_tools.get_rmapi",
+                side_effect=AssertionError("invalid requests must not resolve a client"),
+            ),
+        ):
             result = await mcp.call_tool(
                 "remarkable_author",
                 {"method": "draw", "document": "Sketchbook", "page": 1, "strokes": []},
@@ -6045,7 +6053,13 @@ class TestCanvasWrite:
 
     @pytest.mark.asyncio
     async def test_unknown_method_is_educational(self):
-        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch(
+                "remarkable_mcp.write_tools.get_rmapi",
+                side_effect=AssertionError("invalid requests must not resolve a client"),
+            ),
+        ):
             result = await mcp.call_tool("remarkable_author", {"method": "frobnicate"})
             data = json.loads(result[0][0].text)
             assert data["_error"]["type"] == "unknown_method"
@@ -6381,7 +6395,13 @@ class TestCanvasWrite:
 
     @pytest.mark.asyncio
     async def test_create_document_requires_name(self):
-        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch(
+                "remarkable_mcp.write_tools.get_rmapi",
+                side_effect=AssertionError("invalid requests must not resolve a client"),
+            ),
+        ):
             result = await mcp.call_tool("remarkable_author", {"method": "create_document"})
             data = json.loads(result[0][0].text)
             assert data["_error"]["type"] == "missing_parameter"

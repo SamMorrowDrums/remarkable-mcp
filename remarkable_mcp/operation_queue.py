@@ -8,12 +8,17 @@ import queue
 import threading
 import time
 from concurrent.futures import Future
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+_operation_cancel_started: ContextVar[Optional[bool]] = ContextVar(
+    "operation_cancel_started",
+    default=None,
+)
 
 
 class OperationCancelled(RuntimeError):
@@ -24,12 +29,11 @@ class OperationQueueClosed(RuntimeError):
     """The operation queue is closing and no longer accepts work."""
 
 
-class OperationAwaitCancelled(asyncio.CancelledError):
-    """Cancellation annotated with whether the operation had started."""
-
-    def __init__(self, *, started: bool):
-        super().__init__("Operation await cancelled")
-        self.started = started
+def consume_operation_cancel_started() -> Optional[bool]:
+    """Return and clear whether the current task's cancelled operation had started."""
+    started = _operation_cancel_started.get()
+    _operation_cancel_started.set(None)
+    return started
 
 
 @dataclass
@@ -113,7 +117,8 @@ class OperationDispatcher:
                 await asyncio.shield(asyncio.wrap_future(job.future))
             except BaseException:
                 pass
-            raise OperationAwaitCancelled(started=job.started_at is not None)
+            _operation_cancel_started.set(job.started_at is not None)
+            raise
 
     def cancel(self, job: OperationJob[Any]) -> None:
         job.cancel_event.set()
