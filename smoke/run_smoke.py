@@ -47,15 +47,18 @@ import asyncio
 import json
 import os
 import pathlib
+import re
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
@@ -92,6 +95,7 @@ ALL_TOOLS = [
     "remarkable_rename",
     "remarkable_move",
     "remarkable_author",
+    "remarkable_refresh",
     "remarkable_delete",
 ]
 
@@ -109,6 +113,7 @@ WRITE_TOOLS = {
     "remarkable_rename",
     "remarkable_move",
     "remarkable_author",
+    "remarkable_refresh",
     "remarkable_delete",
 }
 
@@ -148,6 +153,10 @@ MODES = {
         "env": {
             "REMARKABLE_USE_SSH": "1",
             "REMARKABLE_DISABLE_CLOUD_FALLBACK": "1",
+            # A smoke run is a write batch. Restart xochitl once after cleanup
+            # rather than after every operation, which would force repeated
+            # full-library rescans and obscure sequencing failures.
+            "REMARKABLE_DEFER_RESTART": "1",
         },
         "probe_port": 22,
     },
@@ -159,6 +168,7 @@ TIMEOUTS = {
     "remarkable_image": 120,
     "remarkable_canvas": 120,
     "remarkable_author": 120,
+    "remarkable_refresh": 120,
     "remarkable_upload": 120,
     "remarkable_delete": 90,
     "_default": 60,
@@ -167,6 +177,220 @@ TIMEOUTS = {
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _read_text(path: pathlib.Path) -> str | None:
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return None
+
+
+def _process_tree(root_pid: int) -> set[int]:
+    """Return the live Linux process tree rooted at ``root_pid``."""
+    found = {root_pid}
+    pending = [root_pid]
+    while pending:
+        pid = pending.pop()
+        children = _read_text(pathlib.Path(f"/proc/{pid}/task/{pid}/children"))
+        if not children:
+            continue
+        for value in children.split():
+            child = int(value)
+            if child not in found:
+                found.add(child)
+                pending.append(child)
+    return found
+
+
+def _process_sample(root_pid: int) -> dict[str, Any]:
+    total_rss_kb = 0
+    processes = []
+    for pid in sorted(_process_tree(root_pid)):
+        status = _read_text(pathlib.Path(f"/proc/{pid}/status"))
+        if not status:
+            continue
+        name_match = re.search(r"^Name:\s+(.+)$", status, re.MULTILINE)
+        rss_match = re.search(r"^VmRSS:\s+(\d+)\s+kB$", status, re.MULTILINE)
+        rss_kb = int(rss_match.group(1)) if rss_match else 0
+        total_rss_kb += rss_kb
+        processes.append(
+            {
+                "pid": pid,
+                "name": name_match.group(1) if name_match else "unknown",
+                "rss_kb": rss_kb,
+            }
+        )
+    return {"total_rss_kb": total_rss_kb, "processes": processes}
+
+
+class ProcessDiagnostics:
+    """Capture the stdio server process lifetime without changing the MCP SDK."""
+
+    def __init__(self):
+        self.process = None
+        self._sampler = None
+        self._stop = asyncio.Event()
+        self.max_tree_rss_kb = 0
+        self.max_tree_processes = []
+        self.stderr = ""
+
+    def attach(self, process) -> None:
+        self.process = process
+        self._sampler = asyncio.create_task(self._sample_loop())
+
+    async def _sample_loop(self) -> None:
+        while not self._stop.is_set():
+            if self.process is not None:
+                sample = _process_sample(self.process.pid)
+                if sample["total_rss_kb"] > self.max_tree_rss_kb:
+                    self.max_tree_rss_kb = sample["total_rss_kb"]
+                    self.max_tree_processes = sample["processes"]
+            try:
+                await asyncio.wait_for(self._stop.wait(), 0.25)
+            except asyncio.TimeoutError:
+                pass
+
+    async def finish(self, errlog) -> None:
+        self._stop.set()
+        if self._sampler is not None:
+            await self._sampler
+        errlog.flush()
+        errlog.seek(0)
+        self.stderr = errlog.read()
+
+    def snapshot(self) -> dict[str, Any]:
+        returncode = self.process.returncode if self.process is not None else None
+        signal = -returncode if isinstance(returncode, int) and returncode < 0 else None
+        stderr_lines = self.stderr.splitlines()
+        return {
+            "pid": self.process.pid if self.process is not None else None,
+            "returncode": returncode,
+            "signal": signal,
+            "max_process_tree_rss_kb": self.max_tree_rss_kb,
+            "max_process_tree": self.max_tree_processes,
+            "stderr_tail": stderr_lines[-500:],
+            "python_traceback": any(
+                "Traceback (most recent call last)" in line for line in stderr_lines
+            ),
+        }
+
+
+@asynccontextmanager
+async def diagnostic_stdio_client(params):
+    """Wrap MCP's stdio client while retaining its otherwise-hidden child process."""
+    import mcp.client.stdio as stdio_module
+
+    diagnostics = ProcessDiagnostics()
+    original_create = stdio_module._create_platform_compatible_process
+
+    async def _capture_process(**kwargs):
+        process = await original_create(**kwargs)
+        diagnostics.attach(process)
+        return process
+
+    stdio_module._create_platform_compatible_process = _capture_process
+    try:
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as errlog:
+            try:
+                async with stdio_module.stdio_client(params, errlog=errlog) as streams:
+                    yield (*streams, diagnostics)
+            finally:
+                await diagnostics.finish(errlog)
+    finally:
+        stdio_module._create_platform_compatible_process = original_create
+
+
+def _run_diagnostic_command(args: list[str], timeout: int = 10) -> dict[str, Any]:
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    return {
+        "returncode": result.returncode,
+        "stdout": result.stdout.strip(),
+        "stderr": result.stderr.strip(),
+    }
+
+
+def _host_diagnostics() -> dict[str, Any]:
+    meminfo = _read_text(pathlib.Path("/proc/meminfo")) or ""
+    selected_mem = {}
+    for key in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree"):
+        match = re.search(rf"^{key}:\s+(.+)$", meminfo, re.MULTILINE)
+        if match:
+            selected_mem[key] = match.group(1)
+
+    cgroup = {}
+    for path in (
+        pathlib.Path("/sys/fs/cgroup/memory.events"),
+        pathlib.Path("/sys/fs/cgroup/memory.max"),
+        pathlib.Path("/sys/fs/cgroup/memory.current"),
+        pathlib.Path("/sys/fs/cgroup/memory/memory.oom_control"),
+        pathlib.Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+        pathlib.Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    ):
+        value = _read_text(path)
+        if value is not None:
+            cgroup[str(path)] = value.strip()
+
+    kernel = _run_diagnostic_command(
+        [
+            "journalctl",
+            "-k",
+            "--since",
+            "10 minutes ago",
+            "--no-pager",
+            "--grep",
+            "oom-kill|out of memory|killed process",
+        ]
+    )
+    return {"memory": selected_mem, "cgroup": cgroup, "kernel_oom": kernel}
+
+
+def _tablet_diagnostics() -> dict[str, Any]:
+    """Collect read-only load/memory/SSH state in one additional connection."""
+    command = (
+        "printf 'uptime='; uptime; "
+        "printf 'loadavg='; cat /proc/loadavg; "
+        "printf 'memory_kb\\n'; sed -n "
+        "'/MemTotal:/p;/MemAvailable:/p;/SwapTotal:/p;/SwapFree:/p' /proc/meminfo; "
+        "printf 'processes\\n'; "
+        "ps -eo pid,comm,rss,stat --sort=-rss 2>/dev/null | head -n 12; "
+        "printf 'sshd='; systemctl is-active sshd 2>/dev/null || "
+        "systemctl is-active dropbear 2>/dev/null || true; "
+        "printf 'xochitl='; systemctl is-active xochitl 2>/dev/null || true; "
+        "printf 'kernel_oom\\n'; "
+        "journalctl -k --since '-10 min' --no-pager 2>/dev/null | "
+        "grep -Ei 'oom-kill|out of memory|killed process' | tail -20 || true"
+    )
+    args = [
+        "ssh",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+    ]
+    key_path = os.environ.get("REMARKABLE_SSH_KEY")
+    if key_path:
+        args.extend(["-i", os.path.expanduser(key_path), "-o", "IdentitiesOnly=yes"])
+    args.extend(
+        [
+            "-p",
+            os.environ.get("REMARKABLE_SSH_PORT", "22"),
+            (
+                f"{os.environ.get('REMARKABLE_SSH_USER', 'root')}@"
+                f"{os.environ.get('REMARKABLE_SSH_HOST', USB_HOST)}"
+            ),
+            command,
+        ]
+    )
+    password = os.environ.get("REMARKABLE_SSH_PASSWORD")
+    if password:
+        args = ["sshpass", "-p", password, *args]
+    else:
+        args[1:1] = ["-o", "BatchMode=yes"]
+    return _run_diagnostic_command(args, timeout=15)
 
 
 def _cloud_token_present() -> bool:
@@ -236,12 +460,15 @@ class Recorder:
         self.modes: dict[str, dict] = {}
 
     def mode_unavailable(self, mode: str, reason: str):
-        self.modes[mode] = {"available": False, "reason": reason, "tools": {}}
+        prior = self.modes.get(mode, {})
+        self.modes[mode] = {**prior, "available": False, "reason": reason, "tools": {}}
         for tool in ALL_TOOLS:
             self.modes[mode]["tools"][tool] = {"state": SKIP, "note": "mode unavailable"}
 
     def ensure_mode(self, mode: str, transport: str, doc_count, reason: str):
+        prior = self.modes.get(mode, {})
         self.modes[mode] = {
+            **prior,
             "available": True,
             "transport": transport,
             "document_count": doc_count,
@@ -573,6 +800,18 @@ async def run_write_phase(session, mode, rec, registered):
                     rec.record(
                         mode, "remarkable_delete", PASS, f"deleted {len(delete_states)} item(s)"
                     )
+
+        # SSH writes above are intentionally deferred. Refresh exactly once,
+        # after cleanup metadata is on disk, then the mode-level tablet probe
+        # confirms a fresh SSH session still succeeds after the xochitl restart.
+        if is_ssh and "remarkable_refresh" in registered:
+            payload, is_err, exc = await call_tool(
+                session, "remarkable_refresh", {}, TIMEOUTS["remarkable_refresh"]
+            )
+            state, note = classify_ok(payload, is_err, exc)
+            rec.record(
+                mode, "remarkable_refresh", state, note, _detail_for("remarkable_refresh", payload)
+            )
     finally:
         tmp_pdf.unlink(missing_ok=True)
 
@@ -593,16 +832,32 @@ async def run_mode(mode: str, rec: Recorder, read_only: bool):
         return
 
     spec = MODES[mode]
-    env = {**os.environ, "REMARKABLE_SKIP_CONFIRM": "1", **spec["env"]}
+    env = {
+        **os.environ,
+        "PYTHONFAULTHANDLER": "1",
+        "REMARKABLE_SKIP_CONFIRM": "1",
+        "REMARKABLE_SSH_TRACE": "1",
+        **spec["env"],
+    }
+    server_args = ["server.py", *spec["args"]]
+    if read_only:
+        server_args.append("--read-only")
     params = StdioServerParameters(
-        command="uv",
-        args=["run", "python", "server.py", *spec["args"]],
+        # The smoke harness itself runs under ``uv run``, so sys.executable is
+        # already the project interpreter. Launch it directly rather than through
+        # another uv wrapper: the process handle then exposes the Python server's
+        # real return code/signal instead of uv's success-shaped wrapper status.
+        command=sys.executable,
+        args=server_args,
         env=env,
         cwd=str(REPO_ROOT),
     )
 
+    diagnostics = None
+    if mode == "ssh":
+        rec.modes.setdefault(mode, {})["tablet_before"] = _tablet_diagnostics()
     try:
-        async with stdio_client(params) as (read, write):
+        async with diagnostic_stdio_client(params) as (read, write, diagnostics):
             async with ClientSession(read, write) as session:
                 await asyncio.wait_for(session.initialize(), 60)
 
@@ -644,7 +899,17 @@ async def run_mode(mode: str, rec: Recorder, read_only: bool):
                 else:
                     await run_write_phase(session, mode, rec, registered)
     except Exception as exc:  # noqa: BLE001
-        rec.mode_unavailable(mode, f"server launch/session error: {type(exc).__name__}: {exc}")
+        if mode not in rec.modes or not rec.modes[mode].get("available"):
+            rec.mode_unavailable(mode, f"server launch/session error: {type(exc).__name__}: {exc}")
+        else:
+            rec.modes[mode]["session_error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        data = rec.modes.setdefault(mode, {})
+        if diagnostics is not None:
+            data["server_process"] = diagnostics.snapshot()
+        data["host_after"] = _host_diagnostics()
+        if mode == "ssh":
+            data["tablet_after"] = _tablet_diagnostics()
 
 
 def print_report(rec: Recorder, modes: list[str], started: str) -> bool:
@@ -656,6 +921,24 @@ def print_report(rec: Recorder, modes: list[str], started: str) -> bool:
     for mode in modes:
         data = rec.modes.get(mode, {})
         print(f"\n### MODE: {mode}")
+        process = data.get("server_process", {})
+        returncode = process.get("returncode")
+        process_failed = returncode not in (None, 0)
+        if process_failed:
+            any_fail = True
+            signal = process.get("signal")
+            suffix = f" (signal {signal})" if signal is not None else ""
+            print(f"    SERVER PROCESS EXIT: returncode={returncode}{suffix}")
+
+        tablet_after = data.get("tablet_after")
+        tablet_probe_failed = isinstance(tablet_after, dict) and (
+            tablet_after.get("error") is not None or tablet_after.get("returncode") not in (None, 0)
+        )
+        if tablet_probe_failed:
+            any_fail = True
+            detail = tablet_after.get("error") or tablet_after.get("stderr") or "unknown error"
+            print(f"    POST-RUN TABLET PROBE FAILED: {detail}")
+
         if not data.get("available"):
             print(f"  UNAVAILABLE -- {data.get('reason', 'unknown')}  (all tools SKIPped)")
             continue
@@ -670,6 +953,10 @@ def print_report(rec: Recorder, modes: list[str], started: str) -> bool:
                 any_fail = True
             note = entry.get("note", "")
             print(f"    {GLYPH.get(st, st):10} {tool:22} {note}")
+        session_error = data.get("session_error")
+        if session_error:
+            any_fail = True
+            print(f"    SERVER SESSION ERROR: {session_error}")
 
     # Matrix summary
     print(f"\n{line}\nSUMMARY MATRIX (rows=tools, cols=modes)\n{line}")

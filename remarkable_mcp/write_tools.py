@@ -27,6 +27,8 @@ import logging
 import os
 import time
 import uuid
+from contextlib import nullcontext
+from datetime import datetime
 from typing import Optional
 
 from mcp.server.fastmcp import Context
@@ -40,7 +42,7 @@ from remarkable_mcp.api import (
 )
 from remarkable_mcp.capabilities import client_supports_elicitation
 from remarkable_mcp.responses import make_error, make_response
-from remarkable_mcp.ssh import XOCHITL_PATH, SSHClient
+from remarkable_mcp.ssh import XOCHITL_PATH, Document, SSHClient
 
 logger = logging.getLogger(__name__)
 
@@ -167,45 +169,7 @@ def _write_content_file(ssh_client: SSHClient, doc_uuid: str, content_data: dict
 
 def _upload_file_bytes(ssh_client: SSHClient, local_path: str, remote_path: str) -> None:
     """Upload a local file to the tablet via SSH stdin pipe."""
-    import subprocess
-
-    ssh_args = [
-        "ssh",
-        *ssh_client._auth_ssh_options(),
-        "-o",
-        "ConnectTimeout=5",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-p",
-        str(ssh_client.port),
-        f"{ssh_client.user}@{ssh_client.host}",
-        f"cat > '{remote_path}'",
-    ]
-
-    if ssh_client.password:
-        ssh_args = ["sshpass", "-p", ssh_client.password] + ssh_args
-
-    with open(local_path, "rb") as f:
-        try:
-            result = subprocess.run(
-                ssh_args,
-                stdin=f,
-                capture_output=True,
-                timeout=120,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(f"Upload failed: {result.stderr.decode()}")
-        except FileNotFoundError as e:
-            if ssh_client.password and "sshpass" in str(e):
-                raise RuntimeError(
-                    "sshpass not found. Install it with: "
-                    "apt install sshpass (Debian/Ubuntu), "
-                    "brew install hudochenkov/sshpass/sshpass (macOS), "
-                    "or set up SSH key authentication instead."
-                )
-            raise RuntimeError("SSH client not found. Install openssh-client.")
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("SSH upload timed out after 120s")
+    ssh_client._upload_file(local_path, remote_path)
 
 
 # Tunables for the post-restart readiness wait (see _restart_xochitl). All are
@@ -433,8 +397,67 @@ def _resolve_document(
 
 def _invalidate_client_cache(client) -> None:
     """Drop the in-memory document cache so the next read reflects the write."""
-    client._documents = []
-    client._documents_by_id = {}
+    metadata_lock = getattr(client, "_metadata_lock", None)
+    context = metadata_lock if metadata_lock is not None else nullcontext()
+    with context:
+        client._documents = []
+        client._documents_by_id = {}
+
+    file_type_lock = getattr(client, "_file_type_lock", None)
+    context = file_type_lock if file_type_lock is not None else nullcontext()
+    with context:
+        if isinstance(client, SSHClient):
+            client._file_type_cache = None
+        elif hasattr(client, "_file_type_cache"):
+            client._file_type_cache = {}
+
+
+def _clear_document_extraction_cache(doc_id: str) -> None:
+    from remarkable_mcp.extract import clear_extraction_cache
+
+    clear_extraction_cache(doc_id)
+
+
+def _update_deferred_ssh_cache(
+    client: SSHClient,
+    restarted: bool,
+    *,
+    document: Optional[Document] = None,
+    remove_id: Optional[str] = None,
+    file_type: Optional[str] = None,
+) -> None:
+    """Keep a deferred batch resolvable without rescanning the whole library."""
+    if restarted:
+        _invalidate_client_cache(client)
+        return
+
+    documents = getattr(client, "_documents", None)
+    if not isinstance(documents, list):
+        return
+
+    lock = getattr(client, "_metadata_lock", None)
+    context = lock if lock is not None else nullcontext()
+    with context:
+        if remove_id is not None:
+            client._documents = [item for item in documents if item.ID != remove_id]
+            client._documents_by_id.pop(remove_id, None)
+        elif document is not None:
+            existing = client._documents_by_id.get(document.ID)
+            if existing is None:
+                client._documents.append(document)
+            elif existing is not document:
+                client._documents = [
+                    document if item.ID == document.ID else item for item in client._documents
+                ]
+            client._documents_by_id[document.ID] = document
+
+    file_type_lock = getattr(client, "_file_type_lock", None)
+    context = file_type_lock if file_type_lock is not None else nullcontext()
+    with context:
+        if remove_id is not None and client._file_type_cache is not None:
+            client._file_type_cache.pop(remove_id, None)
+        elif document is not None and file_type is not None and client._file_type_cache is not None:
+            client._file_type_cache[document.ID] = file_type
 
 
 def _cloud_mkdir(folder_name: str, parent: str) -> str:
@@ -747,7 +770,9 @@ def _author_draw(document: str, page: int, strokes: list, ui_submitted: bool) ->
         if not _remote_file_exists(ssh_client, bak_path):
             _write_remote_bytes(ssh_client, bak_path, original)
     _write_remote_bytes(ssh_client, rm_path, new_bytes)
-    _maybe_restart_xochitl(ssh_client)
+    restarted = _maybe_restart_xochitl(ssh_client)
+    _update_deferred_ssh_cache(ssh_client, restarted)
+    _clear_document_extraction_cache(doc_uuid)
 
     result = {
         "written": True,
@@ -840,8 +865,9 @@ def _author_add_page(document: str) -> str:
 
     _write_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}/{new_page_id}.rm", page_bytes)
     _write_content_file(ssh_client, doc_uuid, updated["content"])
-    _maybe_restart_xochitl(ssh_client)
-    _invalidate_client_cache(ssh_client)
+    restarted = _maybe_restart_xochitl(ssh_client)
+    _update_deferred_ssh_cache(ssh_client, restarted)
+    _clear_document_extraction_cache(doc_uuid)
 
     result = {
         "added": True,
@@ -894,8 +920,18 @@ def _author_create_document(name: str, text: Optional[str], folder: Optional[str
     _write_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}/{page_id}.rm", page_bytes)
     _write_content_file(ssh_client, doc_uuid, content_data)
     _write_metadata(ssh_client, doc_uuid, metadata)
-    _maybe_restart_xochitl(ssh_client)
-    _invalidate_client_cache(ssh_client)
+    restarted = _maybe_restart_xochitl(ssh_client)
+    cached_doc = Document(
+        id=doc_uuid,
+        hash=doc_uuid,
+        name=name,
+        doc_type="DocumentType",
+        parent=parent_id,
+        synced=False,
+        last_modified=datetime.now(),
+        local_path=f"{XOCHITL_PATH}/{doc_uuid}",
+    )
+    _update_deferred_ssh_cache(ssh_client, restarted, document=cached_doc, file_type="notebook")
 
     result = {
         "created": True,
@@ -1201,9 +1237,19 @@ def register_write_tools():
                 # Restart xochitl to pick up changes (unless deferred for a batch)
                 restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
 
-                # Clear cached documents so next read picks up the new doc
-                ssh_client._documents = []
-                ssh_client._documents_by_id = {}
+                cached_doc = Document(
+                    id=doc_uuid,
+                    hash=doc_uuid,
+                    name=name,
+                    doc_type="DocumentType",
+                    parent=parent_id,
+                    synced=False,
+                    last_modified=datetime.now(),
+                    local_path=f"{XOCHITL_PATH}/{doc_uuid}",
+                )
+                _update_deferred_ssh_cache(
+                    ssh_client, restarted, document=cached_doc, file_type=ext
+                )
 
                 return make_response(
                     {
@@ -1308,9 +1354,17 @@ def register_write_tools():
                     # Restart xochitl (unless deferred for a batch)
                     restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
 
-                    # Clear cache
-                    ssh_client._documents = []
-                    ssh_client._documents_by_id = {}
+                    cached_folder = Document(
+                        id=doc_uuid,
+                        hash=doc_uuid,
+                        name=folder_name,
+                        doc_type="CollectionType",
+                        parent=parent_id,
+                        synced=False,
+                        last_modified=datetime.now(),
+                        local_path=f"{XOCHITL_PATH}/{doc_uuid}",
+                    )
+                    _update_deferred_ssh_cache(ssh_client, restarted, document=cached_folder)
 
                     return make_response(
                         {
@@ -1433,9 +1487,9 @@ def register_write_tools():
                     # Restart xochitl (unless deferred for a batch)
                     restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
 
-                    # Clear cache
-                    ssh_client._documents = []
-                    ssh_client._documents_by_id = {}
+                    target.parent = dest_id
+                    target.last_modified = datetime.now()
+                    _update_deferred_ssh_cache(ssh_client, restarted, document=target)
 
                     return make_response(
                         {
@@ -1526,9 +1580,9 @@ def register_write_tools():
                     # Restart xochitl (unless deferred for a batch)
                     restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
 
-                    # Clear cache
-                    ssh_client._documents = []
-                    ssh_client._documents_by_id = {}
+                    target.name = new_name
+                    target.last_modified = datetime.now()
+                    _update_deferred_ssh_cache(ssh_client, restarted, document=target)
 
                     return make_response(
                         {
@@ -1626,9 +1680,8 @@ def register_write_tools():
                     # Restart xochitl (unless deferred for a batch)
                     restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
 
-                    # Clear cache
-                    ssh_client._documents = []
-                    ssh_client._documents_by_id = {}
+                    _update_deferred_ssh_cache(ssh_client, restarted, remove_id=target.ID)
+                    _clear_document_extraction_cache(target.ID)
 
                     return make_response(
                         {
@@ -1682,19 +1735,24 @@ def register_write_tools():
             if error:
                 return error
 
+            ssh_client = None
             try:
                 ssh_client = _get_ssh_client()
                 _restart_xochitl(ssh_client)
                 # Drop any cache populated while restarts were deferred so the
                 # next read reflects the just-applied changes.
-                ssh_client._documents = []
-                ssh_client._documents_by_id = {}
+                _invalidate_client_cache(ssh_client)
                 return make_response(
                     {"refreshed": True, "transport": "ssh"},
                     "xochitl restarted; any deferred changes are now visible. "
                     "Use remarkable_browse() to verify.",
                 )
             except Exception as e:
+                # A failed refresh leaves the relationship between on-disk state,
+                # xochitl, and our deferred cache uncertain. Force the next read
+                # to rebuild rather than presenting the cache as authoritative.
+                if ssh_client is not None:
+                    _invalidate_client_cache(ssh_client)
                 return make_error(
                     error_type="refresh_failed",
                     message=f"Failed to refresh tablet UI: {e}",
