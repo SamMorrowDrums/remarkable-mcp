@@ -326,30 +326,34 @@ class SSHClient:
             if self.password:
                 ssh_args = ["sshpass", "-p", self.password] + ssh_args
 
+            source = None
             try:
-                with open(local_path, "rb") as source:
+                source = open(local_path, "rb")
+                try:
                     result = subprocess.run(
                         ssh_args,
                         stdin=source,
                         capture_output=True,
                         timeout=timeout,
                     )
+                except FileNotFoundError as e:
+                    if self.password and "sshpass" in str(e):
+                        raise RuntimeError(
+                            "sshpass not found. Install it with: "
+                            "apt install sshpass (Debian/Ubuntu), "
+                            "brew install hudochenkov/sshpass/sshpass (macOS), "
+                            "or set up SSH key authentication instead."
+                        )
+                    raise RuntimeError("SSH client not found. Install openssh-client.")
                 returncode = result.returncode
                 output_bytes = len(result.stdout) + len(result.stderr)
                 if result.returncode != 0:
                     raise RuntimeError(f"Upload failed: {result.stderr.decode()}")
-            except FileNotFoundError as e:
-                if self.password and "sshpass" in str(e):
-                    raise RuntimeError(
-                        "sshpass not found. Install it with: "
-                        "apt install sshpass (Debian/Ubuntu), "
-                        "brew install hudochenkov/sshpass/sshpass (macOS), "
-                        "or set up SSH key authentication instead."
-                    )
-                raise RuntimeError("SSH client not found. Install openssh-client.")
             except subprocess.TimeoutExpired:
                 raise RuntimeError(f"SSH upload timed out after {timeout}s")
             finally:
+                if source is not None:
+                    source.close()
                 self._trace_finish(trace, operation, returncode, output_bytes)
 
     def check_connection(self) -> bool:

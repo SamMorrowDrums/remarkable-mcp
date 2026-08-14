@@ -4670,6 +4670,22 @@ class TestSSHKeyAuth:
         assert "BatchMode=yes" not in argv
         assert "IdentitiesOnly=yes" not in argv
 
+    def test_upload_missing_local_file_is_not_reported_as_missing_ssh(self, monkeypatch, tmp_path):
+        import subprocess as subprocess_mod
+
+        from remarkable_mcp.ssh import SSHClient
+
+        run = Mock(side_effect=AssertionError("SSH must not start for a missing source"))
+        monkeypatch.setattr(subprocess_mod, "run", run)
+        missing = tmp_path / "missing.rm"
+
+        with pytest.raises(FileNotFoundError) as exc:
+            SSHClient()._upload_file(str(missing), "/home/root/remote.rm")
+
+        assert exc.value.filename == str(missing)
+        assert "SSH client not found" not in str(exc.value)
+        run.assert_not_called()
+
     def test_create_ssh_client_reads_key_env(self, monkeypatch):
         from remarkable_mcp.ssh import create_ssh_client
 
@@ -5267,6 +5283,22 @@ class TestCanvasRegisteredByDefault:
 class TestCLIFlags:
     """CLI flag wiring for the write/read-only gate."""
 
+    def test_register_does_not_print_saved_token(self, capsys):
+        from remarkable_mcp import cli
+
+        token = '{"devicetoken": "secret-value"}'
+        with (
+            patch.object(sys, "argv", ["remarkable-mcp", "--register", "one-time-code"]),
+            patch("remarkable_mcp.api.register_and_get_token", return_value=token),
+        ):
+            cli.main()
+
+        output = capsys.readouterr().out
+        assert "Registration complete." in output
+        assert "~/.rmapi" in output
+        assert "secret-value" not in output
+        assert "REMARKABLE_TOKEN" not in output
+
     def test_write_and_read_only_mutually_exclusive(self):
         """Passing both --write and --read-only is an argparse error (exit 2)."""
         from remarkable_mcp.cli import main
@@ -5340,7 +5372,7 @@ class TestCLIFlags:
             patch.object(
                 sys,
                 "argv",
-                ["remarkable-mcp", "--http", "--host", "0.0.0.0", "--port", "9000"],
+                ["remarkable-mcp", "--http", "--host", "192.0.2.10", "--port", "9000"],
             ),
             patch("remarkable_mcp.server.run") as mock_run,
         ):
@@ -5348,14 +5380,28 @@ class TestCLIFlags:
 
         mock_run.assert_called_once_with(
             transport="streamable-http",
-            host="0.0.0.0",
+            host="192.0.2.10",
             port=9000,
         )
         warning = capsys.readouterr().err
         assert "WARNING" in warning
         assert "no authentication" in warning
         assert "including writes" in warning
-        assert "matching '0.0.0.0'" in warning
+        assert "matching '192.0.2.10'" in warning
+
+    @pytest.mark.parametrize("host", ["0.0.0.0", "::", "[::]"])
+    def test_http_rejects_wildcard_binding(self, host):
+        from remarkable_mcp import cli
+
+        with (
+            patch.object(sys, "argv", ["remarkable-mcp", "--http", "--host", host]),
+            patch("remarkable_mcp.server.run") as mock_run,
+            pytest.raises(SystemExit) as exc,
+        ):
+            cli.main()
+
+        assert exc.value.code == 2
+        mock_run.assert_not_called()
 
     def test_default_transport_security_requires_proxy_header_rewrite(self):
         from mcp.server.transport_security import TransportSecurityMiddleware
@@ -5368,29 +5414,36 @@ class TestCLIFlags:
         assert middleware._validate_origin("https://openwebui.example.com") is False
         assert middleware._validate_origin(None) is True
 
-    def test_runtime_transport_security_matches_explicit_wildcard_host(self):
+    def test_runtime_transport_security_matches_explicit_non_loopback_host(self):
         from mcp.server.transport_security import TransportSecurityMiddleware
 
         import remarkable_mcp.server as server
 
-        security = server._transport_security_for_host("0.0.0.0")
+        security = server._transport_security_for_host("192.0.2.10")
         with patch.object(mcp, "run") as mcp_run:
             server.run(
                 transport="streamable-http",
-                host="0.0.0.0",
+                host="192.0.2.10",
                 port=9000,
             )
         mcp_run.assert_called_once_with(
             transport="streamable-http",
-            host="0.0.0.0",
+            host="192.0.2.10",
             port=9000,
             transport_security=security,
         )
         middleware = TransportSecurityMiddleware(security)
-        assert middleware._validate_host("0.0.0.0:9000") is True
-        assert middleware._validate_origin("http://0.0.0.0:3000") is True
+        assert middleware._validate_host("192.0.2.10:9000") is True
+        assert middleware._validate_origin("http://192.0.2.10:3000") is True
         assert middleware._validate_host("mcp.example.com") is False
         assert middleware._validate_origin("https://openwebui.example.com") is False
+
+    @pytest.mark.parametrize("host", ["0.0.0.0", "::", "[::]"])
+    def test_transport_security_rejects_wildcard_host(self, host):
+        from remarkable_mcp.server import _transport_security_for_host
+
+        with pytest.raises(ValueError, match="Wildcard"):
+            _transport_security_for_host(host)
 
     def test_read_only_instructions_do_not_advertise_markdown_writeback(self):
         from remarkable_mcp.server import _build_instructions
@@ -5539,7 +5592,8 @@ class TestCanvasWrite:
             mock_restart.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_happy_path_appends_and_backs_up(self):
+    @pytest.mark.parametrize("defer_restart", [False, True])
+    async def test_happy_path_appends_and_backs_up(self, defer_restart):
         """Strokes are appended, the pristine original is backed up once, xochitl restarts."""
         import remarkable_mcp.strokes as strokes_mod
         import remarkable_mcp.write_tools as wt
@@ -5599,6 +5653,7 @@ class TestCanvasWrite:
                         }
                     ],
                     "ui_submitted": True,
+                    "defer_restart": defer_restart,
                 },
             )
             data = json.loads(result.content[0].text)
@@ -5609,7 +5664,12 @@ class TestCanvasWrite:
             assert data["paper_size"] == [1404, 1872]
             assert data["ui_submitted"] is True
             assert data["created_overlay"] is False
-            mock_restart.assert_called_once()
+            assert data["refresh_pending"] is defer_restart
+            if defer_restart:
+                mock_restart.assert_not_called()
+                assert "remarkable_refresh" in data["_hint"]
+            else:
+                mock_restart.assert_called_once()
             # Pristine original backed up, then the appended bytes written.
             bak = f"{wt.XOCHITL_PATH}/doc-abc/page-1.rm.bak"
             rm = f"{wt.XOCHITL_PATH}/doc-abc/page-1.rm"
@@ -5670,7 +5730,8 @@ class TestCanvasWrite:
             assert "caveat" in data and "EPUB" in data["caveat"]
 
     @pytest.mark.asyncio
-    async def test_add_page_appends_blank_page(self):
+    @pytest.mark.parametrize("defer_restart", [False, True])
+    async def test_add_page_appends_blank_page(self, defer_restart):
         """method="add_page" uploads a blank .rm and grows the notebook's .content."""
         import remarkable_mcp.write_tools as wt
 
@@ -5707,13 +5768,23 @@ class TestCanvasWrite:
             patch.object(wt, "_invalidate_client_cache", lambda c: None),
         ):
             result = await _call_tool(
-                "remarkable_author", {"method": "add_page", "document": "Sketchbook"}
+                "remarkable_author",
+                {
+                    "method": "add_page",
+                    "document": "Sketchbook",
+                    "defer_restart": defer_restart,
+                },
             )
             data = json.loads(result.content[0].text)
             assert data["added"] is True
             assert data["page_added"] == 2
             assert data["total_pages"] == 2
-            mock_restart.assert_called_once()
+            assert data["refresh_pending"] is defer_restart
+            if defer_restart:
+                mock_restart.assert_not_called()
+                assert "remarkable_refresh" in data["_hint"]
+            else:
+                mock_restart.assert_called_once()
             assert any(p.endswith(".rm") for p in writes)
             assert contents["doc-abc"]["pageCount"] == 2
             pages = contents["doc-abc"]["cPages"]["pages"]
@@ -5748,7 +5819,8 @@ class TestCanvasWrite:
             assert data["_error"]["type"] == "not_a_notebook"
 
     @pytest.mark.asyncio
-    async def test_create_document_blank(self):
+    @pytest.mark.parametrize("defer_restart", [False, True])
+    async def test_create_document_blank(self, defer_restart):
         """method="create_document" scaffolds a notebook (.rm + .content + .metadata)."""
         import remarkable_mcp.write_tools as wt
 
@@ -5769,7 +5841,12 @@ class TestCanvasWrite:
             patch.object(wt, "_invalidate_client_cache", lambda c: None),
         ):
             result = await _call_tool(
-                "remarkable_author", {"method": "create_document", "name": "My notes"}
+                "remarkable_author",
+                {
+                    "method": "create_document",
+                    "name": "My notes",
+                    "defer_restart": defer_restart,
+                },
             )
             data = json.loads(result.content[0].text)
             assert data["created"] is True
@@ -5783,7 +5860,12 @@ class TestCanvasWrite:
             assert metas[uid]["visibleName"] == "My notes"
             assert metas[uid]["type"] == "DocumentType"
             assert any(p.endswith(".rm") for p in writes)
-            mock_restart.assert_called_once()
+            assert data["refresh_pending"] is defer_restart
+            if defer_restart:
+                mock_restart.assert_not_called()
+                assert "remarkable_refresh" in data["_hint"]
+            else:
+                mock_restart.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_create_document_with_text_seeds_first_page(self):

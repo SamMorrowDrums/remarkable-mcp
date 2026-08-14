@@ -1,104 +1,63 @@
-# Future Plans & Ideas
+# Future Work
 
-This document outlines potential future features for remarkable-mcp. These are ideas under consideration, not commitments.
+This file summarizes accepted problem areas. GitHub issues contain the current
+scope and acceptance criteria.
 
-> **Track progress:** See open [enhancement issues](https://github.com/SamMorrowDrums/remarkable-mcp/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement) on GitHub.
+## Near-term work
 
-### Write Support ([#24](https://github.com/SamMorrowDrums/remarkable-mcp/issues/24))
+### SSH reliability
 
-Write tools (upload, create folders, move, rename, delete) are now enabled by default — pass `--read-only` to disable them. Further ideas under consideration:
+Track intermittent large-library SSH failures in
+[#157](https://github.com/SamMorrowDrums/remarkable-mcp/issues/157).
 
-- **Create documents** — Create new notebooks or upload PDFs
-- **Sync from Obsidian** — Push markdown notes to reMarkable as PDFs
-- **Template support** — Apply templates when creating notebooks
-- **Folder management** — Create, rename, move folders
+### Cloud authoring
 
-Write support requires careful consideration of:
-- Sync conflicts with reMarkable's own sync
-- Data safety and backup
-- API stability
+Add native notebook creation to cloud mode before considering page mutation.
+See [#118](https://github.com/SamMorrowDrums/remarkable-mcp/issues/118).
 
-### Additional OCR Providers ([#25](https://github.com/SamMorrowDrums/remarkable-mcp/issues/25))
+### Export
 
-Google Vision works well, but more options would be valuable:
+Provide reusable PDF and Markdown export for one document, then add folder and
+filter batching. See
+[#27](https://github.com/SamMorrowDrums/remarkable-mcp/issues/27).
 
-| Provider | Status | Notes |
-|----------|--------|-------|
-| Google Vision | ✅ Implemented | Excellent handwriting recognition |
-| Tesseract | ✅ Implemented | Offline fallback, poor for handwriting |
-| **Microsoft Azure** | 🔮 Planned | Competitive handwriting OCR |
-| **Mistral** | 🔮 Planned | Open-weight models with vision |
-| **Claude Vision** | 🔮 Possible | Direct integration with Claude |
-| **Local LLaVA** | 🔮 Possible | Fully offline, privacy-focused |
+## Search and OCR
 
-The goal is **BYOK (Bring Your Own Key)** — let users choose their preferred provider.
+### Persistent indexing
 
-### Enhanced Search ([#26](https://github.com/SamMorrowDrums/remarkable-mcp/issues/26))
+Build a local full-text index with incremental updates. Semantic search should
+remain optional and use the same indexed chunks. See
+[#26](https://github.com/SamMorrowDrums/remarkable-mcp/issues/26).
 
-- **Full-text indexing** — Index all documents for instant search
-- **Semantic search** — Find documents by meaning, not just keywords
-- **Cross-document search** — Search annotations across your entire library
+### Persistent cache
 
-### Obsidian Integration
+Cache OCR and extracted content with bounded storage, explicit invalidation, and
+corruption recovery. See
+[#28](https://github.com/SamMorrowDrums/remarkable-mcp/issues/28).
 
-Deep integration with Obsidian vaults:
+### OCR providers
 
-- **Bi-directional sync** — Notes flow between reMarkable and Obsidian
-- **Link resolution** — reMarkable documents as Obsidian attachments
-- **Daily notes** — Sync reMarkable journals to Obsidian daily notes
+Unify the existing sampling, Google Vision, and Tesseract backends behind one
+provider interface before adding more integrations. See
+[#25](https://github.com/SamMorrowDrums/remarkable-mcp/issues/25).
 
-### Export Features ([#27](https://github.com/SamMorrowDrums/remarkable-mcp/issues/27))
+## Workflow integrations
 
-- **PDF export** — Export notebooks as PDFs
-- **Markdown export** — Convert notebooks to markdown
-- **Batch export** — Export entire folders
+### Processed-page marker
 
-## Community Requests
+Define an idempotent on-device marker for pages that have already been exported
+or reviewed. See
+[#24](https://github.com/SamMorrowDrums/remarkable-mcp/issues/24).
 
-Have an idea? Open an issue on GitHub with the `enhancement` label.
+### Obsidian synchronization
 
-Popular requests we're tracking:
+Define stable identity, path mapping, conflict handling, and dry-run behavior
+before implementing synchronization. See
+[#158](https://github.com/SamMorrowDrums/remarkable-mcp/issues/158).
 
-1. **Handwriting-to-text conversion** — Beyond OCR, actual handwriting recognition
-2. **Tag support** — Organize documents with tags
-3. **Favorites** — Quick access to frequently-used documents
-4. **Version history** — Access previous versions of documents
+## Non-goals
 
-## Technical Improvements
-
-### Performance ([#28](https://github.com/SamMorrowDrums/remarkable-mcp/issues/28))
-
-- **Parallel resource registration** — Faster startup for large libraries
-- **Incremental sync** — Only fetch changed documents
-- **Persistent cache** — Cache OCR results across sessions
-
-### Reliability ([#29](https://github.com/SamMorrowDrums/remarkable-mcp/issues/29))
-
-- **Automatic reconnection** — Recover from dropped SSH connections
-- **Retry logic** — Handle transient API failures
-- **Health checks** — Proactive connection monitoring
-
-### Developer Experience
-
-- **TypeScript types** — Full type definitions for MCP clients
-- **Example integrations** — Sample code for common use cases
-- **Plugin system** — Extensible architecture for custom features
-
-## Contributing
-
-Interested in implementing any of these features? We welcome contributions!
-
-1. Check existing issues for the feature
-2. Open a discussion if it's a major change
-3. Fork, implement, and submit a PR
-
-See [Development Guide](development.md) for setup instructions.
-
-## Non-Goals
-
-Some things we're explicitly **not** planning:
-
-- **reMarkable firmware modifications** — We work with the official software
-- **Bypassing DRM** — We respect content protection
-- **Subscription circumvention** — Cloud API requires Connect subscription
-- **Real-time sync** — We're a query tool, not a sync service
+- Firmware modification
+- DRM bypass
+- Subscription circumvention
+- Silent overwrite or deletion during synchronization

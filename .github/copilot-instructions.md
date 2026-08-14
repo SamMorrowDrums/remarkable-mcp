@@ -53,7 +53,7 @@ uv run pytest -v
 For specific test patterns:
 ```bash
 # Run specific test class
-uv run pytest test_server.py -v -k "TestClassName"
+uv run pytest -v -k "TestClassName"
 
 # Run with coverage
 uv run pytest -v --cov=remarkable_mcp
@@ -108,19 +108,27 @@ uv run ruff format .
 ```
 remarkable-mcp/
 ├── server.py              # Entry point (backwards compatible)
-├── remarkable_mcp/        # Main package
-│   ├── __init__.py
-│   ├── server.py          # MCPServer initialization
-│   ├── api.py             # reMarkable Cloud API helpers
-│   ├── extract.py         # Text extraction utilities
-│   ├── responses.py       # Response formatting
-│   ├── tools.py           # MCP tools with annotations
-│   ├── resources.py       # MCP resources
-│   └── prompts.py         # MCP prompts
-├── test_server.py         # Test suite
+├── remarkable_mcp/
+│   ├── server.py          # MCPServer and transports
+│   ├── tools.py           # Read and render tools
+│   ├── write_tools.py     # Write and authoring tools
+│   ├── api.py             # Transport selection
+│   ├── sync.py            # Cloud client
+│   ├── ssh.py             # SSH client
+│   ├── usb_web.py         # USB web client
+│   ├── local_dir.py       # Desktop cache client
+│   ├── extract.py         # Extraction and rendering
+│   └── app_canvas.py      # MCP Apps canvas
+├── test_server.py
+├── test_mcp_v2.py        # Modern/legacy protocol compatibility
+├── test_page_mapping.py
+├── test_local_dir.py
+├── test_integration.py
+├── docs/
+├── smoke/
+├── server.json
 ├── pyproject.toml         # Project config and dependencies
 ├── README.md              # User documentation (KEEP UPDATED)
-├── RESEARCH_NOTES.md      # Design decisions (do not commit)
 └── .github/
     ├── copilot-instructions.md  # This file
     └── workflows/
@@ -138,9 +146,9 @@ remarkable-mcp/
 5. **Dependencies** - Note any new required system dependencies (e.g., Tesseract for OCR)
 
 When modifying `server.py`:
-- If you add a new tool → Update README tools table and examples
-- If you change tool parameters → Update README examples
-- If you add new dependencies → Update README installation section
+- If you add a tool, update the README tool table and examples.
+- If you change tool parameters, update examples and `docs/tools.md`.
+- If you add a dependency, update installation and development docs.
 
 ## MCP Tool Design Principles
 
@@ -173,14 +181,24 @@ def remarkable_example(param: str) -> str:
 ## Key Dependencies
 
 - `mcp` - Model Context Protocol SDK
-- `requests` - HTTP client for reMarkable Cloud API
-- `rmscene` - Native .rm file parser for text extraction (v3+ format)
-- `pytesseract` - OCR for handwritten content
-- `rmc` - reMarkable file conversion utilities
+- `requests` - HTTP client
+- `rmscene` - Native `.rm` parser
+- `pymupdf` - PDF and SVG rendering
+- `Pillow` - Image processing
+- `markdown-it-py` - Markdown parsing
+- `ebooklib` and `beautifulsoup4` - EPUB extraction
+- `pytesseract` - Optional local OCR
 
 ## Environment Variables
 
-- `REMARKABLE_TOKEN` - Authentication token for reMarkable Cloud
+- `REMARKABLE_TOKEN` - Optional cloud credential
+- `REMARKABLE_LOCAL_DIR` - Desktop cache or xochitl-style directory
+- `REMARKABLE_USB_HOST` - USB web URL
+- `REMARKABLE_SSH_HOST`, `REMARKABLE_SSH_USER`, `REMARKABLE_SSH_PORT` - SSH target
+- `REMARKABLE_SSH_KEY` - Explicit SSH private key
+- `REMARKABLE_READ_ONLY` - Disable write tools
+- `REMARKABLE_ROOT_PATH` - Scope access to one folder
+- `REMARKABLE_OCR_BACKEND` - OCR backend selection
 
 ## Testing Patterns
 

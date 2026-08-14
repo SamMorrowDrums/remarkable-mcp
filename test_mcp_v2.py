@@ -247,8 +247,9 @@ async def test_read_sampling_without_capability_skips_sample_render(monkeypatch)
     ("mode", "expected_version"),
     [("auto", "2026-07-28"), ("legacy", "2025-11-25")],
 )
+@pytest.mark.parametrize("permanent", [False, True])
 async def test_delete_confirmation_works_in_both_protocol_eras(
-    monkeypatch, mode: str, expected_version: str
+    monkeypatch, mode: str, expected_version: str, permanent: bool
 ):
     """A confirmed delete uses MRTR for modern clients and push for legacy."""
     for variable in (
@@ -271,6 +272,13 @@ async def test_delete_confirmation_works_in_both_protocol_eras(
         nonlocal confirmation_calls
         confirmation_calls += 1
         assert "Old Notes" in params.message
+        if permanent:
+            assert "irreversible" in params.message.lower()
+            assert "cannot be recovered" in params.message.lower()
+            assert "trash" in params.message.lower()
+        else:
+            assert "moves it to the trash" in params.message.lower()
+            assert "irreversible" not in params.message.lower()
         return ElicitResult(action="accept", content={"confirm": True})
 
     loader_start, loader_stop = _without_background_loader()
@@ -280,10 +288,17 @@ async def test_delete_confirmation_works_in_both_protocol_eras(
         patch("remarkable_mcp.write_tools.get_rmapi", return_value=api_client),
     ):
         async with Client(mcp, mode=mode, elicitation_callback=confirm) as client:
-            result = await client.call_tool("remarkable_delete", {"document": "Old Notes"})
+            result = await client.call_tool(
+                "remarkable_delete",
+                {"document": "Old Notes", "permanent": permanent},
+            )
             assert client.protocol_version == expected_version
 
     payload = json.loads(result.content[0].text)
-    assert payload["deleted"] is True
     assert confirmation_calls == 1
-    api_client.delete.assert_called_once_with("doc-1")
+    if permanent:
+        assert payload["_error"]["type"] == "permanent_delete_unsupported"
+        api_client.delete.assert_not_called()
+    else:
+        assert payload["deleted"] is True
+        api_client.delete.assert_called_once_with("doc-1")
