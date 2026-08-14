@@ -403,3 +403,37 @@ class TestExportResourceStore:
             assert replacement.resource.filename == "replacement.pdf"
             with pytest.raises(FileNotFoundError, match="not found or has expired"):
                 racing_read.result(timeout=1)
+
+    def test_permission_error_during_eviction_does_not_fail_other_operations(self, tmp_path):
+        store = ExportResourceStore(ttl_seconds=60, max_entries=1, root=tmp_path)
+        locked = store.publish(
+            filename="locked.md",
+            output_format="markdown",
+            writer=lambda path: path.write_text("locked"),
+        )
+        locked_path = next(tmp_path.rglob("locked.md"))
+        original_unlink = Path.unlink
+
+        def windows_locked_unlink(path: Path, *args, **kwargs):
+            if path == locked_path:
+                raise PermissionError("file is open by another process")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", windows_locked_unlink):
+            replacement = store.publish(
+                filename="replacement.md",
+                output_format="markdown",
+                writer=lambda path: path.write_text("replacement"),
+            )
+
+            assert store.read_text(replacement.resource.export_id, "markdown") == "replacement"
+            with pytest.raises(FileNotFoundError, match="not found or has expired"):
+                store.read_text(locked.resource.export_id, "markdown")
+
+            # Shutdown cleanup is best-effort while Windows still denies unlink.
+            store.cleanup()
+            assert locked_path.is_file()
+
+        # A later cleanup pass removes the deferred path once the handle is free.
+        store.cleanup()
+        assert list(tmp_path.rglob("*")) == []

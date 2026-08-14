@@ -157,12 +157,15 @@ def write_rendered_pdf_export(
 
             image_bytes = rendered.image
             if image_bytes is not None:
+                page_count_before = len(output)
                 try:
                     previous_size = _page_size(image_bytes)
                     page = output.new_page(width=previous_size[0], height=previous_size[1])
                     page.insert_image(page.rect, stream=image_bytes)
                     continue
                 except Exception as exc:
+                    while len(output) > page_count_before:
+                        output.delete_page(page_count_before)
                     rendered = RenderedPage(
                         page=rendered.page,
                         image=None,

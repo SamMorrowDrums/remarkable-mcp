@@ -232,6 +232,44 @@ class TestExportToolContract:
         assert _resource_link(result)
 
     @pytest.mark.asyncio
+    async def test_insert_image_failure_yields_one_placeholder_resource_page(self):
+        import remarkable_mcp.tools as tool_module
+
+        document = _document("Insertion Failure", "insert-failure-id")
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        client.download.return_value = _annotated_pdf_archive(document.ID)
+
+        with (
+            patch.object(tool_module, "get_rmapi", return_value=client),
+            patch.object(tool_module, "get_file_type", return_value="pdf"),
+            patch.object(
+                fitz.Page,
+                "insert_image",
+                side_effect=RuntimeError("synthetic insert_image failure"),
+            ),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_export",
+                {"document": document.VissibleName, "output_format": "pdf"},
+            )
+
+        data = _json_result(result)
+        link = _resource_link(result)
+        assert data["status"] == "partial"
+        assert data["pages"] == 1
+        assert data["failed_pages"] == [1]
+        assert "synthetic insert_image failure" in "\n".join(data["warnings"])
+
+        resource = await mcp.read_resource(link.uri)
+        with fitz.open(stream=resource[0].content, filetype="pdf") as exported:
+            assert len(exported) == 1
+            placeholder = exported[0].get_text()
+            assert "Physical page 1 could not be rendered" in placeholder
+            assert "synthetic insert_image" in placeholder
+            assert "failure" in placeholder
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "arguments",
         [

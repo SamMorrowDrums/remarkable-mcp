@@ -76,6 +76,7 @@ class ExportResourceStore:
         self._configured_root = root
         self._temporary_directory: TemporaryDirectory[str] | None = None
         self._records: OrderedDict[str, _ExportRecord] = OrderedDict()
+        self._deferred_cleanup: set[Path] = set()
         self._clock = monotonic_clock
         self._utcnow = utcnow or (lambda: datetime.now(timezone.utc))
         self._lock = threading.RLock()
@@ -103,15 +104,38 @@ class ExportResourceStore:
             leaf = stem.rstrip() + suffix
         return leaf
 
-    @staticmethod
-    def _remove_record(record: _ExportRecord) -> None:
-        record.path.unlink(missing_ok=True)
+    def _remove_record(self, record: _ExportRecord) -> None:
+        try:
+            record.path.unlink(missing_ok=True)
+        except OSError:
+            # Windows cannot unlink a file while another thread has it open.
+            # Eviction must still succeed; retry this path on a later prune or
+            # during shutdown cleanup.
+            self._deferred_cleanup.add(record.path)
+            return
         try:
             record.path.parent.rmdir()
-        except OSError:
+        except FileNotFoundError:
             pass
+        except OSError:
+            self._deferred_cleanup.add(record.path)
+
+    def _retry_deferred_cleanup_locked(self) -> None:
+        for path in tuple(self._deferred_cleanup):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
+            try:
+                path.parent.rmdir()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                continue
+            self._deferred_cleanup.discard(path)
 
     def _prune_locked(self, now: float, *, reserve_slot: bool = False) -> None:
+        self._retry_deferred_cleanup_locked()
         expired = [
             export_id
             for export_id, record in self._records.items()
@@ -173,7 +197,10 @@ class ExportResourceStore:
                 self._records[export_id] = record
             return PublishedExport(resource=resource, result=result)
         except Exception:
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
             try:
                 export_dir.rmdir()
             except OSError:
@@ -209,9 +236,15 @@ class ExportResourceStore:
             for record in self._records.values():
                 self._remove_record(record)
             self._records.clear()
+            self._retry_deferred_cleanup_locked()
             if self._temporary_directory is not None:
-                self._temporary_directory.cleanup()
-                self._temporary_directory = None
+                try:
+                    self._temporary_directory.cleanup()
+                except OSError:
+                    pass
+                else:
+                    self._temporary_directory = None
+                    self._deferred_cleanup.clear()
 
 
 export_store = ExportResourceStore()
