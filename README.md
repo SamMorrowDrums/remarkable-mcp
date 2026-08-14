@@ -11,7 +11,7 @@ Your reMarkable tablet is a powerful tool for thinking, note-taking, and researc
 - **Full library access** — Browse folders, search documents, read any file
 - **Typed text extraction** — Native support for Type Folio and typed annotations
 - **Handwriting OCR** — Convert handwritten notes to searchable text
-- **PDF & EPUB support** — Extract text from documents, plus your annotations
+- **PDF & EPUB support** — Extract text plus an index of annotated pages, highlights, and notes
 - **Robust page rendering** — Renders pages locally and automatically falls back to a source PDF when the local stroke renderer can't (USB/SSH use the tablet's own PDF export; cloud uses the original source PDF), so images work across firmware versions and even without system graphics libraries installed
 - **Smart search** — Find content across your entire library
 - **Second brain integration** — Use with Obsidian, note-taking apps, or any AI workflow

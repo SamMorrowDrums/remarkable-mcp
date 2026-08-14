@@ -663,6 +663,7 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
         get_background_color,
         get_document_file_type,
         get_document_page_count,
+        render_mapped_pdf_page_from_document_zip,
         render_page_full_page_from_document_zip,
         render_tablet_pdf_page_to_png,
     )
@@ -751,11 +752,15 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
         else:
             png_data = None
         if png_data is None:
-            pdf_bytes = await run_blocking(download_raw_file, client, target_doc, "pdf")
-            if pdf_bytes:
-                png_data = await run_blocking(render_tablet_pdf_page_to_png, pdf_bytes, page)
-                if png_data is not None:
-                    render_source = "tablet_pdf"
+            png_data, has_source_pdf = await run_blocking(
+                render_mapped_pdf_page_from_document_zip, tmp_path, page
+            )
+            if png_data is None and not has_source_pdf:
+                pdf_bytes = await run_blocking(download_raw_file, client, target_doc, "pdf")
+                if pdf_bytes:
+                    png_data = await run_blocking(render_tablet_pdf_page_to_png, pdf_bytes, page)
+            if png_data is not None:
+                render_source = "tablet_pdf"
 
         if png_data is None:
             return make_error(
