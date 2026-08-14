@@ -332,7 +332,7 @@ remarkable_status()
 | `page` | int | `1` | Page number (1-indexed) |
 | `background` | string | `"#FBFBFB"` | Background color (hex RGB or RGBA) |
 | `output_format` | string | `"png"` | Output format: `"png"` or `"svg"` |
-| `include_ocr` | bool | `False` | Enable OCR on the image (uses sampling if configured) |
+| `include_ocr` | bool | `False` | Enable OCR on the image |
 | `compatibility` | bool | `False` | Return resource URI instead of embedded resource |
 | `render_merged` | bool | `False` | Composite an imported PDF page with its reMarkable annotations (PNG only) |
 
@@ -366,7 +366,7 @@ remarkable_image("Wireframe", output_format="svg")
 # SVG with custom background
 remarkable_image("Sketch", output_format="svg", background="#F0F0F0")
 
-# Enable OCR (uses sampling if configured, falls back to other backends)
+# Enable OCR
 remarkable_image("Handwritten Notes", include_ocr=True)
 
 # Compatibility mode: return resource URI instead of embedded resource
@@ -393,7 +393,8 @@ When `compatibility=True`, returns a JSON object with the resource URI:
 }
 ```
 
-When `include_ocr=True`, OCR text is included in the response (uses sampling if configured).
+When `include_ocr=True`, OCR text is included in the response. Google Vision is
+used when configured; otherwise OCR runs locally with Tesseract.
 
 ### Notes
 

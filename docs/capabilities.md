@@ -21,7 +21,6 @@ from mcp.server.mcpserver import Context
 
 from remarkable_mcp.capabilities import (
     client_supports_elicitation,
-    client_supports_sampling,
     get_client_capabilities,
     get_client_info,
 )
@@ -29,8 +28,6 @@ from remarkable_mcp.capabilities import (
 
 @mcp.tool()
 async def my_tool(ctx: Context) -> str:
-    if client_supports_sampling(ctx):
-        ...
     if client_supports_elicitation(ctx):
         ...
 
@@ -42,7 +39,6 @@ async def my_tool(ctx: Context) -> str:
 | Function | Description |
 |----------|-------------|
 | `get_client_capabilities(ctx)` | Return the request's `ClientCapabilities` |
-| `client_supports_sampling(ctx)` | Check for LLM sampling |
 | `client_supports_elicitation(ctx)` | Check for form/user elicitation |
 | `client_supports_roots(ctx)` | Check for filesystem roots |
 | `client_supports_experimental(ctx, feature)` | Check an experimental capability |
@@ -53,20 +49,19 @@ async def my_tool(ctx: Context) -> str:
 
 ## Multi-round compatibility
 
-MCP `2026-07-28` removes server-initiated requests. Sampling, roots, and
-elicitation therefore cannot be sent back over a modern request's transport.
-MCP SDK 2.x provides `Resolve` dependencies with `Sample`, `ListRoots`, and
-`Elicit` results:
+MCP `2026-07-28` removes server-initiated requests. Features such as sampling,
+roots, and elicitation therefore cannot be sent back over a modern request's
+transport. MCP SDK 2.x provides `Resolve` dependencies with multi-round input
+results, including `Elicit`:
 
 - On a modern connection, the server returns an `InputRequiredResult`; the
   client answers it and retries the original tool with sealed `requestState`.
 - On a legacy connection, the same resolver uses the established
   server-to-client request.
 
-remarkable-mcp uses this compatibility layer for sampling OCR and destructive
-delete confirmation. Tool schemas do not expose the hidden resolver parameters.
-If the client does not advertise the required capability, OCR falls back to its
-configured local/provider backend and delete fails closed.
+remarkable-mcp uses this compatibility layer for destructive delete confirmation.
+Tool schemas do not expose the hidden resolver parameters. If the client does not
+advertise elicitation, delete fails closed.
 
 `MCPServer` protects multi-round request state with a process-local key by
 default. This is appropriate for stdio and the supported single-process HTTP

@@ -37,8 +37,8 @@ corruption recovery. See
 
 ### OCR providers
 
-Unify the existing sampling, Google Vision, and Tesseract backends behind one
-provider interface before adding more integrations. See
+Unify the existing Google Vision and Tesseract backends behind one provider
+interface before adding more integrations. See
 [#25](https://github.com/SamMorrowDrums/remarkable-mcp/issues/25).
 
 ## Workflow integrations

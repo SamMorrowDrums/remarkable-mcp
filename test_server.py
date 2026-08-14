@@ -745,7 +745,8 @@ class TestRemarkableRead:
 
         # This should NOT raise "the JSON object must be str, bytes or bytearray, not coroutine"
         # Previously failed because remarkable_read() was called without 'await'
-        result = await _call_tool("remarkable_read", {"document": "Quick sheets"})
+        with patch("remarkable_mcp.tools.get_file_type", return_value="notebook"):
+            result = await _call_tool("remarkable_read", {"document": "Quick sheets"})
         data = json.loads(result.content[0].text)
 
         # Should return a valid response (not a coroutine error)
@@ -754,6 +755,7 @@ class TestRemarkableRead:
             or data["_error"]["type"] != "read_failed"
             or ("coroutine" not in data["_error"].get("message", ""))
         ), f"Got coroutine error: {data}"
+        assert data["_ocr_auto_enabled"] is True
 
     @pytest.mark.asyncio
     @patch("remarkable_mcp.tools.extract_text_from_document_zip")
@@ -946,6 +948,104 @@ class TestRemarkableImage:
         compatible_data = json.loads(compatible.content[0].text)
         assert compatible_data["mime_type"] == "image/png"
         assert compatible_data["image_base64"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("backend", "expected_backend"),
+        [("google", "google"), ("tesseract", "tesseract")],
+    )
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_image_ocr_uses_configured_backend(
+        self,
+        mock_get_rmapi,
+        mock_document,
+        monkeypatch,
+        backend,
+        expected_backend,
+    ):
+        """Image OCR uses only the selected provider."""
+        from remarkable_mcp import notebooks
+
+        document_zip = _make_notebook_zip(notebooks.page_rm_bytes("OCR source"))
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_document.is_folder = False
+        mock_client.get_meta_items.return_value = [mock_document]
+        mock_client.download.return_value = document_zip
+        monkeypatch.setenv("REMARKABLE_OCR_BACKEND", backend)
+
+        with (
+            patch(
+                "remarkable_mcp.tools._ocr_png_google_vision",
+                return_value="google text",
+            ) as google_ocr,
+            patch(
+                "remarkable_mcp.tools._ocr_png_tesseract",
+                return_value="tesseract text",
+            ) as tesseract_ocr,
+        ):
+            result = await _call_tool(
+                "remarkable_image",
+                {
+                    "document": "Test Document",
+                    "include_ocr": True,
+                    "compatibility": True,
+                },
+            )
+
+        data = json.loads(result.content[0].text)
+        assert data["ocr_backend"] == expected_backend
+        assert data["ocr_text"] == f"{expected_backend} text"
+        if backend == "google":
+            google_ocr.assert_called_once()
+            tesseract_ocr.assert_not_called()
+        else:
+            google_ocr.assert_not_called()
+            tesseract_ocr.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_image_google_ocr_failure_falls_back_to_tesseract(
+        self,
+        mock_get_rmapi,
+        mock_document,
+        monkeypatch,
+    ):
+        """Explicit Google OCR remains usable when Google is unavailable."""
+        from remarkable_mcp import notebooks
+
+        document_zip = _make_notebook_zip(notebooks.page_rm_bytes("OCR source"))
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_document.is_folder = False
+        mock_client.get_meta_items.return_value = [mock_document]
+        mock_client.download.return_value = document_zip
+        monkeypatch.setenv("REMARKABLE_OCR_BACKEND", "google")
+
+        with (
+            patch(
+                "remarkable_mcp.tools._ocr_png_google_vision",
+                return_value=None,
+            ) as google_ocr,
+            patch(
+                "remarkable_mcp.tools._ocr_png_tesseract",
+                return_value="tesseract fallback",
+            ) as tesseract_ocr,
+        ):
+            result = await _call_tool(
+                "remarkable_image",
+                {
+                    "document": "Test Document",
+                    "include_ocr": True,
+                    "compatibility": True,
+                },
+            )
+
+        data = json.loads(result.content[0].text)
+        assert data["ocr_backend"] == "tesseract"
+        assert data["ocr_text"] == "tesseract fallback"
+        google_ocr.assert_called_once()
+        tesseract_ocr.assert_called_once()
 
 
 # =============================================================================
@@ -1611,46 +1711,18 @@ class TestCapabilityChecking:
 
     def test_get_client_capabilities_with_valid_context(self):
         """Test get_client_capabilities returns capabilities when available."""
-        from mcp.types import ClientCapabilities, SamplingCapability
+        from mcp.types import ClientCapabilities, ElicitationCapability
 
         from remarkable_mcp.capabilities import get_client_capabilities
 
-        mock_caps = ClientCapabilities(sampling=SamplingCapability())
+        mock_caps = ClientCapabilities(elicitation=ElicitationCapability())
 
         mock_ctx = Mock()
         mock_ctx.client_capabilities = mock_caps
 
         result = get_client_capabilities(mock_ctx)
         assert result is not None
-        assert result.sampling is not None
-
-    def test_client_supports_sampling_true(self):
-        """Test client_supports_sampling returns True when sampling available."""
-        from mcp.types import ClientCapabilities, SamplingCapability
-
-        from remarkable_mcp.capabilities import client_supports_sampling
-
-        mock_caps = ClientCapabilities(sampling=SamplingCapability())
-
-        mock_ctx = Mock()
-        mock_ctx.client_capabilities = mock_caps
-
-        result = client_supports_sampling(mock_ctx)
-        assert result is True
-
-    def test_client_supports_sampling_false(self):
-        """Test client_supports_sampling returns False when sampling not available."""
-        from mcp.types import ClientCapabilities
-
-        from remarkable_mcp.capabilities import client_supports_sampling
-
-        mock_caps = ClientCapabilities(sampling=None)
-
-        mock_ctx = Mock()
-        mock_ctx.client_capabilities = mock_caps
-
-        result = client_supports_sampling(mock_ctx)
-        assert result is False
+        assert result.elicitation is not None
 
     def test_client_supports_elicitation(self):
         """Test client_supports_elicitation."""
@@ -1773,7 +1845,6 @@ class TestCapabilityChecking:
             client_supports_elicitation,
             client_supports_experimental,
             client_supports_roots,
-            client_supports_sampling,
             get_client_capabilities,
             get_client_info,
             get_protocol_version,
@@ -1781,7 +1852,6 @@ class TestCapabilityChecking:
 
         # Verify all functions are callable
         assert callable(get_client_capabilities)
-        assert callable(client_supports_sampling)
         assert callable(client_supports_elicitation)
         assert callable(client_supports_roots)
         assert callable(client_supports_experimental)
@@ -1790,167 +1860,67 @@ class TestCapabilityChecking:
 
 
 # =============================================================================
-# Test Sampling OCR
+# Test OCR Backend Configuration
 # =============================================================================
 
 
-class TestSamplingOCR:
-    """Test sampling-based OCR functionality."""
+class TestOCRBackendConfiguration:
+    """Test OCR backend validation."""
 
-    def test_get_ocr_backend_default(self):
+    def test_get_ocr_backend_default(self, monkeypatch):
         """Test default OCR backend is auto."""
-        import os
+        from remarkable_mcp.extract import get_ocr_backend
 
-        from remarkable_mcp.sampling import get_ocr_backend
+        monkeypatch.delenv("REMARKABLE_OCR_BACKEND", raising=False)
+        assert get_ocr_backend() == "auto"
 
-        # Clear any env var
-        env_backup = os.environ.get("REMARKABLE_OCR_BACKEND")
-        if "REMARKABLE_OCR_BACKEND" in os.environ:
-            del os.environ["REMARKABLE_OCR_BACKEND"]
+    @pytest.mark.parametrize("backend", ["auto", "google", "tesseract"])
+    def test_get_ocr_backend_accepts_supported_values(self, monkeypatch, backend):
+        from remarkable_mcp.extract import get_ocr_backend
 
-        try:
-            result = get_ocr_backend()
-            assert result == "auto"
-        finally:
-            if env_backup is not None:
-                os.environ["REMARKABLE_OCR_BACKEND"] = env_backup
+        monkeypatch.setenv("REMARKABLE_OCR_BACKEND", backend.upper())
+        assert get_ocr_backend() == backend
 
-    def test_get_ocr_backend_sampling(self):
-        """Test OCR backend can be set to sampling."""
-        import os
+    def test_get_ocr_backend_migrates_legacy_value(self, monkeypatch, caplog):
+        from remarkable_mcp.extract import get_ocr_backend
 
-        from remarkable_mcp.sampling import get_ocr_backend
+        monkeypatch.setenv("REMARKABLE_OCR_BACKEND", "sampling")
+        assert get_ocr_backend() == "auto"
+        assert "has been removed" in caplog.text
 
-        env_backup = os.environ.get("REMARKABLE_OCR_BACKEND")
-        os.environ["REMARKABLE_OCR_BACKEND"] = "sampling"
+    def test_get_ocr_backend_falls_back_for_unknown_value(self, monkeypatch, caplog):
+        from remarkable_mcp.extract import get_ocr_backend
 
-        try:
-            result = get_ocr_backend()
-            assert result == "sampling"
-        finally:
-            if env_backup is not None:
-                os.environ["REMARKABLE_OCR_BACKEND"] = env_backup
-            elif "REMARKABLE_OCR_BACKEND" in os.environ:
-                del os.environ["REMARKABLE_OCR_BACKEND"]
+        monkeypatch.setenv("REMARKABLE_OCR_BACKEND", "unknown")
+        assert get_ocr_backend() == "auto"
+        assert "Unsupported REMARKABLE_OCR_BACKEND" in caplog.text
 
-    def test_should_use_sampling_ocr_false_when_not_configured(self):
-        """Test should_use_sampling_ocr returns False when not configured."""
-        import os
+    @pytest.mark.parametrize("backend", ["auto", "google"])
+    def test_google_handwriting_failure_falls_back_to_tesseract(
+        self,
+        monkeypatch,
+        backend,
+    ):
+        from remarkable_mcp import extract
 
-        from mcp.types import ClientCapabilities, SamplingCapability
+        monkeypatch.setenv("REMARKABLE_OCR_BACKEND", backend)
+        if backend == "auto":
+            monkeypatch.setenv("GOOGLE_VISION_API_KEY", "configured")
 
-        from remarkable_mcp.sampling import should_use_sampling_ocr
+        with (
+            patch.object(extract, "_ocr_google_vision", return_value=None) as google_ocr,
+            patch.object(
+                extract,
+                "_ocr_tesseract",
+                return_value=["tesseract fallback"],
+            ) as tesseract_ocr,
+        ):
+            result, used_backend = extract.extract_handwriting_ocr([Path("page.rm")])
 
-        env_backup = os.environ.get("REMARKABLE_OCR_BACKEND")
-        if "REMARKABLE_OCR_BACKEND" in os.environ:
-            del os.environ["REMARKABLE_OCR_BACKEND"]
-
-        try:
-            # Create mock context with sampling capability
-            mock_caps = ClientCapabilities(sampling=SamplingCapability())
-            mock_ctx = Mock()
-            mock_ctx.client_capabilities = mock_caps
-
-            # Should return False because backend is "auto", not "sampling"
-            result = should_use_sampling_ocr(mock_ctx)
-            assert result is False
-        finally:
-            if env_backup is not None:
-                os.environ["REMARKABLE_OCR_BACKEND"] = env_backup
-
-    def test_should_use_sampling_ocr_true_when_configured(self):
-        """Test should_use_sampling_ocr returns True when configured and client supports it."""
-        import os
-
-        from mcp.types import ClientCapabilities, SamplingCapability
-
-        from remarkable_mcp.sampling import should_use_sampling_ocr
-
-        env_backup = os.environ.get("REMARKABLE_OCR_BACKEND")
-        os.environ["REMARKABLE_OCR_BACKEND"] = "sampling"
-
-        try:
-            # Create mock context with sampling capability
-            mock_caps = ClientCapabilities(sampling=SamplingCapability())
-            mock_ctx = Mock()
-            mock_ctx.client_capabilities = mock_caps
-
-            result = should_use_sampling_ocr(mock_ctx)
-            assert result is True
-        finally:
-            if env_backup is not None:
-                os.environ["REMARKABLE_OCR_BACKEND"] = env_backup
-            elif "REMARKABLE_OCR_BACKEND" in os.environ:
-                del os.environ["REMARKABLE_OCR_BACKEND"]
-
-    def test_should_use_sampling_ocr_false_when_client_doesnt_support(self):
-        """Test should_use_sampling_ocr returns False when client doesn't support sampling."""
-        import os
-
-        from mcp.types import ClientCapabilities
-
-        from remarkable_mcp.sampling import should_use_sampling_ocr
-
-        env_backup = os.environ.get("REMARKABLE_OCR_BACKEND")
-        os.environ["REMARKABLE_OCR_BACKEND"] = "sampling"
-
-        try:
-            # Create mock context WITHOUT sampling capability
-            mock_caps = ClientCapabilities(sampling=None)
-            mock_ctx = Mock()
-            mock_ctx.client_capabilities = mock_caps
-
-            result = should_use_sampling_ocr(mock_ctx)
-            assert result is False
-        finally:
-            if env_backup is not None:
-                os.environ["REMARKABLE_OCR_BACKEND"] = env_backup
-            elif "REMARKABLE_OCR_BACKEND" in os.environ:
-                del os.environ["REMARKABLE_OCR_BACKEND"]
-
-    def test_ocr_system_prompt_structure(self):
-        """Test the OCR system prompt is properly structured."""
-        from remarkable_mcp.sampling import OCR_SYSTEM_PROMPT, OCR_USER_PROMPT
-
-        # Check that system prompt contains key instructions
-        assert "OCR" in OCR_SYSTEM_PROMPT
-        assert "ONLY" in OCR_SYSTEM_PROMPT
-        assert "[NO TEXT DETECTED]" in OCR_SYSTEM_PROMPT
-        assert "reMarkable" in OCR_SYSTEM_PROMPT
-
-        # Check user prompt is concise
-        assert "text" in OCR_USER_PROMPT.lower()
-        assert len(OCR_USER_PROMPT) < 200  # Should be short and focused
-
-    @pytest.mark.asyncio
-    async def test_ocr_via_sampling_returns_none_without_session(self):
-        """Test ocr_via_sampling returns None when session is not available."""
-        from remarkable_mcp.sampling import ocr_via_sampling
-
-        mock_ctx = Mock()
-        mock_ctx.session = None
-
-        result = await ocr_via_sampling(mock_ctx, b"fake_png_data")
-        assert result is None
-
-    def test_sampling_imports_from_module(self):
-        """Test that sampling utilities can be imported."""
-        from remarkable_mcp.sampling import (
-            OCR_SYSTEM_PROMPT,
-            OCR_USER_PROMPT,
-            get_ocr_backend,
-            ocr_pages_via_sampling,
-            ocr_via_sampling,
-            should_use_sampling_ocr,
-        )
-
-        # Verify all functions/constants are accessible
-        assert callable(ocr_via_sampling)
-        assert callable(ocr_pages_via_sampling)
-        assert callable(get_ocr_backend)
-        assert callable(should_use_sampling_ocr)
-        assert isinstance(OCR_SYSTEM_PROMPT, str)
-        assert isinstance(OCR_USER_PROMPT, str)
+        assert result == ["tesseract fallback"]
+        assert used_backend == "tesseract"
+        google_ocr.assert_called_once()
+        tesseract_ocr.assert_called_once()
 
 
 # =============================================================================
@@ -5026,30 +4996,6 @@ class TestExtractionCacheGeneration:
 
         assert _cache_extraction_result_if_current(doc_id, result, False, token)
         assert get_cached_ocr_result(doc_id, include_ocr=False) == result
-
-    def test_inflight_page_ocr_cannot_repopulate_after_mutation(self):
-        from remarkable_mcp.extract import (
-            cache_page_ocr,
-            clear_extraction_cache,
-            get_cache_generation_token,
-            get_cached_page_ocr,
-        )
-
-        doc_id = "mutated-page"
-        clear_extraction_cache(doc_id)
-        token = get_cache_generation_token(doc_id)
-
-        clear_extraction_cache(doc_id)
-        cached = cache_page_ocr(
-            doc_id,
-            1,
-            "sampling",
-            "stale",
-            generation_token=token,
-        )
-
-        assert cached is False
-        assert get_cached_page_ocr(doc_id, 1, "sampling") is None
 
 
 class TestSmokeDiagnostics:

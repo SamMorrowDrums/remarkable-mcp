@@ -118,6 +118,31 @@ def get_background_color() -> str:
     return os.environ.get("REMARKABLE_BACKGROUND_COLOR", _DEFAULT_BACKGROUND_COLOR)
 
 
+OCR_BACKENDS = frozenset({"auto", "google", "tesseract"})
+
+
+def get_ocr_backend() -> str:
+    """Return a supported OCR backend, falling back to ``auto`` safely."""
+    backend = os.environ.get("REMARKABLE_OCR_BACKEND", "auto").strip().lower()
+    if backend not in OCR_BACKENDS:
+        supported = ", ".join(sorted(OCR_BACKENDS))
+        if backend == "sampling":
+            logger.warning(
+                "The 'sampling' OCR backend has been removed. "
+                "Falling back to 'auto'. Set REMARKABLE_OCR_BACKEND to one of: %s.",
+                supported,
+            )
+        else:
+            logger.warning(
+                "Unsupported REMARKABLE_OCR_BACKEND value %r. "
+                "Falling back to 'auto'. Supported values are: %s.",
+                backend,
+                supported,
+            )
+        return "auto"
+    return backend
+
+
 # For backwards compatibility, expose as module constant (evaluated at import)
 # Use get_background_color() for runtime evaluation of env var
 REMARKABLE_BACKGROUND_COLOR = get_background_color()
@@ -138,10 +163,6 @@ CACHE_TTL_SECONDS = 300
 # Value: {"result": extraction_result, "include_ocr": bool, "timestamp": float}
 _extraction_cache: Dict[str, Dict[str, Any]] = {}
 
-# Per-page cache for sampling OCR results
-# Key: (doc_id, page_number, backend)
-# Value: {"text": str, "timestamp": float}
-_page_ocr_cache: Dict[tuple, Dict[str, Any]] = {}
 _cache_lock = threading.RLock()
 _cache_generation: Dict[str, int] = {}
 _global_cache_generation = 0
@@ -168,24 +189,15 @@ def clear_extraction_cache(doc_id: Optional[str] = None) -> None:
         if doc_id:
             _cache_generation[doc_id] = _cache_generation.get(doc_id, 0) + 1
             _extraction_cache.pop(doc_id, None)
-            keys_to_remove = [k for k in _page_ocr_cache if k[0] == doc_id]
-            for key in keys_to_remove:
-                _page_ocr_cache.pop(key, None)
         else:
             _global_cache_generation += 1
             _extraction_cache.clear()
-            _page_ocr_cache.clear()
             _cache_generation.clear()
 
 
 def _cache_token(doc_id: str) -> tuple[int, int]:
     with _cache_lock:
         return _global_cache_generation, _cache_generation.get(doc_id, 0)
-
-
-def get_cache_generation_token(doc_id: str) -> tuple[int, int]:
-    """Return a token that becomes stale when this document cache is cleared."""
-    return _cache_token(doc_id)
 
 
 def _cache_extraction_result_if_current(
@@ -209,62 +221,6 @@ def _cache_extraction_result_if_current(
         return True
 
 
-def get_cached_page_ocr(
-    doc_id: str,
-    page: int,
-    backend: str,
-) -> Optional[str]:
-    """
-    Get cached OCR result for a specific page.
-
-    Args:
-        doc_id: Document ID
-        page: Page number (1-indexed)
-        backend: OCR backend used ("sampling", "google", "tesseract")
-
-    Returns:
-        Cached OCR text or None if not cached/expired
-    """
-    cache_key = (doc_id, page, backend)
-    with _cache_lock:
-        if cache_key in _page_ocr_cache:
-            cached = _page_ocr_cache[cache_key]
-            if _is_cache_valid(cached):
-                return cached["text"]
-            _page_ocr_cache.pop(cache_key, None)
-    return None
-
-
-def cache_page_ocr(
-    doc_id: str,
-    page: int,
-    backend: str,
-    text: str,
-    generation_token: Optional[tuple[int, int]] = None,
-) -> bool:
-    """
-    Cache OCR result for a specific page.
-
-    Args:
-        doc_id: Document ID
-        page: Page number (1-indexed)
-        backend: OCR backend used ("sampling", "google", "tesseract")
-        text: OCR text result
-    """
-    cache_key = (doc_id, page, backend)
-    with _cache_lock:
-        if generation_token is not None and generation_token != (
-            _global_cache_generation,
-            _cache_generation.get(doc_id, 0),
-        ):
-            return False
-        _page_ocr_cache[cache_key] = {
-            "text": text,
-            "timestamp": time.time(),
-        }
-        return True
-
-
 def get_cached_ocr_result(
     doc_id: str,
     include_ocr: bool = True,
@@ -277,7 +233,7 @@ def get_cached_ocr_result(
         doc_id: Document ID to look up
         include_ocr: Whether OCR content is required
         ocr_backend: If specified, only return cache if it was produced by this backend.
-                     Use "sampling", "google", or "tesseract". None accepts any backend.
+                     Use "google" or "tesseract". None accepts any backend.
 
     Returns:
         Cached result dict or None if not cached/expired/wrong backend
@@ -2212,26 +2168,14 @@ def extract_handwriting_ocr(rm_files: List[Path]) -> tuple[Optional[List[str]], 
     Extract handwritten text using OCR.
 
     Supports multiple backends (set REMARKABLE_OCR_BACKEND env var):
-    - "sampling": Uses client's LLM via MCP sampling (requires async context, tools only)
     - "google": Google Cloud Vision - best for handwriting
     - "tesseract": pytesseract - basic OCR, rasterized locally with PyMuPDF
     - "auto" (default): Google if API key provided, else Tesseract
 
-    Note: "sampling" backend requires async context and is only available via tools,
-    not via MCP resources. When sampling is configured but this sync function is called
-    (e.g., from resources), it falls back to the auto-detection logic.
-
     Returns:
         Tuple of (ocr_results, backend_used) where backend_used is "google" or "tesseract"
     """
-    import os
-
-    backend = os.environ.get("REMARKABLE_OCR_BACKEND", "auto").lower()
-
-    # Sampling backend requires async context - can't be used from sync functions
-    # Fall back to auto-detection for resources and other sync callers
-    if backend == "sampling":
-        backend = "auto"
+    backend = get_ocr_backend()
 
     # Auto-detect best available backend
     if backend == "auto":
@@ -2243,10 +2187,12 @@ def extract_handwriting_ocr(rm_files: List[Path]) -> tuple[Optional[List[str]], 
 
     if backend == "google":
         result = _ocr_google_vision(rm_files)
-        return (result, "google")
-    else:
+        if result:
+            return (result, "google")
         result = _ocr_tesseract(rm_files)
         return (result, "tesseract")
+    result = _ocr_tesseract(rm_files)
+    return (result, "tesseract")
 
 
 def _ocr_google_vision(rm_files: List[Path]) -> Optional[List[str]]:

@@ -9,7 +9,6 @@ from remarkable_mcp.capabilities import (
     client_supports_elicitation,
     client_supports_experimental,
     client_supports_roots,
-    client_supports_sampling,
     get_client_capabilities,
     get_client_info,
     get_protocol_version,
@@ -30,7 +29,6 @@ __all__ = [
     "__version__",
     # Capability checking
     "get_client_capabilities",
-    "client_supports_sampling",
     "client_supports_elicitation",
     "client_supports_roots",
     "client_supports_experimental",
