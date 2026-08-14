@@ -192,6 +192,14 @@ Note: WiFi is slower than USB but works from anywhere on your network.
 | `REMARKABLE_RESTART_SETTLE` | `3` | Extra settle delay (seconds) after `xochitl` is active, before the next operation runs |
 | `REMARKABLE_DEFER_RESTART` | *(unset)* | When set (`1`/`true`/`yes`), write tools skip their per-write `xochitl` restart; call `remarkable_refresh` once to apply a whole batch with a single restart |
 
+Direct SSH writes bypass the live library control plane used by cloud sync and
+the USB web upload service. Stock firmware exposes no external library reload
+API, and xochitl does not automatically ingest raw metadata/filesystem changes.
+That is why a refresh restart is still required after an SSH write batch.
+`remarkable_refresh` performs one restart for all writes deferred with
+`defer_restart=True`; it is preferable to restarting after every item in a
+large batch.
+
 ## Troubleshooting
 
 ### "Connection refused"

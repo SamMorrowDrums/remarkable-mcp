@@ -47,6 +47,7 @@ from remarkable_mcp.extract import (
     extract_text_from_pdf,
     find_similar_documents,
     get_background_color,
+    get_cache_generation_token,
     get_cached_ocr_result,
     get_cached_page_ocr,
     get_document_page_count,
@@ -92,6 +93,7 @@ class _PreparedReadSampling:
     png_data: Optional[bytes]
     cached_text: Optional[str]
     content: Optional[dict]
+    generation_token: tuple[int, int]
 
 
 _sampling_page_cache: OrderedDict[
@@ -117,6 +119,7 @@ def _image_sampling_cache_key(document, page: int, background: str, render_merge
         "image",
         str(document.ID),
         _sampling_document_revision(document),
+        get_cache_generation_token(str(document.ID)),
         page,
         background,
         render_merged,
@@ -159,6 +162,7 @@ def _read_sampling_cache_key(
         "read",
         str(document.ID),
         _sampling_document_revision(document),
+        get_cache_generation_token(str(document.ID)),
         page,
         content_type,
         include_ocr,
@@ -470,6 +474,7 @@ async def _prepare_read_sampling(
                 png_data=png_data,
                 cached_text=cached_text,
                 content=content,
+                generation_token=cache_key[3],
             )
             _cache_prepared_page(prepared)
             return prepared
@@ -641,6 +646,7 @@ async def remarkable_read(
                             page,
                             "sampling",
                             ocr_text,
+                            prepared_sampling.generation_token,
                         )
                     notebook_pages = [""] * total_notebook_pages
                     notebook_pages[page - 1] = ocr_text

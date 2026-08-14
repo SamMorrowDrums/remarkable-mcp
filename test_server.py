@@ -10,8 +10,10 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import zipfile
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -3040,8 +3042,8 @@ class TestWriteTools:
                 mcp._tool_manager._tools.pop(name, None)
 
     @pytest.mark.asyncio
-    async def test_delete_marks_document_deleted(self):
-        """Test that delete marks the document's metadata as deleted."""
+    async def test_delete_moves_document_to_trash(self):
+        """SSH delete mirrors current-firmware Trash metadata semantics."""
         from remarkable_mcp.write_tools import register_write_tools
 
         with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
@@ -3099,14 +3101,129 @@ class TestWriteTools:
                     data = json.loads(result.content[0].text)
                     assert data["deleted"] is True
                     assert data["name"] == "Test Doc"
-                    # Verify metadata was written with deleted=True
+                    # Current firmware represents Trash via parent="trash".
                     mock_write_meta.assert_called_once()
                     written_metadata = mock_write_meta.call_args[0][2]
-                    assert written_metadata["deleted"] is True
+                    assert written_metadata["parent"] == "trash"
+                    assert written_metadata["deleted"] is False
+                    assert written_metadata["version"] == 1
                 finally:
                     if "REMARKABLE_USE_SSH" in os.environ:
                         del os.environ["REMARKABLE_USE_SSH"]
                     importlib.reload(remarkable_mcp.api)
+        finally:
+            for name in [
+                "remarkable_upload",
+                "remarkable_mkdir",
+                "remarkable_move",
+                "remarkable_rename",
+                "remarkable_delete",
+            ]:
+                mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
+    async def test_permanent_delete_removes_resolved_ssh_entry(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+
+        try:
+            mock_doc = Mock()
+            mock_doc.VissibleName = "Disposable Test"
+            mock_doc.ID = "doc-123"
+            mock_doc.Parent = ""
+            mock_doc.is_folder = False
+
+            mock_client = Mock(
+                spec=[
+                    "get_meta_items",
+                    "_documents",
+                    "_documents_by_id",
+                    "host",
+                    "user",
+                    "port",
+                    "password",
+                ]
+            )
+            mock_client.get_meta_items.return_value = [mock_doc]
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=mock_client),
+                patch("remarkable_mcp.write_tools._permanently_delete_ssh_entry") as mock_purge,
+                patch("remarkable_mcp.write_tools._write_metadata") as mock_write_meta,
+                patch("remarkable_mcp.write_tools._restart_xochitl"),
+                patch.dict(
+                    os.environ,
+                    {"REMARKABLE_USE_SSH": "1", "REMARKABLE_SKIP_CONFIRM": "1"},
+                ),
+            ):
+                result = await _call_tool(
+                    "remarkable_delete",
+                    {"document": "Disposable Test", "permanent": True},
+                )
+                data = json.loads(result.content[0].text)
+
+            assert data["deleted"] is True
+            assert data["permanent"] is True
+            mock_purge.assert_called_once_with(mock_client, "doc-123")
+            mock_write_meta.assert_not_called()
+        finally:
+            for name in [
+                "remarkable_upload",
+                "remarkable_mkdir",
+                "remarkable_move",
+                "remarkable_rename",
+                "remarkable_delete",
+            ]:
+                mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
+    async def test_permanent_delete_rejects_non_empty_folder(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+
+        try:
+            folder = Mock()
+            folder.VissibleName = "Smoke Folder"
+            folder.ID = "folder-123"
+            folder.Parent = ""
+            folder.is_folder = True
+            child = Mock()
+            child.VissibleName = "Child"
+            child.ID = "child-123"
+            child.Parent = folder.ID
+            child.is_folder = False
+
+            mock_client = Mock(
+                spec=[
+                    "get_meta_items",
+                    "_documents",
+                    "_documents_by_id",
+                    "host",
+                    "user",
+                    "port",
+                    "password",
+                ]
+            )
+            mock_client.get_meta_items.return_value = [folder, child]
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=mock_client),
+                patch("remarkable_mcp.write_tools._permanently_delete_ssh_entry") as mock_purge,
+                patch.dict(
+                    os.environ,
+                    {"REMARKABLE_USE_SSH": "1", "REMARKABLE_SKIP_CONFIRM": "1"},
+                ),
+            ):
+                result = await _call_tool(
+                    "remarkable_delete",
+                    {"document": "Smoke Folder", "permanent": True},
+                )
+                data = json.loads(result.content[0].text)
+
+            assert data["_error"]["type"] == "folder_not_empty"
+            mock_purge.assert_not_called()
         finally:
             for name in [
                 "remarkable_upload",
@@ -4098,6 +4215,333 @@ class TestCloudStartupFallback:
             assert api.get_active_transport() == "ssh"
         finally:
             api.reset_client_cache()
+
+
+class TestSSHCacheConcurrency:
+    """Startup resource loading must not duplicate or overlap SSH scans."""
+
+    class AttemptLock:
+        def __init__(self):
+            self._lock = threading.RLock()
+            self._counter_lock = threading.Lock()
+            self.acquisitions = 0
+            self.second_attempted = threading.Event()
+
+        def __enter__(self):
+            with self._counter_lock:
+                self.acquisitions += 1
+                if self.acquisitions == 2:
+                    self.second_attempted.set()
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self._lock.release()
+
+    def test_metadata_load_is_single_flight(self):
+        from remarkable_mcp.ssh import SSHClient
+
+        client = SSHClient()
+        lock = self.AttemptLock()
+        client._metadata_lock = lock
+        first_started = threading.Event()
+        release_first = threading.Event()
+        call_count = 0
+        count_lock = threading.Lock()
+
+        def fake_command(command, timeout=30):
+            nonlocal call_count
+            assert "*.metadata" in command
+            with count_lock:
+                call_count += 1
+            first_started.set()
+            assert release_first.wait(2)
+            return '===FILE===doc-1\n{"visibleName":"One","type":"DocumentType","parent":""}\n'
+
+        client._ssh_command = fake_command
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(client.get_meta_items)
+            assert first_started.wait(1)
+            second = executor.submit(client.get_meta_items)
+            assert lock.second_attempted.wait(1)
+            release_first.set()
+            assert [doc.id for doc in first.result(timeout=2)] == ["doc-1"]
+            assert [doc.id for doc in second.result(timeout=2)] == ["doc-1"]
+
+        assert call_count == 1
+
+    def test_empty_metadata_result_is_cached(self):
+        from remarkable_mcp.ssh import SSHClient
+
+        client = SSHClient()
+        call_count = 0
+
+        def fake_command(command, timeout=30):
+            nonlocal call_count
+            call_count += 1
+            return ""
+
+        client._ssh_command = fake_command
+
+        assert client.get_meta_items() == []
+        assert client.get_meta_items() == []
+        assert client.get_doc("missing") is None
+        assert call_count == 1
+
+    def test_file_type_reader_waits_for_batch_preload(self):
+        from remarkable_mcp.ssh import Document, SSHClient
+
+        client = SSHClient()
+        lock = self.AttemptLock()
+        client._file_type_lock = lock
+        preload_started = threading.Event()
+        release_preload = threading.Event()
+        individual_downloads = 0
+
+        def fake_command(command, timeout=30):
+            assert "*.content" in command
+            preload_started.set()
+            assert release_preload.wait(2)
+            return '===FILE===doc-1\n{"fileType":"pdf"}\n'
+
+        def fake_download(remote_path, timeout=60):
+            nonlocal individual_downloads
+            individual_downloads += 1
+            return b'{"fileType":"pdf"}'
+
+        client._ssh_command = fake_command
+        client._scp_download = fake_download
+        doc = Document(id="doc-1", hash="doc-1", name="One", doc_type="DocumentType")
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            preload = executor.submit(client.get_all_file_types)
+            assert preload_started.wait(1)
+            reader = executor.submit(client.get_file_type, doc)
+            assert lock.second_attempted.wait(1)
+            assert not reader.done()
+            release_preload.set()
+            assert preload.result(timeout=2) == {"doc-1": "pdf"}
+            assert reader.result(timeout=2) == "pdf"
+
+        assert individual_downloads == 0
+
+    def test_failed_file_type_preload_remains_retryable(self):
+        from remarkable_mcp.ssh import SSHClient
+
+        client = SSHClient()
+        attempts = 0
+
+        def fake_command(command, timeout=30):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("transient SSH failure")
+            return '===FILE===doc-1\n{"fileType":"pdf"}\n'
+
+        client._ssh_command = fake_command
+
+        assert client.get_all_file_types() == {}
+        assert client._file_type_cache is None
+        assert client.get_all_file_types() == {"doc-1": "pdf"}
+        assert attempts == 2
+
+    def test_file_type_preload_serializes_other_ssh_io(self):
+        from remarkable_mcp.ssh import Document, SSHClient
+
+        client = SSHClient()
+        lock = self.AttemptLock()
+        client._io_lock = lock
+        preload_started = threading.Event()
+        release_preload = threading.Event()
+
+        def fake_command(command, timeout):
+            if "*.content" in command:
+                preload_started.set()
+                assert release_preload.wait(2)
+                return '===FILE===doc-1\n{"fileType":"pdf"}\n'
+            return ""
+
+        client._ssh_command_unlocked = fake_command
+        client._scp_download_unlocked = lambda remote_path, timeout: b"%PDF"
+        doc = Document(id="doc-1", hash="doc-1", name="One", doc_type="DocumentType")
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            preload = executor.submit(client.get_all_file_types)
+            assert preload_started.wait(1)
+            download = executor.submit(client.download_raw_file, doc, "pdf")
+            assert lock.second_attempted.wait(1)
+            assert not download.done()
+            release_preload.set()
+            assert preload.result(timeout=2) == {"doc-1": "pdf"}
+            assert download.result(timeout=2) == b"%PDF"
+
+    def test_upload_serializes_with_file_type_preload(self, monkeypatch, tmp_path):
+        import remarkable_mcp.ssh as ssh_mod
+        from remarkable_mcp.ssh import SSHClient
+
+        client = SSHClient()
+        lock = self.AttemptLock()
+        client._io_lock = lock
+        preload_started = threading.Event()
+        release_preload = threading.Event()
+
+        def fake_command(command, timeout):
+            preload_started.set()
+            assert release_preload.wait(2)
+            return '===FILE===doc-1\n{"fileType":"pdf"}\n'
+
+        monkeypatch.setattr(
+            ssh_mod.subprocess,
+            "run",
+            lambda *args, **kwargs: Mock(returncode=0, stdout=b"", stderr=b""),
+        )
+        client._ssh_command_unlocked = fake_command
+        local = tmp_path / "upload.pdf"
+        local.write_bytes(b"%PDF")
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            preload = executor.submit(client.get_all_file_types)
+            assert preload_started.wait(1)
+            upload = executor.submit(
+                client._upload_file,
+                str(local),
+                "/home/root/upload.pdf",
+            )
+            assert lock.second_attempted.wait(1)
+            assert not upload.done()
+            release_preload.set()
+            assert preload.result(timeout=2) == {"doc-1": "pdf"}
+            assert upload.result(timeout=2) is None
+
+
+class TestExtractionCacheGeneration:
+    def test_inflight_result_cannot_repopulate_after_mutation(self):
+        from remarkable_mcp.extract import (
+            _cache_extraction_result_if_current,
+            _cache_token,
+            clear_extraction_cache,
+            get_cached_ocr_result,
+        )
+
+        doc_id = "mutated-doc"
+        clear_extraction_cache(doc_id)
+        token = _cache_token(doc_id)
+
+        clear_extraction_cache(doc_id)
+        cached = _cache_extraction_result_if_current(
+            doc_id,
+            {"typed_text": ["stale"], "ocr_backend": None},
+            False,
+            token,
+        )
+
+        assert cached is False
+        assert get_cached_ocr_result(doc_id, include_ocr=False) is None
+
+    def test_current_generation_can_cache_result(self):
+        from remarkable_mcp.extract import (
+            _cache_extraction_result_if_current,
+            _cache_token,
+            clear_extraction_cache,
+            get_cached_ocr_result,
+        )
+
+        doc_id = "current-doc"
+        clear_extraction_cache(doc_id)
+        token = _cache_token(doc_id)
+        result = {"typed_text": ["current"], "ocr_backend": None}
+
+        assert _cache_extraction_result_if_current(doc_id, result, False, token)
+        assert get_cached_ocr_result(doc_id, include_ocr=False) == result
+
+    def test_inflight_page_ocr_cannot_repopulate_after_mutation(self):
+        from remarkable_mcp.extract import (
+            cache_page_ocr,
+            clear_extraction_cache,
+            get_cache_generation_token,
+            get_cached_page_ocr,
+        )
+
+        doc_id = "mutated-page"
+        clear_extraction_cache(doc_id)
+        token = get_cache_generation_token(doc_id)
+
+        clear_extraction_cache(doc_id)
+        cached = cache_page_ocr(
+            doc_id,
+            1,
+            "sampling",
+            "stale",
+            generation_token=token,
+        )
+
+        assert cached is False
+        assert get_cached_page_ocr(doc_id, 1, "sampling") is None
+
+
+class TestSmokeDiagnostics:
+    @pytest.mark.asyncio
+    async def test_stdio_diagnostics_fall_back_without_private_sdk_hook(self, monkeypatch):
+        import mcp.client.stdio as stdio_module
+
+        from smoke.run_smoke import diagnostic_stdio_client
+
+        @asynccontextmanager
+        async def fake_stdio_client(params, errlog):
+            yield "read", "write"
+
+        monkeypatch.delattr(stdio_module, "_create_platform_compatible_process", raising=False)
+        monkeypatch.setattr(stdio_module, "stdio_client", fake_stdio_client)
+
+        async with diagnostic_stdio_client("params") as (read, write, diagnostics):
+            assert (read, write) == ("read", "write")
+            assert diagnostics.process is None
+
+    def test_abnormal_server_exit_fails_smoke_verdict(self, capsys):
+        from smoke.run_smoke import PASS, Recorder, print_report
+
+        rec = Recorder()
+        rec.ensure_mode("ssh", "ssh", 1, "connected")
+        rec.record("ssh", "remarkable_status", PASS)
+        rec.modes["ssh"]["server_process"] = {"returncode": -9, "signal": 9}
+
+        assert print_report(rec, ["ssh"], "now") is True
+        assert "SERVER PROCESS EXIT: returncode=-9 (signal 9)" in capsys.readouterr().out
+
+    def test_session_error_fails_smoke_verdict(self, capsys):
+        from smoke.run_smoke import Recorder, print_report
+
+        rec = Recorder()
+        rec.ensure_mode("ssh", "ssh", 1, "connected")
+        rec.modes["ssh"]["session_error"] = "ClosedResourceError"
+        rec.modes["ssh"]["server_process"] = {"returncode": 0, "signal": None}
+
+        assert print_report(rec, ["ssh"], "now") is True
+        assert "SERVER SESSION ERROR: ClosedResourceError" in capsys.readouterr().out
+
+    def test_pre_status_server_exit_fails_smoke_verdict(self, capsys):
+        from smoke.run_smoke import Recorder, print_report
+
+        rec = Recorder()
+        rec.mode_unavailable("ssh", "status failed")
+        rec.modes["ssh"]["server_process"] = {"returncode": -11, "signal": 11}
+
+        assert print_report(rec, ["ssh"], "now") is True
+        assert "SERVER PROCESS EXIT: returncode=-11 (signal 11)" in capsys.readouterr().out
+
+    def test_post_run_tablet_probe_fails_smoke_verdict(self, capsys):
+        from smoke.run_smoke import Recorder, print_report
+
+        rec = Recorder()
+        rec.ensure_mode("ssh", "ssh", 1, "connected")
+        rec.modes["ssh"]["server_process"] = {"returncode": 0, "signal": None}
+        rec.modes["ssh"]["tablet_after"] = {
+            "returncode": 255,
+            "stderr": "banner exchange timed out",
+        }
+
+        assert print_report(rec, ["ssh"], "now") is True
+        assert "POST-RUN TABLET PROBE FAILED" in capsys.readouterr().out
 
 
 class TestSSHKeyAuth:
@@ -5614,6 +6058,35 @@ class TestRestartXochitl:
         assert not any("is-active" in c for c in client.calls)
         mock_sleep.assert_not_called()
 
+    def test_restart_settle_blocks_other_ssh_operations(self):
+        from remarkable_mcp import write_tools
+        from remarkable_mcp.ssh import SSHClient
+
+        client = SSHClient()
+        settle_started = threading.Event()
+        release_settle = threading.Event()
+
+        def fake_command(command, timeout):
+            return "active\n" if "is-active" in command else ""
+
+        def fake_sleep(seconds):
+            if seconds == write_tools._RESTART_SETTLE_SECONDS:
+                settle_started.set()
+                assert release_settle.wait(2)
+
+        client._ssh_command_unlocked = fake_command
+        with (
+            patch("remarkable_mcp.write_tools.time.sleep", side_effect=fake_sleep),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            restart = executor.submit(write_tools._restart_xochitl, client)
+            assert settle_started.wait(1)
+            competing = executor.submit(client._ssh_command, "echo ok", 5)
+            assert not competing.done()
+            release_settle.set()
+            restart.result(timeout=2)
+            assert competing.result(timeout=2) == ""
+
 
 class TestDeferRestart:
     """Writes can defer the xochitl restart so a batch refreshes once.
@@ -5686,6 +6159,111 @@ class TestDeferRestart:
             # env defers even though the per-call argument is False
             assert write_tools._maybe_restart_xochitl(client, defer_restart=False) is False
             mock_restart.assert_not_called()
+
+    def test_deferred_cache_tracks_add_update_and_delete(self):
+        from remarkable_mcp.ssh import Document, SSHClient
+        from remarkable_mcp.write_tools import _update_deferred_ssh_cache
+
+        client = SSHClient()
+        original = Document(
+            id="doc-1",
+            hash="doc-1",
+            name="Original",
+            doc_type="DocumentType",
+            parent="",
+        )
+        client._documents = [original]
+        client._documents_by_id = {original.ID: original}
+        client._file_type_cache = {original.ID: "pdf"}
+
+        created = Document(
+            id="doc-2",
+            hash="doc-2",
+            name="Created",
+            doc_type="DocumentType",
+            parent="folder-1",
+        )
+        _update_deferred_ssh_cache(client, False, document=created, file_type="notebook")
+        assert client.get_doc("doc-2") is created
+        assert client.get_file_type(created) == "notebook"
+
+        created.name = "Renamed"
+        created.parent = ""
+        _update_deferred_ssh_cache(client, False, document=created)
+        assert client.get_doc("doc-2").VissibleName == "Renamed"
+        assert client.get_doc("doc-2").Parent == ""
+
+        _update_deferred_ssh_cache(client, False, remove_id="doc-2")
+        assert client.get_doc("doc-2") is None
+        assert "doc-2" not in client._file_type_cache
+        assert client.get_doc("doc-1") is original
+
+    def test_deferred_cache_reads_documents_after_acquiring_lock(self):
+        from remarkable_mcp.ssh import Document, SSHClient
+        from remarkable_mcp.write_tools import _update_deferred_ssh_cache
+
+        client = SSHClient()
+        stale = Document(
+            id="stale",
+            hash="stale",
+            name="Stale",
+            doc_type="DocumentType",
+        )
+        current = Document(
+            id="current",
+            hash="current",
+            name="Current",
+            doc_type="DocumentType",
+        )
+        client._documents = [stale]
+        client._documents_by_id = {stale.ID: stale}
+
+        class SwapOnEnter:
+            def __enter__(self):
+                client._documents = [current]
+                client._documents_by_id = {current.ID: current}
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+        client._metadata_lock = SwapOnEnter()
+
+        _update_deferred_ssh_cache(client, False, remove_id=current.ID)
+
+        assert client._documents == []
+        assert client._documents_by_id == {}
+
+    def test_restart_invalidates_deferred_cache(self):
+        from remarkable_mcp.ssh import Document, SSHClient
+        from remarkable_mcp.write_tools import _update_deferred_ssh_cache
+
+        client = SSHClient()
+        doc = Document(
+            id="doc-1",
+            hash="doc-1",
+            name="One",
+            doc_type="DocumentType",
+        )
+        client._documents = [doc]
+        client._documents_by_id = {doc.ID: doc}
+        client._file_type_cache = {doc.ID: "pdf"}
+
+        _update_deferred_ssh_cache(client, True, document=doc)
+
+        assert client._documents == []
+        assert client._documents_by_id == {}
+        assert client._file_type_cache is None
+
+    def test_local_dir_invalidation_preserves_reload_sentinel(self, tmp_path):
+        from remarkable_mcp.local_dir import LocalDirClient
+        from remarkable_mcp.write_tools import _invalidate_client_cache
+
+        client = LocalDirClient(tmp_path)
+        client._file_type_cache = {"doc-1": "pdf"}
+
+        _invalidate_client_cache(client)
+
+        assert client._file_type_cache is None
 
     @pytest.mark.asyncio
     async def test_upload_defer_skips_restart_and_flags_pending(self, tmp_path):
@@ -5768,6 +6346,64 @@ class TestDeferRestart:
                 data = json.loads(result.content[0].text)
                 assert data["refreshed"] is True
                 mock_restart.assert_called_once_with(client)
+        finally:
+            self._cleanup_tools()
+
+    @pytest.mark.asyncio
+    async def test_refresh_failure_invalidates_deferred_cache(self):
+        from remarkable_mcp.ssh import Document, SSHClient
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+        try:
+            client = SSHClient()
+            doc = Document(
+                id="doc-1",
+                hash="doc-1",
+                name="One",
+                doc_type="DocumentType",
+            )
+            client._documents = [doc]
+            client._documents_by_id = {doc.ID: doc}
+            client._file_type_cache = {doc.ID: "pdf"}
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+                patch(
+                    "remarkable_mcp.write_tools._restart_xochitl",
+                    side_effect=RuntimeError("SSH lost"),
+                ),
+                patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            ):
+                result = await _call_tool("remarkable_refresh", {})
+                data = json.loads(result.content[0].text)
+
+            assert data["_error"]["type"] == "refresh_failed"
+            assert client._documents == []
+            assert client._documents_by_id == {}
+            assert client._file_type_cache is None
+        finally:
+            self._cleanup_tools()
+
+    @pytest.mark.asyncio
+    async def test_refresh_client_failure_is_structured(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+        try:
+            with (
+                patch(
+                    "remarkable_mcp.write_tools.get_rmapi",
+                    side_effect=RuntimeError("client unavailable"),
+                ),
+                patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            ):
+                result = await _call_tool("remarkable_refresh", {})
+                data = json.loads(result.content[0].text)
+
+            assert data["_error"]["type"] == "refresh_failed"
+            assert "client unavailable" in data["_error"]["message"]
         finally:
             self._cleanup_tools()
 
