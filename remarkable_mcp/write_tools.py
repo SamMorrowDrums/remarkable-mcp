@@ -1245,7 +1245,6 @@ def register_write_tools():
         folder: Optional[str] = None,
         defer_restart: bool = False,
         ui_submitted: bool = False,
-        defer_restart: bool = False,
         ctx: Context = None,
     ) -> str:
         """
@@ -1302,8 +1301,6 @@ def register_write_tools():
             unless the user explicitly requested specific content; never fabricate
             placeholder text. Paragraphs split on newlines.
         - folder: Destination folder path (create_document; default "/").
-        - defer_restart: Skip the xochitl restart so an explicit batch can call
-          remarkable_refresh() once at the end.
         - ui_submitted: Set by the canvas app when the user clicked Save. Models omit it.
         - defer_restart: Skip the xochitl restart for this write. Call
           remarkable_refresh() once after the batch. The response sets

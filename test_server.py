@@ -2622,14 +2622,14 @@ class TestUSBWebInterface:
             ):
                 results = await asyncio.gather(
                     *(
-                        mcp.call_tool(
+                        _call_tool(
                             "remarkable_upload",
                             {"file_path": str(path)},
                         )
                         for path in files
                     )
                 )
-            assert all(json.loads(result[0][0].text)["uploaded"] is True for result in results)
+            assert all(json.loads(result.content[0].text)["uploaded"] is True for result in results)
             assert max_active == 1
         finally:
             client.close()
@@ -7016,10 +7016,10 @@ class TestDeferRestart:
                 patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
             ):
                 results = await asyncio.gather(
-                    mcp.call_tool("remarkable_mkdir", {"folder_name": "One"}),
-                    mcp.call_tool("remarkable_mkdir", {"folder_name": "Two"}),
+                    _call_tool("remarkable_mkdir", {"folder_name": "One"}),
+                    _call_tool("remarkable_mkdir", {"folder_name": "Two"}),
                 )
-            payloads = [json.loads(result[0][0].text) for result in results]
+            payloads = [json.loads(result.content[0].text) for result in results]
             assert [payload["created"] for payload in payloads] == [True, True]
             assert all(payload["refresh_pending"] is False for payload in payloads)
             mock_restart.assert_called_once_with(client)
@@ -7049,11 +7049,11 @@ class TestDeferRestart:
                 patch("remarkable_mcp.write_tools._restart_xochitl") as mock_restart,
                 patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
             ):
-                result = await mcp.call_tool(
+                result = await _call_tool(
                     "remarkable_upload",
                     {"file_path": str(pdf)},
                 )
-            data = json.loads(result[0][0].text)
+            data = json.loads(result.content[0].text)
             assert data["_error"]["type"] == "write_execution_unknown"
             mock_upload.assert_called_once()
             mock_restart.assert_called_once_with(client)
