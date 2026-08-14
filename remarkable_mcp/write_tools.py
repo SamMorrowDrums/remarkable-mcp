@@ -1728,13 +1728,12 @@ def register_write_tools():
             document: str,
             defer_restart: bool = False,
             permanent: bool = False,
+            *,
             confirmation: Annotated[
                 ElicitationResult[_DeleteConfirmation],
                 Resolve(_resolve_delete_confirmation),
-            ] = None,
-            confirmation_available: Annotated[
-                bool, Resolve(_delete_confirmation_available)
-            ] = False,
+            ],
+            confirmation_available: Annotated[bool, Resolve(_delete_confirmation_available)],
         ) -> str:
             """
             <usecase>Delete a document or folder on the reMarkable tablet.</usecase>

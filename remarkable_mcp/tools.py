@@ -488,7 +488,7 @@ async def _prepare_read_sampling(
 
 
 def _resolve_read_sampling(
-    prepared_read: Annotated[Optional[_PreparedReadSampling], Resolve(_prepare_read_sampling)],
+    prepared_read: Annotated[_PreparedReadSampling, Resolve(_prepare_read_sampling)],
 ) -> Sample | None:
     """Build one era-portable sampling request from the retained page."""
     if prepared_read is None or prepared_read.png_data is None:
@@ -504,12 +504,9 @@ async def remarkable_read(
     grep: Optional[str] = None,
     include_ocr: bool = False,
     ctx: Optional[Context] = None,
-    prepared_read: Annotated[
-        Optional[_PreparedReadSampling], Resolve(_prepare_read_sampling)
-    ] = None,
-    sampling_result: Annotated[
-        Optional[CreateMessageResult], Resolve(_resolve_read_sampling)
-    ] = None,
+    *,
+    prepared_read: Annotated[_PreparedReadSampling, Resolve(_prepare_read_sampling)],
+    sampling_result: Annotated[CreateMessageResult, Resolve(_resolve_read_sampling)],
 ) -> str:
     """
     <usecase>Read and extract text content from a reMarkable document.</usecase>
@@ -884,6 +881,7 @@ async def remarkable_read(
                 grep=grep,
                 include_ocr=True,  # Enable OCR automatically
                 ctx=ctx,  # Pass context for sampling OCR
+                prepared_read=prepared_read,
                 sampling_result=sampling_result,
             )
             result_data = json.loads(ocr_result)
@@ -1143,7 +1141,12 @@ async def remarkable_browse(
                                 suggestion="Check REMARKABLE_ROOT_PATH configuration.",
                             )
                         # Call remarkable_read internally and add redirect note
-                        read_result = remarkable_read(_apply_root_filter(doc_path), page=1)
+                        read_result = await remarkable_read(
+                            _apply_root_filter(doc_path),
+                            page=1,
+                            prepared_read=None,
+                            sampling_result=None,
+                        )
                         import json
 
                         result_data = json.loads(read_result)
@@ -1430,6 +1433,8 @@ async def remarkable_search(
                     page=1,
                     grep=grep,
                     include_ocr=include_ocr,
+                    prepared_read=None,
+                    sampling_result=None,
                 )
                 read_data = json.loads(read_result)
 
@@ -1847,7 +1852,7 @@ async def _prepare_image_sampling(
 
 
 def _resolve_image_sampling(
-    prepared_image: Annotated[Optional[_PreparedImageSampling], Resolve(_prepare_image_sampling)],
+    prepared_image: Annotated[_PreparedImageSampling, Resolve(_prepare_image_sampling)],
 ) -> Sample | None:
     """Build one era-portable sampling request from the retained page."""
     return make_ocr_sample(prepared_image.png_data) if prepared_image else None
@@ -1863,12 +1868,9 @@ async def remarkable_image(
     include_ocr: bool = False,
     render_merged: bool = False,
     ctx: Optional[Context] = None,
-    prepared_image: Annotated[
-        Optional[_PreparedImageSampling], Resolve(_prepare_image_sampling)
-    ] = None,
-    sampling_result: Annotated[
-        Optional[CreateMessageResult], Resolve(_resolve_image_sampling)
-    ] = None,
+    *,
+    prepared_image: Annotated[_PreparedImageSampling, Resolve(_prepare_image_sampling)],
+    sampling_result: Annotated[CreateMessageResult, Resolve(_resolve_image_sampling)],
 ):
     """
     <usecase>Get an image of a specific page from a reMarkable document.</usecase>
