@@ -110,13 +110,13 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Cloud default: 6 read tools + always-on canvas + 5 write tools.
+        """Cloud default: 6 read tools + always-on canvas + 6 write tools.
 
         ``remarkable_author`` is SSH-only and therefore hidden in cloud mode, so
-        the default (cloud) surface is 12 tools, not 13.
+        the default (cloud) surface is 13 tools, not 14.
         """
         tools = await mcp.list_tools()
-        assert len(tools) == 12, f"Expected 12 tools, got {len(tools)}"
+        assert len(tools) == 13, f"Expected 13 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -1293,7 +1293,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await mcp.list_tools()
 
-        assert len(tools) == 12
+        assert len(tools) == 13
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:
@@ -2754,6 +2754,7 @@ class TestWriteTools:
 
         write_tool_names = [
             "remarkable_upload",
+            "remarkable_markdown_to_pdf",
             "remarkable_mkdir",
             "remarkable_move",
             "remarkable_rename",
@@ -2782,6 +2783,7 @@ class TestWriteTools:
 
             write_tool_names = [
                 "remarkable_upload",
+                "remarkable_markdown_to_pdf",
                 "remarkable_mkdir",
                 "remarkable_move",
                 "remarkable_rename",
@@ -2794,6 +2796,7 @@ class TestWriteTools:
             # Clean up: remove registered tools to not affect other tests
             for name in [
                 "remarkable_upload",
+                "remarkable_markdown_to_pdf",
                 "remarkable_mkdir",
                 "remarkable_move",
                 "remarkable_rename",
@@ -2923,6 +2926,7 @@ class TestWriteTools:
                 if t.name
                 in (
                     "remarkable_upload",
+                    "remarkable_markdown_to_pdf",
                     "remarkable_mkdir",
                     "remarkable_move",
                     "remarkable_rename",
@@ -3066,6 +3070,179 @@ class TestWriteTools:
                 assert "remarkable_author" not in names
             finally:
                 mcp._tool_manager._tools.pop("remarkable_author", None)
+
+
+class TestMarkdownPDFWriteback:
+    """Markdown rendering and upload behavior across transports."""
+
+    def test_renderer_creates_paginated_pdf_without_loading_images(self):
+        import pymupdf
+
+        from remarkable_mcp.markdown_pdf import render_markdown_pdf
+
+        markdown = (
+            "# Report\n\n"
+            "![private](https://example.com/private.png)\n\n"
+            "| Item | Value |\n| --- | --- |\n| A | 1 |\n\n"
+            + ("A long paragraph for pagination. " * 700)
+        )
+        payload = render_markdown_pdf(markdown)
+        document = pymupdf.open(stream=payload, filetype="pdf")
+        try:
+            text = "".join(page.get_text() for page in document)
+            assert payload.startswith(b"%PDF")
+            assert document.page_count > 1
+            assert "Report" in text
+            assert "Image omitted: private" in text
+            assert "root:" not in text
+        finally:
+            document.close()
+
+    def test_empty_markdown_is_rejected(self):
+        from remarkable_mcp.markdown_pdf import render_markdown_pdf
+
+        with pytest.raises(ValueError, match="cannot be empty"):
+            render_markdown_pdf("  \n")
+
+    @pytest.mark.asyncio
+    async def test_markdown_to_pdf_uploads_rendered_bytes_to_cloud(self):
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in ("REMARKABLE_USE_SSH", "REMARKABLE_USE_USB_WEB")
+        }
+        mock_doc = Mock(id="markdown-doc-id")
+        client = Mock(spec=["get_meta_items", "upload_document"])
+        client.get_meta_items.return_value = []
+        client.upload_document.return_value = mock_doc
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_markdown_to_pdf",
+                {
+                    "markdown": "# Notes\n\n- One\n- Two",
+                    "document_name": "Team Notes",
+                },
+            )
+
+        data = json.loads(result[0][0].text)
+        assert data["uploaded"] is True
+        assert data["name"] == "Team Notes"
+        assert data["transport"] == "cloud"
+        assert "_hint" in data
+        content, name, extension, parent = client.upload_document.call_args.args
+        assert content.startswith(b"%PDF")
+        assert name == "Team Notes"
+        assert extension == "pdf"
+        assert parent == ""
+
+    @pytest.mark.asyncio
+    async def test_markdown_to_pdf_forwards_deferred_ssh_restart(self):
+        client = Mock(
+            spec=[
+                "get_meta_items",
+                "_ssh_command",
+                "_documents",
+                "_documents_by_id",
+            ]
+        )
+        client.get_meta_items.return_value = []
+        client._documents = []
+        client._documents_by_id = {}
+
+        with (
+            patch.dict(
+                os.environ,
+                {"REMARKABLE_USE_SSH": "1"},
+                clear=True,
+            ),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+            patch("remarkable_mcp.write_tools._upload_file_bytes"),
+            patch("remarkable_mcp.write_tools._write_metadata"),
+            patch("remarkable_mcp.write_tools._write_content_file"),
+            patch(
+                "remarkable_mcp.write_tools._maybe_restart_xochitl",
+                return_value=False,
+            ) as maybe_restart,
+        ):
+            result = await mcp.call_tool(
+                "remarkable_markdown_to_pdf",
+                {
+                    "markdown": "# Deferred",
+                    "document_name": "Deferred Notes",
+                    "defer_restart": True,
+                },
+            )
+
+        data = json.loads(result[0][0].text)
+        assert data["uploaded"] is True
+        assert data["refresh_pending"] is True
+        assert "remarkable_refresh" in data["_hint"]
+        maybe_restart.assert_called_once_with(client, True)
+
+    def test_usb_upload_uses_requested_document_name(self):
+        from remarkable_mcp.write_tools import _upload_via_usb_web
+
+        response = Mock()
+        response.status_code = 200
+        with (
+            tempfile.NamedTemporaryFile(suffix=".pdf") as temp_pdf,
+            patch("requests.post", return_value=response) as post,
+        ):
+            _upload_via_usb_web(temp_pdf.name, "Requested Name")
+
+        response.raise_for_status.assert_called_once()
+        multipart_filename = post.call_args.kwargs["files"]["file"][0]
+        assert multipart_filename == "Requested Name.pdf"
+
+    @pytest.mark.asyncio
+    async def test_markdown_title_is_not_used_as_local_temp_filename(self):
+        client = Mock()
+        client._documents = []
+        client._documents_by_id = {}
+        captured = {}
+
+        def capture_upload(local_path, document_name):
+            captured["local_name"] = os.path.basename(local_path)
+            captured["document_name"] = document_name
+            return {"status": 200, "ok": True}
+
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in (
+                "REMARKABLE_USE_SSH",
+                "REMARKABLE_USE_LOCAL_DIR",
+                "REMARKABLE_LOCAL_DIR",
+            )
+        }
+        env["REMARKABLE_USE_USB_WEB"] = "1"
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+            patch(
+                "remarkable_mcp.write_tools._upload_via_usb_web",
+                side_effect=capture_upload,
+            ),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_markdown_to_pdf",
+                {
+                    "markdown": "# Portable",
+                    "document_name": 'A/B: "portable"?',
+                },
+            )
+
+        data = json.loads(result[0][0].text)
+        assert data["uploaded"] is True
+        assert captured == {
+            "local_name": "document.pdf",
+            "document_name": 'A/B: "portable"?',
+        }
 
 
 class TestCloudWriteDispatch:
@@ -4447,6 +4624,129 @@ class TestCLIFlags:
         finally:
             if old is not None:
                 os.environ["REMARKABLE_READ_ONLY"] = old
+
+    def test_http_uses_loopback_defaults(self, capsys):
+        from remarkable_mcp import cli
+
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in ("REMARKABLE_MCP_HOST", "REMARKABLE_MCP_PORT")
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(sys, "argv", ["remarkable-mcp", "--http"]),
+            patch("remarkable_mcp.server.run") as mock_run,
+        ):
+            cli.main()
+
+        mock_run.assert_called_once_with(
+            transport="streamable-http",
+            host="127.0.0.1",
+            port=8000,
+        )
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_http_warns_for_non_loopback_binding(self, capsys):
+        from remarkable_mcp import cli
+
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["remarkable-mcp", "--http", "--host", "0.0.0.0", "--port", "9000"],
+            ),
+            patch("remarkable_mcp.server.run") as mock_run,
+        ):
+            cli.main()
+
+        mock_run.assert_called_once_with(
+            transport="streamable-http",
+            host="0.0.0.0",
+            port=9000,
+        )
+        warning = capsys.readouterr().err
+        assert "WARNING" in warning
+        assert "no authentication" in warning
+        assert "including writes" in warning
+        assert "matching '0.0.0.0'" in warning
+
+    def test_default_transport_security_requires_proxy_header_rewrite(self):
+        from mcp.server.transport_security import TransportSecurityMiddleware
+
+        middleware = TransportSecurityMiddleware(mcp.settings.transport_security)
+        assert middleware._validate_host("mcp.example.com") is False
+        assert middleware._validate_host("127.0.0.1:8000") is True
+        assert middleware._validate_origin("https://openwebui.example.com") is False
+        assert middleware._validate_origin(None) is True
+
+    def test_runtime_transport_security_matches_explicit_wildcard_host(self):
+        from mcp.server.transport_security import TransportSecurityMiddleware
+
+        import remarkable_mcp.server as server
+
+        previous_host = mcp.settings.host
+        previous_port = mcp.settings.port
+        previous_security = mcp.settings.transport_security
+        try:
+            with patch.object(mcp, "run") as fastmcp_run:
+                server.run(
+                    transport="streamable-http",
+                    host="0.0.0.0",
+                    port=9000,
+                )
+            fastmcp_run.assert_called_once_with(transport="streamable-http")
+            middleware = TransportSecurityMiddleware(mcp.settings.transport_security)
+            assert middleware._validate_host("0.0.0.0:9000") is True
+            assert middleware._validate_origin("http://0.0.0.0:3000") is True
+            assert middleware._validate_host("mcp.example.com") is False
+            assert middleware._validate_origin("https://openwebui.example.com") is False
+        finally:
+            mcp.settings.host = previous_host
+            mcp.settings.port = previous_port
+            mcp.settings.transport_security = previous_security
+
+    def test_read_only_instructions_do_not_advertise_markdown_writeback(self):
+        from remarkable_mcp.server import _build_instructions
+
+        with patch.dict(os.environ, {"REMARKABLE_READ_ONLY": "1"}):
+            instructions = _build_instructions()
+        assert "remarkable_markdown_to_pdf" not in instructions
+
+    def test_http_preserves_explicit_ssh_key(self):
+        from remarkable_mcp import cli
+
+        old_key = os.environ.pop("REMARKABLE_SSH_KEY", None)
+        try:
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "remarkable-mcp",
+                        "--ssh",
+                        "--ssh-key",
+                        "~/.ssh/remarkable",
+                        "--http",
+                    ],
+                ),
+                patch("remarkable_mcp.server.run"),
+            ):
+                cli.main()
+            assert os.environ["REMARKABLE_SSH_KEY"] == "~/.ssh/remarkable"
+        finally:
+            os.environ.pop("REMARKABLE_SSH_KEY", None)
+            os.environ.pop("REMARKABLE_USE_SSH", None)
+            if old_key is not None:
+                os.environ["REMARKABLE_SSH_KEY"] = old_key
+
+    def test_host_and_port_require_http(self):
+        from remarkable_mcp.cli import main
+
+        with patch.object(sys, "argv", ["remarkable-mcp", "--port", "8001"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
 
 
 class TestCanvasWrite:

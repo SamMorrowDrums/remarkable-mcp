@@ -13,6 +13,8 @@ Your reMarkable tablet is a powerful tool for thinking, note-taking, and researc
 - **Handwriting OCR** — Convert handwritten notes to searchable text
 - **PDF & EPUB support** — Extract text plus an index of annotated pages, highlights, and notes
 - **Robust page rendering** — Renders pages locally and automatically falls back to a source PDF when the local stroke renderer can't (USB/SSH use the tablet's own PDF export; cloud uses the original source PDF), so images work across firmware versions and even without system graphics libraries installed
+- **Markdown writeback** — Render Markdown as a paginated PDF and upload it with a chosen document name
+- **OpenWebUI integration** — Run a local Streamable HTTP endpoint without a separate bridge script
 - **Smart search** — Find content across your entire library
 - **Second brain integration** — Use with Obsidian, note-taking apps, or any AI workflow
 
@@ -328,6 +330,81 @@ Pass `--no-cloud-fallback` (or set `REMARKABLE_DISABLE_CLOUD_FALLBACK=1`) to dis
 
 ---
 
+## OpenWebUI (Streamable HTTP)
+
+OpenWebUI's native MCP connection uses Streamable HTTP. Start remarkable-mcp on
+the same machine:
+
+```bash
+uvx remarkable-mcp --http
+```
+
+Then add `http://127.0.0.1:8000/mcp` as the MCP server URL in OpenWebUI. The
+HTTP transport combines with `--usb`, `--ssh`, and `--read-only`; for example:
+
+```bash
+uvx remarkable-mcp --usb --http
+```
+
+The bind address and port can also be set with `--host` / `--port` or
+`REMARKABLE_MCP_HOST` / `REMARKABLE_MCP_PORT`.
+
+> [!WARNING]
+> Streamable HTTP has **no built-in authentication**. It binds to
+> `127.0.0.1` by default and is intended for a local OpenWebUI instance. A
+> non-loopback bind such as `--host 0.0.0.0` exposes every enabled tool,
+> including write tools, to any client that can reach the port. The server
+> prints a prominent startup warning in that configuration and accepts only
+> `Host` and `Origin` values matching the explicitly selected bind host.
+
+### Remote access through an authenticated reverse proxy
+
+Keep remarkable-mcp on its default loopback bind and put the proxy on the same
+host. FastMCP's DNS-rebinding protection only permits loopback `Host` and
+`Origin` values by default. A proxy that forwards its public hostname unchanged
+will therefore receive **421 Misdirected Request**; a public browser `Origin`
+will receive **403 Forbidden**.
+
+The proxy must authenticate requests, rewrite `Host` to the loopback upstream,
+and clear `Origin`. For example, with nginx and an existing htpasswd file:
+
+```nginx
+location /mcp {
+    auth_basic "reMarkable MCP";
+    auth_basic_user_file /etc/nginx/remarkable-mcp.htpasswd;
+
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+
+    # Required by FastMCP's default DNS-rebinding protection.
+    proxy_set_header Host 127.0.0.1:8000;
+    proxy_set_header Origin "";
+}
+```
+
+Do not expose the upstream port directly. Configure OpenWebUI with the
+authenticated proxy URL, such as `https://mcp.example.com/mcp`.
+
+For NixOS, `remarkable-mcp-bridge.nix` provides a systemd module with the same
+loopback default:
+
+```nix
+{
+  imports = [ ./remarkable-mcp-bridge.nix ];
+  services.remarkable-mcp = {
+    enable = true;
+    command = "/opt/remarkable-mcp/.venv/bin/remarkable-mcp";
+  };
+}
+```
+
+The service user must have its reMarkable credentials under
+`/var/lib/remarkable-mcp` (or the configured `home`).
+
+---
+
 ## OpenClaw Integration
 
 remarkable-mcp works as an [OpenClaw](https://github.com/openclaw/openclaw) skill. Add to your `openclaw.json`:
@@ -364,7 +441,7 @@ Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remark
 | `remarkable_status` | Check connection status and the per-transport capability matrix |
 | `remarkable_image` | Get PNG/SVG images of pages (supports OCR via sampling) |
 
-These six tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`, `remarkable_refresh`, and `remarkable_author` for native ink/notebooks) are enabled by default on transports that support them — pass `--read-only` to disable them — see [Write Tools](#write-tools-by-transport). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
+These six tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_markdown_to_pdf`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`, `remarkable_refresh`, and `remarkable_author` for native ink/notebooks) are enabled by default on transports that support them — pass `--read-only` to disable them — see [Write Tools](#write-tools-by-transport). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
 
 📖 **[Full Tools Documentation](docs/tools.md)**
 
@@ -602,7 +679,8 @@ Or set the environment variable:
 
 | Tool | Description |
 |------|-------------|
-| `remarkable_upload(file_path, parent_folder, document_name, defer_restart)` | Upload a PDF or EPUB file (cloud, SSH, and USB web; USB web ignores folder/name and uploads to root) |
+| `remarkable_upload(file_path, parent_folder, document_name, defer_restart)` | Upload a PDF or EPUB file (cloud, SSH, and USB web; USB web uses the requested name but uploads to root) |
+| `remarkable_markdown_to_pdf(markdown, document_name, parent_folder, defer_restart)` | Render Markdown as a paginated PDF and upload it (cloud, SSH, and USB web) |
 | `remarkable_mkdir(folder_name, parent, defer_restart)` | Create a new folder (cloud and SSH) |
 | `remarkable_move(document, dest_folder, defer_restart)` | Move a document or folder (cloud and SSH) |
 | `remarkable_rename(document, new_name, defer_restart)` | Rename a document or folder (cloud and SSH) |
@@ -622,6 +700,13 @@ Or set the environment variable:
 ```python
 # Upload a PDF
 remarkable_upload("paper.pdf", parent_folder="/Research")
+
+# Render Markdown and upload the PDF without creating a local file
+remarkable_markdown_to_pdf(
+    "# Meeting Notes\n\n- Follow up with Sam",
+    document_name="Meeting Notes",
+    parent_folder="/Research",
+)
 
 # Create a folder
 remarkable_mkdir("2024 Archive", parent="/Archive")
@@ -848,4 +933,7 @@ MIT
 
 ---
 
-Built with [rmscene](https://github.com/ricklupton/rmscene), [PyMuPDF](https://pymupdf.readthedocs.io/), and inspiration from [ddvk/rmapi](https://github.com/ddvk/rmapi).
+Built with [rmscene](https://github.com/ricklupton/rmscene),
+[PyMuPDF](https://pymupdf.readthedocs.io/),
+[markdown-it-py](https://github.com/executablebooks/markdown-it-py), and
+inspiration from [ddvk/rmapi](https://github.com/ddvk/rmapi).
