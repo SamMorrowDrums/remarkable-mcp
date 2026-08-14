@@ -106,9 +106,6 @@ def _get_cloud_client():
 
     # Resolve the token: env var wins, else the saved ~/.rmapi file.
     if REMARKABLE_TOKEN:
-        # Also save to ~/.rmapi for compatibility
-        rmapi_file = Path.home() / ".rmapi"
-        rmapi_file.write_text(REMARKABLE_TOKEN)
         token_json = REMARKABLE_TOKEN
     else:
         rmapi_file = Path.home() / ".rmapi"

@@ -1138,9 +1138,10 @@ class TestRegistration:
 
     @patch("remarkable_mcp.sync.time.sleep")
     @patch("remarkable_mcp.sync._issue_request")
-    @patch("pathlib.Path.write_text")
-    def test_register_and_get_token(self, mock_write_text, mock_request, mock_sleep):
+    def test_register_and_get_token(self, mock_request, mock_sleep, monkeypatch, tmp_path):
         """Test registration process."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+
         # Mock successful API response
         mock_response = Mock()
         mock_response.status_code = 200
@@ -1155,6 +1156,7 @@ class TestRegistration:
         token_data = json.loads(token)
         assert token_data["devicetoken"] == "test_device_token_12345"
         assert "usertoken" in token_data
+        assert (tmp_path / ".rmapi").read_text() == token
 
         # Verify API was called
         mock_request.assert_called_once()
@@ -3394,6 +3396,45 @@ class TestBackgroundLoaderSingleFetch:
 
 class TestCloudClientCache:
     """The cloud client must be cached per process (one token renewal)."""
+
+    def test_environment_token_does_not_create_token_file(self, monkeypatch, tmp_path):
+        import remarkable_mcp.api as api
+
+        token = '{"devicetoken": "environment-token"}'
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("REMARKABLE_TOKEN", token)
+        monkeypatch.setattr(api, "REMARKABLE_TOKEN", token)
+        loader = Mock(return_value=Mock(name="cloud"))
+        monkeypatch.setattr("remarkable_mcp.sync.load_client_from_token", loader)
+
+        api.reset_client_cache()
+        try:
+            api._get_cloud_client()
+            assert not (tmp_path / ".rmapi").exists()
+            loader.assert_called_once_with(token)
+        finally:
+            api.reset_client_cache()
+
+    def test_environment_token_does_not_overwrite_token_file(self, monkeypatch, tmp_path):
+        import remarkable_mcp.api as api
+
+        saved_token = '{"devicetoken": "saved-token"}'
+        environment_token = '{"devicetoken": "environment-token"}'
+        token_file = tmp_path / ".rmapi"
+        token_file.write_text(saved_token)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("REMARKABLE_TOKEN", environment_token)
+        monkeypatch.setattr(api, "REMARKABLE_TOKEN", environment_token)
+        loader = Mock(return_value=Mock(name="cloud"))
+        monkeypatch.setattr("remarkable_mcp.sync.load_client_from_token", loader)
+
+        api.reset_client_cache()
+        try:
+            api._get_cloud_client()
+            assert token_file.read_text() == saved_token
+            loader.assert_called_once_with(environment_token)
+        finally:
+            api.reset_client_cache()
 
     def test_cloud_client_cached_and_resettable(self, monkeypatch, tmp_path):
         import remarkable_mcp.api as api
