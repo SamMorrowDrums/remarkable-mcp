@@ -18,6 +18,8 @@ import json
 import logging
 import os
 import subprocess
+import threading
+import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -119,6 +121,66 @@ class SSHClient:
         self.key_path = os.path.expanduser(key_path) if key_path else None
         self._documents: List[Document] = []
         self._documents_by_id: Dict[str, Document] = {}
+        self._metadata_loaded_all = False
+        self._metadata_lock = threading.RLock()
+        self._file_type_lock = threading.RLock()
+        self._io_lock = threading.RLock()
+        self._file_type_cache: Optional[dict[str, Optional[str]]] = None
+        self._trace_lock = threading.Lock()
+        self._trace_sequence = 0
+        self._trace_active = 0
+
+    def _trace_start(self, operation: str) -> tuple[int, float]:
+        if os.environ.get("REMARKABLE_SSH_TRACE", "").lower() not in ("1", "true", "yes"):
+            return 0, 0.0
+        with self._trace_lock:
+            self._trace_sequence += 1
+            self._trace_active += 1
+            sequence = self._trace_sequence
+            active = self._trace_active
+        logger.warning("SSH trace start id=%d operation=%s active=%d", sequence, operation, active)
+        return sequence, time.monotonic()
+
+    def _trace_finish(
+        self,
+        trace: tuple[int, float],
+        operation: str,
+        returncode: Optional[int],
+        output_bytes: int,
+    ) -> None:
+        sequence, started = trace
+        if not sequence:
+            return
+        with self._trace_lock:
+            self._trace_active -= 1
+            active = self._trace_active
+        logger.warning(
+            "SSH trace finish id=%d operation=%s active=%d duration=%.3fs returncode=%s bytes=%d",
+            sequence,
+            operation,
+            active,
+            time.monotonic() - started,
+            returncode,
+            output_bytes,
+        )
+
+    @staticmethod
+    def _command_operation(command: str) -> str:
+        if "*.metadata" in command:
+            return "metadata-preload"
+        if "*.content" in command:
+            return "file-type-preload"
+        if command.startswith("find "):
+            return "document-file-list"
+        if command.startswith("test -f "):
+            return "file-exists"
+        if "systemctl restart xochitl" in command:
+            return "xochitl-restart"
+        if "systemctl is-active xochitl" in command:
+            return "xochitl-readiness"
+        if command == "echo ok":
+            return "connection-check"
+        return "command"
 
     def _auth_ssh_options(self) -> List[str]:
         """SSH options for key-based auth.
@@ -141,6 +203,14 @@ class SSHClient:
 
     def _ssh_command(self, command: str, timeout: int = 30) -> str:
         """Execute a command on the tablet via SSH."""
+        with self._io_lock:
+            return self._ssh_command_unlocked(command, timeout)
+
+    def _ssh_command_unlocked(self, command: str, timeout: int) -> str:
+        operation = self._command_operation(command)
+        trace = self._trace_start(operation)
+        returncode = None
+        output_bytes = 0
         ssh_args = [
             "ssh",
             *self._auth_ssh_options(),
@@ -165,6 +235,8 @@ class SSHClient:
                 text=True,
                 timeout=timeout,
             )
+            returncode = result.returncode
+            output_bytes = len(result.stdout.encode()) + len(result.stderr.encode())
             if result.returncode != 0:
                 raise RuntimeError(f"SSH command failed: {result.stderr}")
             return result.stdout
@@ -184,9 +256,19 @@ class SSHClient:
                 "built in on Windows 10+), macOS (preinstalled), "
                 "Linux (apt install openssh-client / equivalent)."
             )
+        finally:
+            self._trace_finish(trace, operation, returncode, output_bytes)
 
     def _scp_download(self, remote_path: str, timeout: int = 60) -> bytes:
         """Download a file from the tablet via SSH cat (more reliable than SCP)."""
+        with self._io_lock:
+            return self._scp_download_unlocked(remote_path, timeout)
+
+    def _scp_download_unlocked(self, remote_path: str, timeout: int) -> bytes:
+        operation = f"download-{remote_path.rsplit('.', 1)[-1]}"
+        trace = self._trace_start(operation)
+        returncode = None
+        output_bytes = 0
         # Use SSH + cat instead of SCP for binary file transfer
         # This avoids issues with /dev/stdout on various platforms
         ssh_args = [
@@ -212,11 +294,63 @@ class SSHClient:
                 capture_output=True,
                 timeout=timeout,
             )
+            returncode = result.returncode
+            output_bytes = len(result.stdout) + len(result.stderr)
             if result.returncode != 0:
                 raise RuntimeError(f"SSH cat failed: {result.stderr.decode()}")
             return result.stdout
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"SSH cat timed out after {timeout}s")
+        finally:
+            self._trace_finish(trace, operation, returncode, output_bytes)
+
+    def _upload_file(self, local_path: str, remote_path: str, timeout: int = 120) -> None:
+        """Upload one file while participating in the per-client SSH I/O queue."""
+        with self._io_lock:
+            operation = f"upload-{remote_path.rsplit('.', 1)[-1]}"
+            trace = self._trace_start(operation)
+            returncode = None
+            output_bytes = 0
+            ssh_args = [
+                "ssh",
+                *self._auth_ssh_options(),
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                str(self.port),
+                f"{self.user}@{self.host}",
+                f"cat > '{remote_path}'",
+            ]
+            if self.password:
+                ssh_args = ["sshpass", "-p", self.password] + ssh_args
+
+            try:
+                with open(local_path, "rb") as source:
+                    result = subprocess.run(
+                        ssh_args,
+                        stdin=source,
+                        capture_output=True,
+                        timeout=timeout,
+                    )
+                returncode = result.returncode
+                output_bytes = len(result.stdout) + len(result.stderr)
+                if result.returncode != 0:
+                    raise RuntimeError(f"Upload failed: {result.stderr.decode()}")
+            except FileNotFoundError as e:
+                if self.password and "sshpass" in str(e):
+                    raise RuntimeError(
+                        "sshpass not found. Install it with: "
+                        "apt install sshpass (Debian/Ubuntu), "
+                        "brew install hudochenkov/sshpass/sshpass (macOS), "
+                        "or set up SSH key authentication instead."
+                    )
+                raise RuntimeError("SSH client not found. Install openssh-client.")
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(f"SSH upload timed out after {timeout}s")
+            finally:
+                self._trace_finish(trace, operation, returncode, output_bytes)
 
     def check_connection(self) -> bool:
         """Check if SSH connection to tablet is available."""
@@ -236,61 +370,54 @@ class SSHClient:
 
         Returns a list of Document objects.
         """
-        # Return cached documents if available and no limit specified
-        if self._documents and limit is None:
-            return self._documents
+        with self._metadata_lock:
+            # Re-check inside the lock: startup resource loading and the first
+            # status/tool request can arrive together on separate worker threads.
+            # Exactly one of them should scan the tablet; the other reuses its cache.
+            if self._metadata_loaded_all:
+                return self._documents if limit is None else self._documents[:limit]
+            if limit is not None and len(self._documents) >= limit:
+                return self._documents[:limit]
 
-        # If we have cached docs and limit is within cache, return slice
-        if self._documents and limit is not None and len(self._documents) >= limit:
-            return self._documents[:limit]
+            try:
+                output = self._ssh_command(
+                    f"for f in {XOCHITL_PATH}/*.metadata; do "
+                    f'echo "===FILE===$(basename $f .metadata)"; cat "$f" 2>/dev/null; '
+                    f"done",
+                    timeout=60,
+                )
+            except Exception as e:
+                raise RuntimeError(f"Failed to read metadata: {e}")
 
-        # Read all metadata files in a single SSH command for efficiency
-        # Output format: filename<TAB>content (JSON)
-        try:
-            # Use a single command to read all metadata files at once
-            # This is MUCH faster than individual cat commands
-            output = self._ssh_command(
-                f"for f in {XOCHITL_PATH}/*.metadata; do "
-                f'echo "===FILE===$(basename $f .metadata)"; cat "$f" 2>/dev/null; '
-                f"done",
-                timeout=60,
-            )
-        except Exception as e:
-            raise RuntimeError(f"Failed to read metadata: {e}")
+            documents = []
+            current_id = None
+            current_content = []
 
-        documents = []
+            for line in output.split("\n"):
+                if line.startswith("===FILE==="):
+                    if current_id and current_content:
+                        self._parse_and_add_document(
+                            current_id, "\n".join(current_content), documents, limit
+                        )
+                        if limit is not None and len(documents) >= limit:
+                            break
+                    current_id = line.replace("===FILE===", "").strip()
+                    current_content = []
+                else:
+                    current_content.append(line)
 
-        # Parse the output - split by our delimiter
-        current_id = None
-        current_content = []
-
-        for line in output.split("\n"):
-            if line.startswith("===FILE==="):
-                # Save previous document if we have one
-                if current_id and current_content:
+            if current_id and current_content:
+                if limit is None or len(documents) < limit:
                     self._parse_and_add_document(
                         current_id, "\n".join(current_content), documents, limit
                     )
-                    if limit is not None and len(documents) >= limit:
-                        break
-                # Start new document
-                current_id = line.replace("===FILE===", "").strip()
-                current_content = []
-            else:
-                current_content.append(line)
 
-        # Don't forget the last document
-        if current_id and current_content:
-            if limit is None or len(documents) < limit:
-                self._parse_and_add_document(
-                    current_id, "\n".join(current_content), documents, limit
-                )
+            self._documents = documents
+            self._documents_by_id = {d.id: d for d in documents}
+            self._metadata_loaded_all = limit is None
 
-        self._documents = documents
-        self._documents_by_id = {d.id: d for d in documents}
-
-        logger.info(f"Loaded {len(documents)} documents via SSH")
-        return documents
+            logger.info(f"Loaded {len(documents)} documents via SSH")
+            return documents
 
     def _parse_and_add_document(
         self,
@@ -341,7 +468,7 @@ class SSHClient:
 
     def get_doc(self, doc_id: str) -> Optional[Document]:
         """Get a document by ID."""
-        if not self._documents_by_id:
+        if not self._metadata_loaded_all and not self._documents_by_id:
             self.get_meta_items()
         return self._documents_by_id.get(doc_id)
 
@@ -429,18 +556,19 @@ class SSHClient:
 
         Returns the extension without dot, or None if not a file-based document.
         """
-        # Check cache first
-        if hasattr(self, "_file_type_cache") and doc.id in self._file_type_cache:
-            return self._file_type_cache[doc.id]
+        with self._file_type_lock:
+            # If the background all-file preload owns this lock, wait for it to
+            # finish instead of starting another SSH connection in parallel.
+            if self._file_type_cache is not None and doc.id in self._file_type_cache:
+                return self._file_type_cache[doc.id]
 
-        content_file = f"{XOCHITL_PATH}/{doc.id}.content"
-
-        try:
-            content = self._scp_download(content_file, timeout=10)
-            data = json.loads(content.decode("utf-8"))
-            return data.get("fileType")
-        except Exception:
-            return None
+            content_file = f"{XOCHITL_PATH}/{doc.id}.content"
+            try:
+                content = self._scp_download(content_file, timeout=10)
+                data = json.loads(content.decode("utf-8"))
+                return data.get("fileType")
+            except Exception:
+                return None
 
     def get_all_file_types(self) -> dict[str, Optional[str]]:
         """
@@ -449,50 +577,49 @@ class SSHClient:
         Returns a dict mapping document ID to file type (pdf, epub, or None).
         Much more efficient than calling get_file_type() for each document.
         """
-        if hasattr(self, "_file_type_cache"):
-            return self._file_type_cache
+        with self._file_type_lock:
+            if self._file_type_cache is not None:
+                return self._file_type_cache
 
-        self._file_type_cache: dict[str, Optional[str]] = {}
+            cache: dict[str, Optional[str]] = {}
+            try:
+                output = self._ssh_command(
+                    f"for f in {XOCHITL_PATH}/*.content; do "
+                    f'echo "===FILE===$(basename $f .content)"; cat "$f" 2>/dev/null; '
+                    f"done",
+                    timeout=60,
+                )
 
-        try:
-            # Read all .content files in a single command
-            output = self._ssh_command(
-                f"for f in {XOCHITL_PATH}/*.content; do "
-                f'echo "===FILE===$(basename $f .content)"; cat "$f" 2>/dev/null; '
-                f"done",
-                timeout=60,
-            )
+                current_id = None
+                current_content = []
 
-            current_id = None
-            current_content = []
+                for line in output.split("\n"):
+                    if line.startswith("===FILE==="):
+                        if current_id and current_content:
+                            try:
+                                data = json.loads("\n".join(current_content))
+                                cache[current_id] = data.get("fileType")
+                            except json.JSONDecodeError:
+                                cache[current_id] = None
 
-            for line in output.split("\n"):
-                if line.startswith("===FILE==="):
-                    # Parse previous content
-                    if current_id and current_content:
-                        try:
-                            data = json.loads("\n".join(current_content))
-                            self._file_type_cache[current_id] = data.get("fileType")
-                        except json.JSONDecodeError:
-                            self._file_type_cache[current_id] = None
+                        current_id = line.replace("===FILE===", "").strip()
+                        current_content = []
+                    else:
+                        current_content.append(line)
 
-                    current_id = line.replace("===FILE===", "").strip()
-                    current_content = []
-                else:
-                    current_content.append(line)
+                if current_id and current_content:
+                    try:
+                        data = json.loads("\n".join(current_content))
+                        cache[current_id] = data.get("fileType")
+                    except json.JSONDecodeError:
+                        cache[current_id] = None
 
-            # Don't forget the last one
-            if current_id and current_content:
-                try:
-                    data = json.loads("\n".join(current_content))
-                    self._file_type_cache[current_id] = data.get("fileType")
-                except json.JSONDecodeError:
-                    self._file_type_cache[current_id] = None
+            except Exception as e:
+                logger.warning(f"Failed to batch-load file types: {e}")
+                return {}
 
-        except Exception as e:
-            logger.warning(f"Failed to batch-load file types: {e}")
-
-        return self._file_type_cache
+            self._file_type_cache = cache
+            return cache
 
 
 def check_ssh_available(

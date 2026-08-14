@@ -636,7 +636,7 @@ Write tools let you upload, organize, and manage documents on your reMarkable. *
 | Mkdir | ❌ | ✅ | ✅ | ❌ |
 | Move | ❌ | ✅ | ✅ | ❌ |
 | Rename | ❌ | ✅ | ✅ | ❌ |
-| Delete | ❌ | ✅ (→ trash) | ✅ | ❌ |
+| Delete | ❌ | ✅ (→ trash) | ✅ (→ trash; optional permanent) | ❌ |
 
 ### Disabling Write Tools (read-only mode)
 
@@ -685,7 +685,7 @@ Or set the environment variable:
 | `remarkable_mkdir(folder_name, parent, defer_restart)` | Create a new folder (cloud and SSH) |
 | `remarkable_move(document, dest_folder, defer_restart)` | Move a document or folder (cloud and SSH) |
 | `remarkable_rename(document, new_name, defer_restart)` | Rename a document or folder (cloud and SSH) |
-| `remarkable_delete(document, defer_restart)` | Delete a document or folder — destructive (cloud and SSH) |
+| `remarkable_delete(document, defer_restart, permanent)` | Move a document/folder to Trash; SSH can permanently remove it with `permanent=True` |
 | `remarkable_refresh()` | Restart `xochitl` once to apply writes made with `defer_restart=True` — **SSH only** |
 | `remarkable_author(method, ...)` | Author native ink and notebooks — `draw` (append strokes), `add_page` (append a blank notebook page), `create_document` (new notebook) — **SSH only** |
 
@@ -693,7 +693,7 @@ Or set the environment variable:
 
 - **Upload registers in cloud, SSH, and USB web mode** — local-directory mode never exposes write tools.
 - **mkdir, move, rename, delete register in cloud and SSH modes only** — they are not exposed on USB web (the tablet's USB web firmware has no folder/move/rename/delete endpoints), keeping the tool list scoped to what the active transport actually supports.
-- **Delete prompts for confirmation when possible** — if the client supports MCP elicitation, `remarkable_delete` asks the user to confirm before deleting. If the client can't show a prompt, the delete is **refused** (not performed) unless `REMARKABLE_SKIP_CONFIRM=1` is set — so write-on-by-default can't silently delete from clients that lack elicitation. In cloud mode delete moves the item to the trash (recoverable from your device); set `REMARKABLE_SKIP_CONFIRM=1` to allow deletes without a prompt in automated setups. All write tools carry `ToolAnnotations(readOnlyHint=False)` (and `destructiveHint=True` for delete) so an agent harness can gate writes at the MCP layer.
+- **Delete prompts for confirmation when possible** — if the client supports MCP elicitation, `remarkable_delete` asks the user to confirm before deleting. If the client can't show a prompt, the delete is **refused** (not performed) unless `REMARKABLE_SKIP_CONFIRM=1` is set — so write-on-by-default can't silently delete from clients that lack elicitation. Cloud and SSH move items to Trash by default. SSH also supports `permanent=True` for an explicitly requested permanent removal; cloud permanent deletion remains a Trash-management operation in the app/tablet. Set `REMARKABLE_SKIP_CONFIRM=1` to allow deletes without a prompt in automated setups. All write tools carry `ToolAnnotations(readOnlyHint=False)` (and `destructiveHint=True` for delete) so an agent harness can gate writes at the MCP layer.
 - After each write operation in SSH mode, the tablet UI (`xochitl`) restarts automatically to reflect changes; the call waits for it to come back before returning so the next write doesn't race a restarting daemon. For bulk operations, pass `defer_restart=True` to each write — or set `REMARKABLE_DEFER_RESTART=1` — and call `remarkable_refresh()` once at the end, so the batch triggers a single restart instead of one per write (each restart forces a full document-store rescan).
 
 ### Examples
@@ -720,6 +720,9 @@ remarkable_rename("Untitled", "Q4 Planning Notes")
 
 # Delete (destructive — confirms via elicitation when supported)
 remarkable_delete("Old Draft")
+
+# Permanently delete in SSH mode only
+remarkable_delete("Disposable Test", permanent=True)
 
 # Bulk import (SSH): defer the restart on each write, then refresh once.
 # One xochitl restart for the whole batch instead of one per upload.

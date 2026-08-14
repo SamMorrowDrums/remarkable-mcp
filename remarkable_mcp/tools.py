@@ -40,6 +40,7 @@ from remarkable_mcp.extract import (
     extract_text_from_pdf,
     find_similar_documents,
     get_background_color,
+    get_cache_generation_token,
     get_cached_ocr_result,
     get_cached_page_ocr,
     get_document_page_count,
@@ -425,6 +426,7 @@ async def remarkable_read(
 
             # For sampling OCR: use per-page caching and only OCR requested page
             if use_sampling:
+                cache_generation = get_cache_generation_token(target_doc.ID)
                 # Check per-page cache first
                 cached_text = await run_blocking(
                     get_cached_page_ocr, target_doc.ID, page, "sampling"
@@ -477,6 +479,7 @@ async def remarkable_read(
                                     page,
                                     "sampling",
                                     ocr_text,
+                                    cache_generation,
                                 )
                                 # Build notebook_pages list
                                 notebook_pages = [""] * total_notebook_pages

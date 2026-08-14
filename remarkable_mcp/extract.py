@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 import zipfile
 from difflib import SequenceMatcher
@@ -141,6 +142,9 @@ _extraction_cache: Dict[str, Dict[str, Any]] = {}
 # Key: (doc_id, page_number, backend)
 # Value: {"text": str, "timestamp": float}
 _page_ocr_cache: Dict[tuple, Dict[str, Any]] = {}
+_cache_lock = threading.RLock()
+_cache_generation: Dict[str, int] = {}
+_global_cache_generation = 0
 
 
 def _is_cache_valid(cached: Dict[str, Any]) -> bool:
@@ -158,15 +162,51 @@ def clear_extraction_cache(doc_id: Optional[str] = None) -> None:
         doc_id: If provided, only clear cache for this document.
                 If None, clear the entire cache.
     """
-    if doc_id:
-        _extraction_cache.pop(doc_id, None)
-        # Also clear per-page cache entries for this document
-        keys_to_remove = [k for k in _page_ocr_cache if k[0] == doc_id]
-        for key in keys_to_remove:
-            _page_ocr_cache.pop(key, None)
-    else:
-        _extraction_cache.clear()
-        _page_ocr_cache.clear()
+    global _global_cache_generation
+
+    with _cache_lock:
+        if doc_id:
+            _cache_generation[doc_id] = _cache_generation.get(doc_id, 0) + 1
+            _extraction_cache.pop(doc_id, None)
+            keys_to_remove = [k for k in _page_ocr_cache if k[0] == doc_id]
+            for key in keys_to_remove:
+                _page_ocr_cache.pop(key, None)
+        else:
+            _global_cache_generation += 1
+            _extraction_cache.clear()
+            _page_ocr_cache.clear()
+            _cache_generation.clear()
+
+
+def _cache_token(doc_id: str) -> tuple[int, int]:
+    with _cache_lock:
+        return _global_cache_generation, _cache_generation.get(doc_id, 0)
+
+
+def get_cache_generation_token(doc_id: str) -> tuple[int, int]:
+    """Return a token that becomes stale when this document cache is cleared."""
+    return _cache_token(doc_id)
+
+
+def _cache_extraction_result_if_current(
+    doc_id: str,
+    result: Dict[str, Any],
+    include_ocr: bool,
+    token: tuple[int, int],
+) -> bool:
+    """Cache only if no mutation invalidated this document during extraction."""
+    with _cache_lock:
+        if token != (
+            _global_cache_generation,
+            _cache_generation.get(doc_id, 0),
+        ):
+            return False
+        _extraction_cache[doc_id] = {
+            "result": result,
+            "include_ocr": include_ocr,
+            "timestamp": time.time(),
+        }
+        return True
 
 
 def get_cached_page_ocr(
@@ -186,12 +226,12 @@ def get_cached_page_ocr(
         Cached OCR text or None if not cached/expired
     """
     cache_key = (doc_id, page, backend)
-    if cache_key in _page_ocr_cache:
-        cached = _page_ocr_cache[cache_key]
-        if _is_cache_valid(cached):
-            return cached["text"]
-        # Expired, remove it
-        _page_ocr_cache.pop(cache_key, None)
+    with _cache_lock:
+        if cache_key in _page_ocr_cache:
+            cached = _page_ocr_cache[cache_key]
+            if _is_cache_valid(cached):
+                return cached["text"]
+            _page_ocr_cache.pop(cache_key, None)
     return None
 
 
@@ -200,7 +240,8 @@ def cache_page_ocr(
     page: int,
     backend: str,
     text: str,
-) -> None:
+    generation_token: Optional[tuple[int, int]] = None,
+) -> bool:
     """
     Cache OCR result for a specific page.
 
@@ -211,10 +252,17 @@ def cache_page_ocr(
         text: OCR text result
     """
     cache_key = (doc_id, page, backend)
-    _page_ocr_cache[cache_key] = {
-        "text": text,
-        "timestamp": time.time(),
-    }
+    with _cache_lock:
+        if generation_token is not None and generation_token != (
+            _global_cache_generation,
+            _cache_generation.get(doc_id, 0),
+        ):
+            return False
+        _page_ocr_cache[cache_key] = {
+            "text": text,
+            "timestamp": time.time(),
+        }
+        return True
 
 
 def get_cached_ocr_result(
@@ -234,15 +282,15 @@ def get_cached_ocr_result(
     Returns:
         Cached result dict or None if not cached/expired/wrong backend
     """
-    if doc_id in _extraction_cache:
-        cached = _extraction_cache[doc_id]
-        if (cached["include_ocr"] or not include_ocr) and _is_cache_valid(cached):
-            # Check backend match if specified
-            if ocr_backend is not None:
-                cached_backend = cached["result"].get("ocr_backend")
-                if cached_backend != ocr_backend:
-                    return None
-            return cached["result"]
+    with _cache_lock:
+        if doc_id in _extraction_cache:
+            cached = _extraction_cache[doc_id]
+            if (cached["include_ocr"] or not include_ocr) and _is_cache_valid(cached):
+                if ocr_backend is not None:
+                    cached_backend = cached["result"].get("ocr_backend")
+                    if cached_backend != ocr_backend:
+                        return None
+                return cached["result"]
     return None
 
 
@@ -260,11 +308,12 @@ def cache_ocr_result(
                 handwritten_text, pages, page_ids, ocr_backend
         include_ocr: Whether this result includes OCR content
     """
-    _extraction_cache[doc_id] = {
-        "result": result,
-        "include_ocr": include_ocr,
-        "timestamp": time.time(),
-    }
+    with _cache_lock:
+        _extraction_cache[doc_id] = {
+            "result": result,
+            "include_ocr": include_ocr,
+            "timestamp": time.time(),
+        }
 
 
 def find_similar_documents(query: str, documents: List, limit: int = 5) -> List[str]:
@@ -2007,13 +2056,16 @@ def extract_text_from_document_zip(
             "ocr_backend": str,        # Which OCR backend was used (if any)
         }
     """
-    # Check cache if doc_id provided
-    if doc_id and doc_id in _extraction_cache:
-        cached = _extraction_cache[doc_id]
-        # Return cached result if OCR requirement is satisfied and cache is valid
-        # (cached with OCR can satisfy no-OCR request, but not vice versa)
-        if (cached["include_ocr"] or not include_ocr) and _is_cache_valid(cached):
-            return cached["result"]
+    cache_token = None
+    if doc_id:
+        with _cache_lock:
+            cache_token = (
+                _global_cache_generation,
+                _cache_generation.get(doc_id, 0),
+            )
+            cached = _extraction_cache.get(doc_id)
+            if cached and (cached["include_ocr"] or not include_ocr) and _is_cache_valid(cached):
+                return cached["result"]
 
     result: Dict[str, Any] = {
         "typed_text": [],
@@ -2149,13 +2201,8 @@ def extract_text_from_document_zip(
             result["handwritten_text"] = ocr_result
             result["ocr_backend"] = ocr_backend
 
-    # Cache result if doc_id provided
-    if doc_id:
-        _extraction_cache[doc_id] = {
-            "result": result,
-            "include_ocr": include_ocr,
-            "timestamp": time.time(),
-        }
+    if doc_id and cache_token is not None:
+        _cache_extraction_result_if_current(doc_id, result, include_ocr, cache_token)
 
     return result
 
