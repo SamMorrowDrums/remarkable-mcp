@@ -676,7 +676,7 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
     )
 
     background = await run_blocking(get_background_color)
-    client = get_rmapi()
+    client = await run_blocking(get_rmapi)
     collection = await run_blocking(client.get_meta_items)
     items_by_id = get_items_by_id(collection)
 

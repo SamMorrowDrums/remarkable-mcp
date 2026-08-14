@@ -31,6 +31,11 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def _is_wildcard_host(host: str) -> bool:
+    """Return whether a bind address is unspecified rather than routable."""
+    return host.strip().strip("[]") in ("0.0.0.0", "::")
+
+
 def _warn_for_http_binding(host: str) -> None:
     """Warn prominently when unauthenticated HTTP is exposed off-host."""
     if not _is_loopback_host(host):
@@ -186,8 +191,8 @@ Streamable HTTP Security:
         "--host",
         help=(
             "Streamable HTTP bind address (default: REMARKABLE_MCP_HOST or "
-            "127.0.0.1). Non-loopback addresses are unauthenticated and unsafe "
-            "unless protected by a correctly configured reverse proxy; see README."
+            "127.0.0.1). Use a concrete interface address for direct network access. "
+            "Wildcard addresses are rejected. See README for the safer reverse-proxy setup."
         ),
     )
     parser.add_argument(
@@ -209,13 +214,10 @@ Streamable HTTP Security:
 
         try:
             print(f"Registering with reMarkable using code: {args.register}")
-            token = register_and_get_token(args.register)
-            print("\n✅ Successfully registered!\n")
-            print("Your token (add to mcp.json env):")
-            print("-" * 50)
-            print(token)
-            print("-" * 50)
-            print("\nAdd to your .vscode/mcp.json:")
+            register_and_get_token(args.register)
+            print("\nRegistration complete.")
+            print("The credential was saved to ~/.rmapi.")
+            print("\nAdd this server to .vscode/mcp.json:")
             print(
                 json.dumps(
                     {
@@ -223,7 +225,6 @@ Streamable HTTP Security:
                             "remarkable": {
                                 "command": "uvx",
                                 "args": ["remarkable-mcp"],
-                                "env": {"REMARKABLE_TOKEN": token},
                             }
                         }
                     },
@@ -231,7 +232,7 @@ Streamable HTTP Security:
                 )
             )
         except Exception as e:
-            print(f"❌ Registration failed: {e}", file=sys.stderr)
+            print(f"Registration failed: {e}", file=sys.stderr)
             sys.exit(1)
     else:
         if args.local_dir:
@@ -267,6 +268,11 @@ Streamable HTTP Security:
                 parser.error("REMARKABLE_MCP_PORT must be an integer")
             if not 1 <= port <= 65535:
                 parser.error("REMARKABLE_MCP_PORT must be between 1 and 65535")
+            if _is_wildcard_host(host):
+                parser.error(
+                    "Wildcard HTTP bind addresses are not supported. Use 127.0.0.1 "
+                    "with an authenticated reverse proxy, or bind to a concrete interface address."
+                )
             _warn_for_http_binding(host)
             run(transport="streamable-http", host=host, port=port)
         else:

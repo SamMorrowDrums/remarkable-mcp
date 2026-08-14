@@ -348,6 +348,8 @@ _app_canvas.register_app_tools()
 def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     """Build a strict Host/Origin allowlist for the actual HTTP bind address."""
     normalized = host.strip().strip("[]")
+    if normalized in ("0.0.0.0", "::"):
+        raise ValueError("Wildcard HTTP bind addresses are not supported; use a concrete address.")
     if normalized in _LOOPBACK_HOSTS:
         return TransportSecuritySettings(
             enable_dns_rebinding_protection=True,

@@ -4824,6 +4824,22 @@ class TestCanvasRegisteredByDefault:
 class TestCLIFlags:
     """CLI flag wiring for the write/read-only gate."""
 
+    def test_register_does_not_print_saved_token(self, capsys):
+        from remarkable_mcp import cli
+
+        token = '{"devicetoken": "secret-value"}'
+        with (
+            patch.object(sys, "argv", ["remarkable-mcp", "--register", "one-time-code"]),
+            patch("remarkable_mcp.api.register_and_get_token", return_value=token),
+        ):
+            cli.main()
+
+        output = capsys.readouterr().out
+        assert "Registration complete." in output
+        assert "~/.rmapi" in output
+        assert "secret-value" not in output
+        assert "REMARKABLE_TOKEN" not in output
+
     def test_write_and_read_only_mutually_exclusive(self):
         """Passing both --write and --read-only is an argparse error (exit 2)."""
         from remarkable_mcp.cli import main
@@ -4897,7 +4913,7 @@ class TestCLIFlags:
             patch.object(
                 sys,
                 "argv",
-                ["remarkable-mcp", "--http", "--host", "0.0.0.0", "--port", "9000"],
+                ["remarkable-mcp", "--http", "--host", "192.0.2.10", "--port", "9000"],
             ),
             patch("remarkable_mcp.server.run") as mock_run,
         ):
@@ -4905,14 +4921,28 @@ class TestCLIFlags:
 
         mock_run.assert_called_once_with(
             transport="streamable-http",
-            host="0.0.0.0",
+            host="192.0.2.10",
             port=9000,
         )
         warning = capsys.readouterr().err
         assert "WARNING" in warning
         assert "no authentication" in warning
         assert "including writes" in warning
-        assert "matching '0.0.0.0'" in warning
+        assert "matching '192.0.2.10'" in warning
+
+    @pytest.mark.parametrize("host", ["0.0.0.0", "::", "[::]"])
+    def test_http_rejects_wildcard_binding(self, host):
+        from remarkable_mcp import cli
+
+        with (
+            patch.object(sys, "argv", ["remarkable-mcp", "--http", "--host", host]),
+            patch("remarkable_mcp.server.run") as mock_run,
+            pytest.raises(SystemExit) as exc,
+        ):
+            cli.main()
+
+        assert exc.value.code == 2
+        mock_run.assert_not_called()
 
     def test_default_transport_security_requires_proxy_header_rewrite(self):
         from mcp.server.transport_security import TransportSecurityMiddleware
@@ -4923,7 +4953,7 @@ class TestCLIFlags:
         assert middleware._validate_origin("https://openwebui.example.com") is False
         assert middleware._validate_origin(None) is True
 
-    def test_runtime_transport_security_matches_explicit_wildcard_host(self):
+    def test_runtime_transport_security_matches_explicit_non_loopback_host(self):
         from mcp.server.transport_security import TransportSecurityMiddleware
 
         import remarkable_mcp.server as server
@@ -4935,19 +4965,26 @@ class TestCLIFlags:
             with patch.object(mcp, "run") as fastmcp_run:
                 server.run(
                     transport="streamable-http",
-                    host="0.0.0.0",
+                    host="192.0.2.10",
                     port=9000,
                 )
             fastmcp_run.assert_called_once_with(transport="streamable-http")
             middleware = TransportSecurityMiddleware(mcp.settings.transport_security)
-            assert middleware._validate_host("0.0.0.0:9000") is True
-            assert middleware._validate_origin("http://0.0.0.0:3000") is True
+            assert middleware._validate_host("192.0.2.10:9000") is True
+            assert middleware._validate_origin("http://192.0.2.10:3000") is True
             assert middleware._validate_host("mcp.example.com") is False
             assert middleware._validate_origin("https://openwebui.example.com") is False
         finally:
             mcp.settings.host = previous_host
             mcp.settings.port = previous_port
             mcp.settings.transport_security = previous_security
+
+    @pytest.mark.parametrize("host", ["0.0.0.0", "::", "[::]"])
+    def test_transport_security_rejects_wildcard_host(self, host):
+        from remarkable_mcp.server import _transport_security_for_host
+
+        with pytest.raises(ValueError, match="Wildcard"):
+            _transport_security_for_host(host)
 
     def test_read_only_instructions_do_not_advertise_markdown_writeback(self):
         from remarkable_mcp.server import _build_instructions

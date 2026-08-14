@@ -1,24 +1,21 @@
 # reMarkable MCP Server
 
-Unlock the full potential of your reMarkable tablet as a **second brain** for AI assistants. This MCP server lets Claude, VS Code Copilot, and other AI tools read, search, and traverse your entire reMarkable library — including handwritten notes via OCR.
+Access a reMarkable library from MCP clients such as Claude, VS Code Copilot,
+OpenWebUI, and other compatible tools.
 
 <!-- mcp-name: io.github.SamMorrowDrums/remarkable -->
 
-## Why remarkable-mcp?
+## Features
 
-Your reMarkable tablet is a powerful tool for thinking, note-taking, and research. But that knowledge stays trapped on the device. This MCP server changes that:
-
-- **Full library access** — Browse folders, search documents, read any file
-- **Typed text extraction** — Native support for Type Folio and typed annotations
-- **Handwriting OCR** — Convert handwritten notes to searchable text
-- **PDF & EPUB support** — Extract text plus an index of annotated pages, highlights, and notes
-- **Portable page rendering** — Renders notebook SVG and PDF pages with bundled Python dependencies only, then automatically falls back to a source PDF when local stroke parsing can't handle a page (USB/SSH use the tablet's own PDF export; cloud uses the original source PDF)
-- **Markdown writeback** — Render Markdown as a paginated PDF and upload it with a chosen document name
-- **OpenWebUI integration** — Run a local Streamable HTTP endpoint without a separate bridge script
-- **Smart search** — Find content across your entire library
-- **Second brain integration** — Use with Obsidian, note-taking apps, or any AI workflow
-
-Whether you're researching, writing, or developing ideas, remarkable-mcp lets you leverage everything on your reMarkable through AI.
+- Browse folders and recent documents.
+- Search names, tags, and extracted text.
+- Read typed text, PDF and EPUB text, highlights, and annotations.
+- Render notebooks and annotated PDFs as PNG or SVG.
+- Run handwriting OCR through MCP sampling, Google Vision, or Tesseract.
+- Upload files and manage folders in supported transports.
+- Render Markdown as PDF and upload it to the tablet.
+- Open an interactive canvas in clients that support MCP Apps.
+- Serve MCP over stdio or local Streamable HTTP.
 
 ---
 
@@ -58,25 +55,30 @@ Or install with WinGet:
 winget install --id=astral-sh.uv -e
 ```
 
-### 🔌 USB Web Interface (Recommended)
+### Choose a connection
+
+Start with the first mode that fits your setup.
+
+| Order | Mode | Setup | Writes | Use when |
+|---:|---|---|---|---|
+| 1 | USB web | Connect the tablet and enable USB web | Upload to root | You want the shortest setup without a subscription or developer mode |
+| 2 | Local directory | Install and sign in to the desktop app | No | You want offline, device-free reads from the desktop cache |
+| 3 | Cloud | Register once; Connect subscription required | Full document and folder management | You need wireless or remote access |
+| 4 | SSH | Enable developer mode and configure SSH | Full management and native authoring | You need direct filesystem access or native ink writes |
+
+### USB Web Interface
 
 Connect via USB and enable the web interface in your tablet's Storage Settings.
 
 [![Install USB Web Mode in VS Code](https://img.shields.io/badge/VS_Code-Install_USB_Web_Mode-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%2C%22--usb%22%5D%2C%22env%22%3A%7B%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D)
 [![Install USB Web Mode in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_USB_Web_Mode-24bfa5?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%2C%22--usb%22%5D%2C%22env%22%3A%7B%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D&quality=insiders)
 
-**Setup:**
 1. Connect your reMarkable via USB
-2. On your tablet: **Settings → Storage** → Enable **"USB web interface"**
+2. On your tablet, open **Settings > Storage** and enable **USB web interface**
 3. Install via the button above
 
-**Why USB Web?**
-- ✅ Fast offline access over USB
-- ✅ No subscription required
-- ✅ Simple — just enable in Storage Settings
-
 <details>
-<summary>📋 Manual USB Web Configuration</summary>
+<summary>Manual USB web configuration</summary>
 
 Add to `.vscode/mcp.json`:
 
@@ -94,55 +96,21 @@ Add to `.vscode/mcp.json`:
 }
 ```
 
-**Troubleshooting:**
 - Make sure your reMarkable is connected via USB and unlocked
-- Verify USB web interface is enabled in Settings → Storage
+- Verify USB web interface is enabled in Settings > Storage
 - The tablet should be accessible at `http://10.11.99.1`
 
 </details>
 
 ---
 
-### ⚡ SSH Mode (Advanced)
+### Local Directory Mode
 
-For power users who need direct filesystem access. Faster than USB Web but requires developer mode (factory reset).
-
-[![Install SSH Mode in VS Code](https://img.shields.io/badge/VS_Code-Install_SSH_Mode-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%2C%22--ssh%22%5D%2C%22env%22%3A%7B%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D)
-[![Install SSH Mode in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_SSH_Mode-24bfa5?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%2C%22--ssh%22%5D%2C%22env%22%3A%7B%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D&quality=insiders)
-
-**Requirements:** [Developer mode enabled](docs/ssh-setup.md) + USB connection to your reMarkable
+Read the official reMarkable desktop app's sync folder from disk. This mode is
+offline and read-only. The desktop app controls synchronization.
 
 <details>
-<summary>📋 Manual SSH Configuration</summary>
-
-Add to `.vscode/mcp.json`:
-
-```json
-{
-  "servers": {
-    "remarkable": {
-      "command": "uvx",
-      "args": ["remarkable-mcp", "--ssh"],
-      "env": {
-        "GOOGLE_VISION_API_KEY": "your-api-key"
-      }
-    }
-  }
-}
-```
-
-See [SSH Setup Guide](docs/ssh-setup.md) for detailed instructions.
-
-</details>
-
----
-
-### 💻 Local Directory Mode (Desktop App)
-
-Read the official **reMarkable desktop app's** sync folder straight from disk — fully offline, no cable, no cloud round-trip, and the tablet doesn't even need to be on. The desktop app keeps the folder synced whenever it is running. Strictly read-only.
-
-<details>
-<summary>📋 Local Directory Configuration</summary>
+<summary>Local directory configuration</summary>
 
 Add to `.vscode/mcp.json`:
 
@@ -177,23 +145,23 @@ Or point at any xochitl-style directory (e.g. a tablet backup):
 }
 ```
 
-**Notes:**
-- Content freshness depends on the desktop app syncing — keep it running and signed in
-- This mode is read-only by design: the folder is the desktop app's private sync cache, and writing to it directly would bypass sync and could corrupt the app's state
+- Content freshness depends on the desktop app. Keep it running and signed in.
+- This mode is read-only. Direct writes could bypass synchronization and corrupt the app cache.
 - If the directory can't be found and a cloud token is configured, the server falls back to cloud mode for read access (the server remains read-only because it was launched in local-directory mode)
 
 </details>
 
 ---
 
-### ☁️ Cloud Mode (Wireless)
+### Cloud Mode
 
-Wireless access with **no device connection required** — your reMarkable syncs to the cloud and the MCP reads from there, so it works from anywhere. Requires a reMarkable Connect subscription.
+Cloud mode works without a device connection and requires a reMarkable Connect subscription.
 
-Cloud mode fetches your whole library in parallel and caches content-addressed blobs on disk, so after the first run startups and document reads are near-instant (a 388-document library lists in ~4s cold, ~0.5s warm). See [Cloud Performance & Caching](#cloud-performance--caching) to tune it.
+It fetches metadata in parallel and caches content-addressed blobs on disk. See
+[Cloud performance and caching](#cloud-performance--caching) for configuration.
 
 <details>
-<summary>📋 Cloud Mode Setup</summary>
+<summary>Cloud mode setup</summary>
 
 #### 1. Get a One-Time Code
 
@@ -207,10 +175,7 @@ uvx remarkable-mcp --register YOUR_CODE
 
 Registration saves the token to `~/.rmapi`. When your MCP client runs the server as the same user on the same machine, remarkable-mcp reads that file automatically, so you do not need to put a token in the client configuration. Set `REMARKABLE_TOKEN` only when `~/.rmapi` is unavailable, such as when the server runs under another user or on another machine.
 
-#### 3. Install
-
-[![Install Cloud Mode in VS Code](https://img.shields.io/badge/VS_Code-Install_Cloud_Mode-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22token%22%2C%22description%22%3A%22reMarkable%20API%20token%22%2C%22password%22%3Atrue%7D%2C%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%5D%2C%22env%22%3A%7B%22REMARKABLE_TOKEN%22%3A%22%24%7Binput%3Atoken%7D%22%2C%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D)
-[![Install Cloud Mode in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Cloud_Mode-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22token%22%2C%22description%22%3A%22reMarkable%20API%20token%22%2C%22password%22%3Atrue%7D%2C%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%5D%2C%22env%22%3A%7B%22REMARKABLE_TOKEN%22%3A%22%24%7Binput%3Atoken%7D%22%2C%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D&quality=insiders)
+#### 3. Configure your MCP client
 
 ##### Minimal client-neutral server definition
 
@@ -227,32 +192,15 @@ No `env` entry is needed when the server can read the token from `~/.rmapi`.
 
 ##### VS Code
 
-VS Code's `.vscode/mcp.json` uses a top-level `servers` object. It also supports a top-level `inputs` array and `${input:...}` placeholders for values that VS Code should prompt for:
+VS Code's `.vscode/mcp.json` uses a top-level `servers` object. The saved
+`~/.rmapi` credential means no token input is required:
 
 ```json
 {
-  "inputs": [
-    {
-      "type": "promptString",
-      "id": "remarkable-token",
-      "description": "reMarkable API Token",
-      "password": true
-    },
-    {
-      "type": "promptString",
-      "id": "google-vision-key",
-      "description": "Google Vision API Key",
-      "password": true
-    }
-  ],
   "servers": {
     "remarkable": {
       "command": "uvx",
-      "args": ["remarkable-mcp"],
-      "env": {
-        "REMARKABLE_TOKEN": "${input:remarkable-token}",
-        "GOOGLE_VISION_API_KEY": "${input:google-vision-key}"
-      }
+      "args": ["remarkable-mcp"]
     }
   }
 }
@@ -279,6 +227,28 @@ If the token file is unavailable, add `"env": {"REMARKABLE_TOKEN": "your-token"}
 
 ---
 
+### SSH Mode
+
+SSH provides direct filesystem access and native notebook authoring. It requires
+[developer mode](docs/ssh-setup.md), which factory-resets the tablet when enabled.
+Use this mode only when USB web, local directory, or cloud mode does not provide the
+operation you need.
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": ["remarkable-mcp", "--ssh"]
+    }
+  }
+}
+```
+
+See the [SSH setup guide](docs/ssh-setup.md) for authentication and device setup.
+
+---
+
 <!-- Screenshots section - uncomment when screenshots are added
 ## Screenshots
 
@@ -299,19 +269,16 @@ AI assistants use the tools to read documents, search content, and more:
 
 ## Connection Modes
 
-All four modes support reading and rendering. **Cloud and SSH support full library management**, USB web supports upload-to-root, and local-directory mode is strictly read-only:
+All modes support reading and rendering. Cloud and SSH support full library
+management. USB web supports upload to the root folder. Local directory mode is
+read-only.
 
-- **💻 Local Directory** — *device-free AND offline.* Reads the official desktop app's sync folder straight from disk — no cable, no cloud round-trip, no subscription beyond what the app itself needs, and the tablet can be off. Read/render only (the folder is the app's private sync cache, so writes are disabled by design). Best when the desktop app is already part of your workflow.
-- **☁️ Cloud** — *device-free, works from anywhere.* Reads your library straight from reMarkable's cloud over Wi‑Fi with a Connect subscription — no cable, no developer mode. Full read/render plus full write (upload, create folder, move, rename, delete → trash). Parallel fetching and an on-disk blob cache make it fast after the first sync. Best for remote/headless setups or when you don't want to plug in.
-- **🔌 USB Web Interface** — *best when the tablet is plugged in.* Enable the web interface in Storage Settings — no subscription, no developer mode. Full read/render plus upload (to your root folder). The tablet's USB web firmware exposes no folder/move/rename/delete endpoints, so for those over a cable use SSH.
-- **⚡ SSH** — *for power users who want filesystem-level access.* Requires developer mode over USB. Full read/render plus full write including folder create/move/rename/delete, straight from the tablet filesystem.
-
-| Mode | Setup | Subscription | Offline | Tablet needed | Read + render | Raw PDF/EPUB | Upload | Folder ops¹ |
-|------|-------|--------------|---------|---------------|---------------|--------------|--------|-------------|
-| **💻 Local Dir** | Desktop app installed | Not required² | ✅ | ❌ | ✅ | ✅ PDF/EPUB | ❌ | ❌ |
-| **☁️ Cloud** | One-time code | Connect | ❌ | ❌ | ✅ | ✅ PDF/EPUB | ✅ | ✅ |
-| **🔌 USB Web** | Enable in Settings | Not required | ✅ | ✅ | ✅ | ✅ PDF | ✅ (to root) | ❌ |
-| **⚡ SSH** | Developer mode | Not required | ✅ | ✅ | ✅ | ✅ PDF/EPUB | ✅ | ✅ |
+| Mode | Setup | Subscription | Offline | Tablet required | Raw source | Upload | Folder operations¹ |
+|---|---|---|---|---|---|---|---|
+| Local directory | Desktop app installed | No² | Yes | No | PDF and EPUB | No | No |
+| USB web | Enable in Settings | No | Yes | Yes | PDF | Root only | No |
+| Cloud | One-time registration | Connect | No | No | PDF and EPUB | Yes | Yes |
+| SSH | Developer mode | No | Yes | Yes | PDF and EPUB | Yes | Yes |
 
 ¹ Folder ops = create folder / move / rename / delete. Upload and folder ops are enabled by default; pass `--read-only` to expose a read-only server. Deletes move items to the trash and prompt for confirmation when your client supports elicitation, and are refused without it unless `REMARKABLE_SKIP_CONFIRM=1` is set.
 
@@ -319,16 +286,22 @@ All four modes support reading and rendering. **Cloud and SSH support full libra
 
 ### Automatic cloud fallback
 
-If you select a device transport (`--usb`, `--ssh`, or `--local-dir`) but it isn't reachable at startup **and** a cloud token is configured (`REMARKABLE_TOKEN` or `~/.rmapi`), the server automatically falls back to cloud mode and logs a warning. This means a single configuration works whether or not the tablet is plugged in — plug in for fast local access, unplug to keep working over the cloud. A server launched with `--local-dir` remains read-only after fallback, preserving that mode's safety contract. `remarkable_status` reports the effective transport and a `fell_back_to_cloud` flag when this happens.
+If a selected device transport is unavailable and a cloud credential is configured,
+the server falls back to cloud mode. A server launched with `--local-dir` remains
+read-only after fallback. `remarkable_status` reports the effective transport and
+sets `fell_back_to_cloud`.
 
 Pass `--no-cloud-fallback` (or set `REMARKABLE_DISABLE_CLOUD_FALLBACK=1`) to disable this and fail instead when the device is unreachable.
 
-> **Troubleshooting:** the transport is resolved once and cached for the MCP server's lifetime. If the server fell back to cloud (for example, the desktop app only started syncing after the server launched), **restart the MCP server** to pick up the local directory again — `remarkable_status` shows the active transport and a `fell_back_to_cloud` flag so you can tell when this has happened.
+The transport is resolved once per server process. Restart the MCP server after
+connecting a device or starting the desktop app if the process already fell back to
+cloud.
 
-**📖 Detailed Setup Guides:**
-- [USB Web Interface Setup](docs/usb-web-setup.md) — **recommended** — simple setup, full feature support
-- [SSH Setup Guide](docs/ssh-setup.md) — for advanced users who need filesystem access
-- Cloud setup is documented in the Quick Install section above; tuning in [Cloud Performance & Caching](#cloud-performance--caching)
+Detailed setup:
+
+- [USB web setup](docs/usb-web-setup.md)
+- [SSH setup](docs/ssh-setup.md)
+- [Cloud performance and caching](#cloud-performance--caching)
 
 ---
 
@@ -352,12 +325,11 @@ The bind address and port can also be set with `--host` / `--port` or
 `REMARKABLE_MCP_HOST` / `REMARKABLE_MCP_PORT`.
 
 > [!WARNING]
-> Streamable HTTP has **no built-in authentication**. It binds to
-> `127.0.0.1` by default and is intended for a local OpenWebUI instance. A
-> non-loopback bind such as `--host 0.0.0.0` exposes every enabled tool,
-> including write tools, to any client that can reach the port. The server
-> prints a prominent startup warning in that configuration and accepts only
-> `Host` and `Origin` values matching the explicitly selected bind host.
+> Streamable HTTP has no built-in authentication. It binds to `127.0.0.1` by
+> default. Keep that default unless you control the network boundary. Wildcard
+> binds such as `0.0.0.0` and `::` are rejected because they cannot provide a
+> strict Host allowlist. A concrete non-loopback address is allowed but exposes
+> every enabled tool, including writes, to clients that can reach the port.
 
 ### Remote access through an authenticated reverse proxy
 
@@ -443,18 +415,21 @@ Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remark
 | `remarkable_status` | Check connection status and the per-transport capability matrix |
 | `remarkable_image` | Get PNG/SVG images of pages (supports OCR via sampling) |
 
-These six tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_markdown_to_pdf`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`, `remarkable_refresh`, and `remarkable_author` for native ink/notebooks) are enabled by default on transports that support them — pass `--read-only` to disable them — see [Write Tools](#write-tools-by-transport). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
+These six tools are read-only and return structured JSON with next-step hints.
+Supported transports also register write tools by default; pass `--read-only` to
+disable them. See [Write Tools](#write-tools-by-transport). Clients that support
+[MCP Apps](#interactive-canvas-app-mcp-apps) can also open `remarkable_canvas`.
 
-📖 **[Full Tools Documentation](docs/tools.md)**
+[Full tools reference](docs/tools.md)
 
-### Smart Features
+### Tool behavior
 
-- **Auto-redirect** — Browsing a document path returns its content automatically
-- **Auto-OCR** — Notebooks with no typed text automatically enable OCR
-- **Batch search** — Search across multiple documents in one call
-- **Vision support** — Get page images for visual context (diagrams, mockups, sketches)
-- **Sampling OCR** — Use client's AI for OCR on images (no API key needed)
-- **Tag support** — Filter and organize documents by tags
+- Browsing a document path returns its content.
+- Empty notebook text can trigger OCR automatically.
+- Search can scan several matching documents.
+- Image tools return visual content that text extraction misses.
+- Sampling OCR uses the connected client's model when supported.
+- Browse and search accept tag filters.
 
 ### Example Usage
 
@@ -493,6 +468,9 @@ remarkable_image("Wireframe", output_format="svg")
 # Get image with OCR text extraction (uses sampling if configured)
 remarkable_image("Handwritten Notes", include_ocr=True)
 
+# Composite an imported PDF page with its reMarkable annotations
+remarkable_image("Research Paper", page=3, render_merged=True)
+
 # Transparent background for compositing
 remarkable_image("Logo Sketch", background="#00000000")
 
@@ -515,12 +493,12 @@ Documents are automatically registered as MCP resources:
 | URI Scheme | Description |
 |------------|-------------|
 | `remarkable:///{path}.txt` | Extracted text content |
-| `remarkableraw:///{path}.pdf` | Original PDF file (SSH only) |
-| `remarkableraw:///{path}.epub` | Original EPUB file (SSH only) |
+| `remarkableraw:///{path}.pdf.txt` | Extracted text from the original PDF |
+| `remarkableraw:///{path}.epub.txt` | Extracted text from the original EPUB |
 | `remarkableimg:///{path}.page-{N}.png` | PNG image of page N (notebooks only) |
 | `remarkablesvg:///{path}.page-{N}.svg` | SVG vector image of page N (notebooks only) |
 
-📖 **[Full Resources Documentation](docs/resources.md)**
+[Full resources reference](docs/resources.md)
 
 ---
 
@@ -528,11 +506,11 @@ Documents are automatically registered as MCP resources:
 
 For handwritten content, remarkable-mcp offers several OCR backends. Choose based on your setup and requirements:
 
-| Backend | Setup | Quality | Offline | Best For |
-|---------|-------|---------|---------|----------|
-| **Sampling** | No API key | Depends on client model | ✅ | Users with capable AI clients |
-| **Google Vision** | API key | Excellent | ❌ | Best handwriting accuracy |
-| **Tesseract** | System install | Poor for handwriting | ✅ | Printed text, offline fallback |
+| Backend | Setup | Offline | Notes |
+|---|---|---|---|
+| Sampling | No API key | Depends on the client | Uses the connected client's model |
+| Google Vision | API key | No | Good handwriting support |
+| Tesseract | System install | Yes | Better suited to printed text |
 
 ### Quick Setup
 
@@ -549,39 +527,32 @@ Set `REMARKABLE_OCR_BACKEND` in your MCP config:
 **Options:** `sampling`, `google`, `tesseract`, `auto`
 
 <details>
-<summary>📖 Sampling OCR (No API Key)</summary>
+<summary>Sampling OCR</summary>
 
 Uses your MCP client's AI model for OCR. Works with clients that support MCP sampling (VS Code + Copilot, Claude Desktop, etc.).
 
-**Pros:**
 - No additional API keys needed
-- Quality depends on your client's model (GPT-4, Claude, etc.)
-- Private — handwriting stays local to your client
-
-**Cons:**
+- Quality and data handling depend on your MCP client and model
 - Only available with sampling-capable clients
 - Falls back to Google Vision (if API key configured) or Tesseract if sampling unavailable
 
 </details>
 
 <details>
-<summary>📖 Google Cloud Vision</summary>
+<summary>Google Cloud Vision</summary>
 
-Provides consistently excellent handwriting recognition.
-
-**Setup:**
 1. Enable [Cloud Vision API](https://console.cloud.google.com/apis/library/vision.googleapis.com)
 2. Create an [API key](https://console.cloud.google.com/apis/credentials)
 3. Add to config: `"GOOGLE_VISION_API_KEY": "your-key"`
 
 **Cost:** 1,000 free requests/month, then ~$1.50 per 1,000.
 
-📖 **[Full Google Vision Setup Guide](docs/google-vision-setup.md)**
+[Google Vision setup guide](docs/google-vision-setup.md)
 
 </details>
 
 <details>
-<summary>📖 Tesseract (Fallback)</summary>
+<summary>Tesseract</summary>
 
 Open-source OCR designed for printed text. Poor results with handwriting, but useful as an offline fallback.
 
@@ -607,36 +578,17 @@ When `REMARKABLE_OCR_BACKEND=auto` (default):
 
 ---
 
-## Transport Comparison
-
-| Feature | Local Directory | SSH Mode | USB Web | Cloud API |
-|---------|-----------------|----------|---------|-----------|
-| Speed | ⚡ Local disk | ⚡ 10-100x faster | ⚡ Fast | ⚡ Fast (parallel + cached) |
-| Offline | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No |
-| Tablet needed | ❌ No | ✅ Yes | ✅ Yes | ❌ No |
-| Subscription | ✅ Not required¹ | ✅ Not required | ✅ Not required | ❌ Connect required |
-| Raw files | ✅ PDFs, EPUBs | ✅ PDFs, EPUBs | ✅ PDFs | ✅ PDFs, EPUBs |
-| Upload | ❌ | ✅ (default) | ✅ (default) | ✅ (default) |
-| mkdir/move/rename/delete | ❌ | ✅ (default) | ❌ | ✅ (default) |
-| Setup | Desktop app | Developer mode | Enable in Settings | One-time code |
-
-¹ The desktop app signs in to sync; this transport reads its existing local cache.
-
-📖 **[SSH Setup Guide](docs/ssh-setup.md)**
-
----
-
 ## Write Tools by Transport
 
 Write tools let you upload, organize, and manage documents on your reMarkable. **Enabled by default on write-capable transports.** Cloud and SSH modes support the full set; USB web supports upload only (its firmware exposes no folder operations); local-directory mode is always read-only. Pass `--read-only` to expose a read-only server elsewhere.
 
-| Feature | Local Directory | Cloud Mode | SSH Mode | USB Web Mode |
-|---------|:---------------:|:----------:|:--------:|:------------:|
-| Upload | ❌ | ✅ | ✅ | ✅ (to root) |
-| Mkdir | ❌ | ✅ | ✅ | ❌ |
-| Move | ❌ | ✅ | ✅ | ❌ |
-| Rename | ❌ | ✅ | ✅ | ❌ |
-| Delete | ❌ | ✅ (→ trash) | ✅ | ❌ |
+| Feature | Local directory | Cloud | SSH | USB web |
+|---|---:|---:|---:|---:|
+| Upload | No | Yes | Yes | Root only |
+| Create folder | No | Yes | Yes | No |
+| Move | No | Yes | Yes | No |
+| Rename | No | Yes | Yes | No |
+| Delete | No | Trash | Yes | No |
 
 ### Disabling Write Tools (read-only mode)
 
@@ -685,16 +637,16 @@ Or set the environment variable:
 | `remarkable_mkdir(folder_name, parent, defer_restart)` | Create a new folder (cloud and SSH) |
 | `remarkable_move(document, dest_folder, defer_restart)` | Move a document or folder (cloud and SSH) |
 | `remarkable_rename(document, new_name, defer_restart)` | Rename a document or folder (cloud and SSH) |
-| `remarkable_delete(document, defer_restart)` | Delete a document or folder — destructive (cloud and SSH) |
-| `remarkable_refresh()` | Restart `xochitl` once to apply writes made with `defer_restart=True` — **SSH only** |
-| `remarkable_author(method, ...)` | Author native ink and notebooks — `draw` (append strokes), `add_page` (append a blank notebook page), `create_document` (new notebook) — **SSH only** |
+| `remarkable_delete(document, defer_restart)` | Delete a document or folder (cloud and SSH; destructive) |
+| `remarkable_refresh()` | Restart `xochitl` once to apply deferred SSH writes |
+| `remarkable_author(method, ..., defer_restart)` | Author native ink and notebooks: `draw`, `add_page`, or `create_document` (SSH only) |
 
 ### Safety
 
-- **Upload registers in cloud, SSH, and USB web mode** — local-directory mode never exposes write tools.
-- **mkdir, move, rename, delete register in cloud and SSH modes only** — they are not exposed on USB web (the tablet's USB web firmware has no folder/move/rename/delete endpoints), keeping the tool list scoped to what the active transport actually supports.
-- **Delete prompts for confirmation when possible** — if the client supports MCP elicitation, `remarkable_delete` asks the user to confirm before deleting. If the client can't show a prompt, the delete is **refused** (not performed) unless `REMARKABLE_SKIP_CONFIRM=1` is set — so write-on-by-default can't silently delete from clients that lack elicitation. In cloud mode delete moves the item to the trash (recoverable from your device); set `REMARKABLE_SKIP_CONFIRM=1` to allow deletes without a prompt in automated setups. All write tools carry `ToolAnnotations(readOnlyHint=False)` (and `destructiveHint=True` for delete) so an agent harness can gate writes at the MCP layer.
-- After each write operation in SSH mode, the tablet UI (`xochitl`) restarts automatically to reflect changes; the call waits for it to come back before returning so the next write doesn't race a restarting daemon. For bulk operations, pass `defer_restart=True` to each write — or set `REMARKABLE_DEFER_RESTART=1` — and call `remarkable_refresh()` once at the end, so the batch triggers a single restart instead of one per write (each restart forces a full document-store rescan).
+- Upload is available in cloud, SSH, and USB web mode. Local directory mode never exposes write tools.
+- Create, move, rename, and delete are available in cloud and SSH mode.
+- Delete asks for confirmation when the client supports MCP elicitation. Without elicitation it is refused unless `REMARKABLE_SKIP_CONFIRM=1` is set. Cloud delete moves the item to trash.
+- SSH writes restart `xochitl` so the tablet notices filesystem changes. For a batch, pass `defer_restart=True` to every write, including `remarkable_author`, then call `remarkable_refresh()` once. Responses set `refresh_pending=true` until that refresh runs.
 
 ### Examples
 
@@ -718,7 +670,7 @@ remarkable_move("Meeting Notes", "/Archive/2024 Archive")
 # Rename a document
 remarkable_rename("Untitled", "Q4 Planning Notes")
 
-# Delete (destructive — confirms via elicitation when supported)
+# Delete (destructive; confirms via elicitation when supported)
 remarkable_delete("Old Draft")
 
 # Bulk import (SSH): defer the restart on each write, then refresh once.
@@ -738,7 +690,7 @@ remarkable_author(
 # Append a blank, drawable page to the end of a notebook
 remarkable_author(method="add_page", document="Ideas")
 
-# Create a new (blank) notebook — the common case
+# Create a new blank notebook
 remarkable_author(method="create_document", name="Sketches")
 
 # Only seed typed text when the user explicitly requested it.
@@ -751,7 +703,10 @@ remarkable_author(method="create_document", name="Meeting notes", text="Agenda\n
 
 An interactive page viewer built on the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) extension (SEP-1865). Clients that support MCP Apps (such as ChatGPT, Claude, VS Code, and the MCP Inspector) render a canvas in a side panel where you can view a document page and navigate through it.
 
-There is **no flag to enable it** — the `remarkable_canvas` tool and its `ui://remarkable/canvas` resource are always registered, and the capability is negotiated automatically at the MCP `initialize` handshake. App-capable clients open the interactive canvas; every other client simply receives the rendered page as an image, so the tool is safe and useful everywhere.
+There is no enable flag. The `remarkable_canvas` tool and
+`ui://remarkable/canvas` resource are always registered. Capability negotiation
+at MCP initialization determines whether the client opens the app or receives a
+rendered page.
 
 This registers one tool:
 
@@ -761,15 +716,15 @@ This registers one tool:
 
 How it behaves:
 
-- **App-capable clients** open the canvas (declared at `ui://remarkable/canvas`, MIME `text/html;profile=mcp-app`) and can page through the document via the MCP Apps postMessage bridge — the server delivers each rendered page in the tool result's `structuredContent`.
+- App-capable clients open the canvas at `ui://remarkable/canvas` and receive each rendered page in `structuredContent`.
 - **Other clients** still get the rendered page back as an embedded PNG image, so the tool is useful everywhere; it just won't open the interactive panel. The `_meta.ui` / `ui://` metadata is inert to clients that don't advertise the MCP Apps UI extension.
 
 ### Drawing and authoring from the canvas
 
 When write mode is on (the default) **and** the active transport is SSH, the canvas becomes a write surface:
 
-- **Draw** — pick a pen or highlighter and colour, draw over the page, and **Save** writes the strokes back to the device as native `.rm` ink. Strokes are buffered locally per page (with **Undo** and **Cancel**) and only touch the device on Save.
-- **＋ Page** (native notebooks only) — queues a new blank page locally that you can navigate to and draw on immediately. **Save** materializes the queued page(s) on the device first, then writes any cached strokes.
+- **Draw**: choose a pen or highlighter, draw, then save native `.rm` ink to the device.
+- **Add page**: queue a blank native notebook page, draw on it, then save.
 - One source of truth: the canvas calls the **same** `remarkable_author` tool a model would call (`method="draw"` on Save, `method="add_page"` for ＋Page), so the human path and the model path produce byte-identical results.
 
 The Save / Draw / ＋Page controls are hidden when the page isn't writable (read-only mode, or a non-SSH transport), and the canvas falls back to a plain image viewer. The iframe bridge follows the MCP Apps spec but is best validated against your specific client.
@@ -826,8 +781,8 @@ Set the default background color for image rendering:
 ```
 
 Supported formats:
-- `#RRGGBB` — RGB hex (e.g., `#FFFFFF` for white)
-- `#RRGGBBAA` — RGBA hex (e.g., `#00000000` for transparent)
+- `#RRGGBB`: RGB hex, such as `#FFFFFF`
+- `#RRGGBBAA`: RGBA hex, such as `#00000000`
 
 Default is `#FBFBFB` (reMarkable paper color). This affects both the `remarkable_image` tool and image resources.
 
@@ -842,7 +797,8 @@ Cloud API requests automatically retry on transient failures (HTTP 429, 500, 502
 | `REMARKABLE_RETRY_ATTEMPTS` | `3` | Maximum number of request attempts (minimum 1) |
 | `REMARKABLE_RETRY_DELAY` | `2.0` | Base delay in seconds for exponential backoff |
 
-The retry logic honours the `Retry-After` header from rate-limited responses — both the numeric (seconds) form and the HTTP-date form (which Cloudflare, fronting the reMarkable cloud, often sends) — capped at 20 seconds. Auth failures (401) are not retried — they trigger automatic token renewal instead.
+Rate-limit retries honor numeric and HTTP-date `Retry-After` values, capped at
+20 seconds. Authentication failures trigger token renewal instead of retry.
 
 ---
 
@@ -850,9 +806,9 @@ The retry logic honours the `Retry-After` header from rate-limited responses —
 
 Cloud mode is built to make a device-free workflow fast:
 
-- **Parallel traversal** — document metadata is fetched concurrently instead of one document at a time, turning a multi-minute first load into a few seconds.
-- **Connection pooling** — HTTP connections are reused (keep-alive), avoiding a fresh TLS handshake per request.
-- **Content-addressed blob cache** — reMarkable's cloud is an immutable, hash-addressed store (like Git), so a blob's bytes can never change for a given hash. Downloaded blobs are cached on disk and reused on later runs; changed documents get new hashes and are re-fetched automatically. This makes warm startups and repeat document reads near-instant, and it is invalidation-safe by construction.
+- **Parallel traversal**: fetch document metadata concurrently.
+- **Connection pooling**: reuse HTTP connections.
+- **Content-addressed blob cache**: reuse immutable blobs by hash and fetch new hashes when documents change.
 
 You normally don't need to configure any of this, but these environment variables let you tune it:
 
@@ -867,23 +823,13 @@ The cache is purely a local accelerator: deleting `REMARKABLE_CACHE_DIR` only fo
 
 ---
 
-## Use Cases
+## Common Workflows
 
-### Research & Writing
-
-Use remarkable-mcp while working in an Obsidian vault or similar to transfer knowledge from your handwritten notes into structured documents. AI can read your research notes and help develop your ideas.
-
-### Daily Review
-
-Ask your AI assistant to summarize your recent notes, find action items, or identify patterns across your journal entries.
-
-### Document Search
-
-Find that half-remembered note by searching across your entire library — including handwritten content.
-
-### Knowledge Management
-
-Treat your reMarkable as a second brain that AI can access. Combined with tools like Obsidian, you can build a powerful personal knowledge system.
+- Read recent notes and extract action items.
+- Search names, tags, typed text, and OCR output.
+- Review annotated PDFs with the source page and annotations together.
+- Move selected notes into another local workflow.
+- Upload reference PDFs or generated Markdown documents.
 
 ---
 
@@ -907,23 +853,23 @@ Treat your reMarkable as a second brain that AI can access. Combined with tools 
 git clone https://github.com/SamMorrowDrums/remarkable-mcp.git
 cd remarkable-mcp
 uv sync --all-extras
-uv run pytest test_server.py -v
+uv run pytest -v
 ```
 
-📖 **[Development Guide](docs/development.md)**
+[Development guide](docs/development.md)
 
 ### Multi-transport smoke test
 
 When something looks broken, run the deterministic, no-AI smoke test first. It
 drives the real server over MCP and exercises every available tool in every
-reachable transport (cloud → usb-web → ssh):
+reachable transport in this order: local directory, cloud, USB web, then SSH.
 
 ```bash
 uv run python smoke/run_smoke.py            # all available modes
 uv run python smoke/run_smoke.py --read-only # connectivity + reads only
 ```
 
-📖 **[smoke/README.md](smoke/README.md)** — what PASS / N/A / SKIP / FAIL mean
+[Smoke test guide](smoke/README.md)
 and per-mode expectations.
 
 ---

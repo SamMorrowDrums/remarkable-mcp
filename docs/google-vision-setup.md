@@ -1,15 +1,16 @@
 # Google Cloud Vision Setup
 
-Google Cloud Vision provides **far superior handwriting recognition** compared to Tesseract. Unless your handwriting is exceptionally clear and print-like, we strongly recommend using Google Vision.
+Google Cloud Vision is an optional hosted OCR backend. It generally handles
+handwriting better than Tesseract, but sends page images to Google.
 
 ## Why Google Vision?
 
 | Feature | Google Vision | Tesseract |
 |---------|---------------|-----------|
-| Handwriting | ✅ Excellent | ❌ Poor |
-| Cursive | ✅ Handles well | ❌ Fails |
-| Mixed content | ✅ Text + drawings | ❌ Confused |
-| Languages | ✅ Auto-detect | Manual config |
+| Handwriting | Supported | Limited |
+| Cursive | Supported | Limited |
+| Mixed content | Supported | Limited |
+| Languages | Auto-detect | Manual configuration |
 | Setup | API key | System install |
 
 ## Quick Setup (API Key)
@@ -19,7 +20,7 @@ The easiest way to get started:
 ### 1. Create a Google Cloud Project
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Click **Select a project** → **New Project**
+2. Click **Select a project**, then **New Project**
 3. Name it (e.g., "remarkable-ocr") and click **Create**
 
 ### 2. Enable the Vision API
@@ -30,7 +31,7 @@ The easiest way to get started:
 ### 3. Create an API Key
 
 1. Go to [Credentials](https://console.cloud.google.com/apis/credentials)
-2. Click **Create Credentials** → **API Key**
+2. Click **Create Credentials**, then **API Key**
 3. Copy the key
 
 ### 4. (Optional) Restrict the Key
@@ -87,7 +88,7 @@ For production use or tighter security controls:
 
 1. Click on the service account
 2. Go to **Keys** tab
-3. Click **Add Key** → **Create new key**
+3. Click **Add Key**, then **Create new key**
 4. Select **JSON** and click **Create**
 5. Save the downloaded file securely
 
@@ -115,8 +116,8 @@ Or install the SDK with default credentials:
 # Install gcloud CLI and authenticate
 gcloud auth application-default login
 
-# Install SDK dependency
-pip install remarkable-mcp[ocr]
+# Install remarkable-mcp with the optional SDK dependency
+uv tool install "remarkable-mcp[ocr]"
 ```
 
 ## Environment Variables
@@ -144,7 +145,7 @@ pip install remarkable-mcp[ocr]
 
 - You've exceeded the free tier
 - Enable billing or wait until next month
-- Consider caching results (remarkable-mcp does this automatically)
+- Retry after quota is available or select another OCR backend
 
 ### OCR Not Running
 
@@ -154,10 +155,9 @@ pip install remarkable-mcp[ocr]
 
 ## Performance Tips
 
-1. **Caching**: OCR results are cached per document — reading multiple pages doesn't re-run OCR
-2. **Selective OCR**: Only enable `include_ocr` when you need handwritten content
-3. **Typed text**: Notebooks with Type Folio extract text without OCR
-4. **PDFs**: Text is extracted directly, OCR only needed for scanned documents
+1. Enable `include_ocr` only when you need handwriting recognition.
+2. Type Folio text does not require OCR.
+3. Text-based PDFs are extracted directly. Scanned PDFs may require OCR.
 
 ## Privacy Considerations
 

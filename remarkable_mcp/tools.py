@@ -326,7 +326,7 @@ async def remarkable_read(
     </examples>
     """
     try:
-        client = get_rmapi()
+        client = await run_blocking(get_rmapi)
         collection = await run_blocking(client.get_meta_items)
         items_by_id = get_items_by_id(collection)
 
@@ -862,7 +862,7 @@ async def remarkable_browse(
     </examples>
     """
     try:
-        client = get_rmapi()
+        client = await run_blocking(get_rmapi)
         collection = await run_blocking(client.get_meta_items)
         items_by_id = get_items_by_id(collection)
         items_by_parent = get_items_by_parent(collection)
@@ -1090,7 +1090,7 @@ async def remarkable_recent(limit: int = 10, include_preview: bool = False) -> s
     </examples>
     """
     try:
-        client = get_rmapi()
+        client = await run_blocking(get_rmapi)
         collection = await run_blocking(client.get_meta_items)
         items_by_id = get_items_by_id(collection)
 
@@ -1423,7 +1423,7 @@ async def remarkable_status() -> str:
     transport = selected_transport
 
     try:
-        client = get_rmapi()
+        client = await run_blocking(get_rmapi)
         # Reflect any startup fallback to cloud (device unreachable + token set).
         transport = get_active_transport()
         fell_back = transport != selected_transport
@@ -1636,7 +1636,7 @@ async def remarkable_image(
         if background is None:
             background = await run_blocking(get_background_color)
 
-        client = get_rmapi()
+        client = await run_blocking(get_rmapi)
         collection = await run_blocking(client.get_meta_items)
         items_by_id = get_items_by_id(collection)
 

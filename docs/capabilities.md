@@ -6,8 +6,8 @@ This server supports the MCP capability negotiation protocol. During the initial
 
 When an MCP client connects, both sides exchange capability information:
 
-1. **Client → Server**: Client sends its capabilities (sampling, elicitation, roots, etc.)
-2. **Server → Client**: Server responds with its supported features
+1. **Client to server**: the client sends capabilities such as sampling, elicitation, and roots
+2. **Server to client**: the server responds with supported features
 3. **Tools adapt**: Tools can check client capabilities and adjust behavior accordingly
 
 This enables features like:
@@ -58,6 +58,8 @@ async def my_tool(ctx: Context) -> str:
 | `client_supports_experimental(ctx, feature)` | Check for experimental features |
 | `get_client_info(ctx)` | Get client name, version, protocol |
 | `get_protocol_version(ctx)` | Get negotiated protocol version |
+| `get_client_extensions(ctx)` | Get negotiated client extensions |
+| `client_supports_apps(ctx)` | Check for MCP Apps UI support |
 
 ## Sampling Capability
 
@@ -81,7 +83,8 @@ if include_ocr and client_supports_sampling(ctx):
     # Returns handwriting transcription from client's LLM
 ```
 
-This allows OCR without external API keys — the client's own AI model handles it.
+This allows OCR without a separate OCR API key. Data handling depends on the
+connected client and model.
 
 ## Embedded Resource Support
 

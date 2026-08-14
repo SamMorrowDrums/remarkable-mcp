@@ -52,4 +52,4 @@ jobs:
         run: uv sync --all-extras
 
       - name: Run tests
-        run: uv run pytest test_server.py -v
+        run: uv run pytest -v

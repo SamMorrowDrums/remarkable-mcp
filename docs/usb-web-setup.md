@@ -1,22 +1,17 @@
 # USB Web Interface Setup Guide
 
-The USB web interface is the **easiest way** to connect remarkable-mcp to your tablet. It works entirely offline over USB.
+The USB web interface provides read, render, and root-folder upload over USB.
 
 ## Overview
 
-The USB web interface is an official reMarkable feature that provides HTTP API access when your tablet is connected via USB. This gives you:
-
-- ✅ **No subscription needed** — Works without reMarkable Connect
-- ✅ **Fast offline access** — Direct USB connection
-- ✅ **Officially supported** — Part of the standard reMarkable OS
-- ✅ **Simple setup** — Just enable in Settings and connect
+It does not require a Connect subscription or developer mode.
 
 ## Quick Start
 
 ### 1. Enable USB Web Interface
 
 On your reMarkable tablet:
-1. Go to **Settings** (gear icon)
+1. Open **Settings**
 2. Tap **Storage**
 3. Toggle **USB web interface** to **On**
 
@@ -59,61 +54,54 @@ uvx remarkable-mcp --usb
 
 ### Cannot Connect to 10.11.99.1
 
-**Symptoms:** Browser shows "Cannot connect" or "Connection refused"
+Symptoms: the browser shows "Cannot connect" or "Connection refused".
 
-**Solutions:**
-1. **Check tablet is on and unlocked** — The web interface only works when the tablet is active
-2. **Verify USB connection** — Try a different USB port or cable
-3. **Check USB web interface is enabled** — Settings → Storage → USB web interface
-4. **Check network interface** — The tablet creates a USB Ethernet device (usually `usb0` on Linux)
+1. Check that the tablet is on and unlocked.
+2. Try a different USB port or cable.
+3. Check **Settings > Storage > USB web interface**.
+4. Check that a USB Ethernet interface appeared.
 
 On Linux, verify the interface:
 ```bash
-ip addr show usb0
-# Should show: inet 10.11.99.2/29
+ip -brief address
+# Look for an interface with an address in the tablet's 10.11.99.0 network.
 ```
 
-On macOS, check System Preferences → Network for the USB device.
+On macOS, check System Settings > Network for the USB device.
 
 On Windows, check Network Connections for "USB Ethernet/RNDIS Gadget".
 
 ### Connection Times Out
 
-**Symptoms:** Request starts but never completes
+Symptoms: a request starts but does not complete.
 
-**Solutions:**
-1. **Check firewall settings** — Allow connections to 10.11.99.1
-2. **Restart the tablet** — Turn off and on again
-3. **Reconnect USB** — Unplug and plug back in
-4. **Try a different USB port** — Preferably a direct port, not a hub
+1. Allow connections to `10.11.99.1` in the host firewall.
+2. Retry. The client retries bounded tablet-generated HTTP 408 responses for safe GET requests.
+3. Disable and re-enable the USB web interface.
+4. Reconnect USB or restart the tablet if 408 responses continue.
+5. Use a direct USB port rather than a hub.
 
 ### Documents Don't Appear
 
-**Symptoms:** Connection works but no documents are listed
-
-**Solutions:**
-1. **Check sync status** — Make sure documents are synced to the device (not cloud-only)
-2. **Restart remarkable-mcp** — The server caches document listings
-3. **Check tablet storage** — Settings → Storage → check free space
+1. Make sure documents are stored on the device, not cloud-only.
+2. Restart remarkable-mcp to rebuild the cached listing.
+3. Check free storage on the tablet.
 
 ### Slow Performance
 
-**Symptoms:** Listing/downloading documents takes a long time
-
-**Solutions:**
-1. **USB connection quality** — Use a high-quality USB-C cable
-2. **Large library** — First load with many documents is slower, subsequent loads are cached
-3. **USB 2.0 vs 3.0** — USB 3.0 ports are faster
+1. Use a reliable USB-C cable.
+2. Allow the first full-library load to finish.
+3. Avoid concurrent tools that scan a large library.
 
 ## How It Works
 
 The reMarkable USB web interface provides several HTTP endpoints:
 
-- `GET /documents/` — List all documents
-- `GET /documents/{guid}` — List documents in a folder
-- `GET /download/{guid}/rmdoc` — Download document as `.rmdoc` archive
-- `GET /download/{guid}/pdf` — Download document as PDF
-- `POST /upload` — Upload new documents
+- `GET /documents/`: list root documents
+- `GET /documents/{guid}`: list a folder
+- `GET /download/{guid}/rmdoc`: download an `.rmdoc` archive
+- `GET /download/{guid}/pdf`: download a PDF export
+- `POST /upload`: upload a document
 
 The remarkable-mcp USB web client:
 1. Recursively fetches document listings from all folders
@@ -133,39 +121,21 @@ export REMARKABLE_USB_HOST="http://192.168.1.100:8080"
 export REMARKABLE_USB_TIMEOUT="30"
 ```
 
-## Comparison: USB Web vs SSH vs Cloud
-
-| Feature | USB Web | SSH | Cloud |
-|---------|---------|-----|-------|
-| **Setup** | ✅ Easy | ⚠️ Complex | ✅ Easy |
-| **Developer Mode** | ✅ Not needed | ❌ Required | ✅ Not needed |
-| **Factory Reset** | ✅ No | ❌ Yes | ✅ No |
-| **Subscription** | ✅ Not needed | ✅ Not needed | ❌ Required |
-| **Speed** | ✅ Fast | ✅✅ Very Fast | ⚠️ Slow |
-| **Offline** | ✅ Yes | ✅ Yes | ❌ No |
-| **Connection** | USB only | USB only | Internet |
-| **Stability** | ✅ Good | ✅ Good | ⚠️ Variable |
-
-**Recommendation:**
-- **Most users:** USB Web Interface — Best balance of ease and performance
-- **Advanced users:** SSH — Fastest, but requires developer mode enabled
-- **Remote access:** Cloud API — Works anywhere, but slower and needs subscription
-
 ## Technical Details
 
 ### Network Configuration
 
 When you enable USB web interface:
 1. reMarkable creates a USB Ethernet gadget device
-2. The tablet assigns itself `10.11.99.1/29`
-3. Your computer gets `10.11.99.2/29` (via DHCP or auto-config)
+2. The tablet uses `10.11.99.1`
+3. The host receives an address on the same USB network; the prefix varies by device and firmware
 4. A web server starts on port 80 on the tablet
 
 ### Security Considerations
 
-- **No authentication** — Anyone with USB access can read/write documents
-- **Local only** — Only accessible over USB, not remotely
-- **HTTP, not HTTPS** — Data is not encrypted (but local to USB)
+- There is no HTTP authentication.
+- The endpoint is available only through the USB network.
+- Traffic is plain HTTP.
 
 For better security:
 - Keep your computer locked when connected
@@ -192,9 +162,9 @@ See [reMarkable Guide](https://remarkable.guide/tech/usb-web-interface.html) for
 
 Other tools that use the USB web interface:
 
-- [reMarkable-Offline-Sync](https://github.com/ChrWesp/reMarkable-Offline-Sync) — Python sync tool
-- [rmfakecloud](https://github.com/ddvk/rmfakecloud) — Self-hosted cloud replacement
-- Browser — Direct access at `http://10.11.99.1` for manual file management
+- [reMarkable-Offline-Sync](https://github.com/ChrWesp/reMarkable-Offline-Sync): Python sync tool
+- [rmfakecloud](https://github.com/ddvk/rmfakecloud): self-hosted cloud replacement
+- Browser access at `http://10.11.99.1`
 
 ## Support
 
