@@ -94,9 +94,9 @@ in
       description = "reMarkable MCP Streamable HTTP bridge";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
+      path = [ pkgs.tesseract ];
       environment = cfg.extraEnvironment // {
         HOME = toString cfg.home;
-        PATH = "${pkgs.tesseract}/bin:/run/current-system/sw/bin";
       };
       serviceConfig = {
         Type = "simple";
