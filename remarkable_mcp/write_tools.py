@@ -30,9 +30,9 @@ import time
 import uuid
 from contextlib import nullcontext
 from datetime import datetime
-from typing import Optional
+from typing import Annotated, Optional
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context, Elicit, ElicitationResult, Resolve
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
@@ -48,12 +48,12 @@ from remarkable_mcp.ssh import XOCHITL_PATH, Document, SSHClient
 logger = logging.getLogger(__name__)
 
 # Tool annotations for write operations
-WRITE_ANNOTATIONS = ToolAnnotations(readOnlyHint=False)
+WRITE_ANNOTATIONS = ToolAnnotations(read_only_hint=False)
 UPLOAD_ANNOTATIONS = WRITE_ANNOTATIONS
 MKDIR_ANNOTATIONS = WRITE_ANNOTATIONS
 MOVE_ANNOTATIONS = WRITE_ANNOTATIONS
 RENAME_ANNOTATIONS = WRITE_ANNOTATIONS
-DELETE_ANNOTATIONS = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+DELETE_ANNOTATIONS = ToolAnnotations(read_only_hint=False, destructive_hint=True)
 
 
 def read_only_enabled() -> bool:
@@ -650,12 +650,51 @@ class _DeleteConfirmation(BaseModel):
 
     confirm: bool = Field(
         default=False,
-        description="Set to true to permanently move this item to the trash.",
+        description="Set to true to confirm this destructive delete operation.",
     )
 
 
-async def _confirm_delete(ctx: Optional[Context], document: str) -> Optional[str]:
-    """Confirm a destructive delete before it runs.
+def _delete_confirmation_available(ctx: Context) -> bool:
+    """Return whether deletion may proceed via elicitation or explicit bypass."""
+    if os.environ.get("REMARKABLE_SKIP_CONFIRM", "").lower() in ("1", "true", "yes"):
+        return True
+    return client_supports_elicitation(ctx)
+
+
+def _resolve_delete_confirmation(
+    document: str,
+    permanent: bool,
+    confirmation_available: Annotated[bool, Resolve(_delete_confirmation_available)],
+) -> _DeleteConfirmation | Elicit[_DeleteConfirmation]:
+    """Resolve confirmation over a legacy back-channel or a modern input round."""
+    skip = os.environ.get("REMARKABLE_SKIP_CONFIRM", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if skip:
+        return _DeleteConfirmation(confirm=True)
+    if not confirmation_available:
+        return _DeleteConfirmation(confirm=False)
+    if permanent:
+        message = (
+            f"Permanently delete '{document}' from your reMarkable? "
+            "This is irreversible and cannot be recovered from Trash."
+        )
+    else:
+        message = f"Delete '{document}' from your reMarkable? This moves it to the trash."
+    return Elicit(
+        message,
+        _DeleteConfirmation,
+    )
+
+
+def _delete_confirmation_abort(
+    confirmation: ElicitationResult[_DeleteConfirmation],
+    confirmation_available: bool,
+    document: str,
+) -> Optional[str]:
+    """Return an abort response unless a destructive delete was confirmed.
 
     Returns None to proceed with the delete, or a response string (a
     cancellation or a refusal) to abort.
@@ -668,9 +707,7 @@ async def _confirm_delete(ctx: Optional[Context], document: str) -> Optional[str
     are on by default, and most MCP clients don't support elicitation yet, so
     this refusal path is the common case for unattended setups.
     """
-    if os.environ.get("REMARKABLE_SKIP_CONFIRM", "").lower() in ("1", "true", "yes"):
-        return None
-    if ctx is None or not client_supports_elicitation(ctx):
+    if not confirmation_available:
         return make_error(
             "confirmation_unavailable",
             (
@@ -684,25 +721,7 @@ async def _confirm_delete(ctx: Optional[Context], document: str) -> Optional[str
                 "(e.g. for headless automation)."
             ),
         )
-    try:
-        result = await ctx.elicit(
-            message=f"Delete '{document}' from your reMarkable? This moves it to the trash.",
-            schema=_DeleteConfirmation,
-        )
-    except Exception as e:  # elicitation advertised but failed — refuse, don't delete
-        logger.debug(f"Elicitation failed, refusing delete without confirmation: {e}")
-        return make_error(
-            "confirmation_unavailable",
-            (
-                f"Refused to delete '{document}': the confirmation prompt could "
-                "not be shown and delete is a destructive operation."
-            ),
-            (
-                "Retry from a client that can display confirmation prompts, or "
-                "set REMARKABLE_SKIP_CONFIRM=1 to allow deletes without a prompt."
-            ),
-        )
-    if result.action != "accept" or not getattr(result.data, "confirm", False):
+    if confirmation.action != "accept" or not getattr(confirmation.data, "confirm", False):
         return make_response(
             {"deleted": False, "cancelled": True, "document": document},
             "Delete cancelled — nothing was changed.",
@@ -710,7 +729,13 @@ async def _confirm_delete(ctx: Optional[Context], document: str) -> Optional[str
     return None
 
 
-def _author_draw(document: str, page: int, strokes: list, ui_submitted: bool) -> str:
+def _author_draw(
+    document: str,
+    page: int,
+    strokes: list,
+    ui_submitted: bool,
+    defer_restart: bool = False,
+) -> str:
     """Append strokes to a page, auto-creating a blank drawable layer if absent."""
     if not document or page is None:
         return make_error(
@@ -805,7 +830,7 @@ def _author_draw(document: str, page: int, strokes: list, ui_submitted: bool) ->
         if not _remote_file_exists(ssh_client, bak_path):
             _write_remote_bytes(ssh_client, bak_path, original)
     _write_remote_bytes(ssh_client, rm_path, new_bytes)
-    restarted = _maybe_restart_xochitl(ssh_client)
+    restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
     _update_deferred_ssh_cache(ssh_client, restarted)
     _clear_document_extraction_cache(doc_uuid)
 
@@ -821,21 +846,22 @@ def _author_draw(document: str, page: int, strokes: list, ui_submitted: bool) ->
         "writable": True,
         "transport": "ssh",
         "ui_submitted": bool(ui_submitted),
+        "refresh_pending": not restarted,
     }
     if file_type.lower() == "epub":
         result["caveat"] = (
             "This is a reflowable EPUB; annotations are anchored to the "
             "current layout and may shift if the font size or layout changes."
         )
-    hint = (
-        f"Appended {len(strokes)} stroke(s) to page {page} of "
-        f"'{target.VissibleName}'. Call remarkable_canvas(document, page) to "
-        "view the updated page."
+    hint = _write_result_message(
+        restarted,
+        (f"Appended {len(strokes)} stroke(s) to page {page} of '{target.VissibleName}'."),
+        "Call remarkable_canvas(document, page) to view the updated page.",
     )
     return make_response(result, hint)
 
 
-def _author_add_page(document: str) -> str:
+def _author_add_page(document: str, defer_restart: bool = False) -> str:
     """Append a blank, drawable page to the end of a native notebook."""
     if not document:
         return make_error(
@@ -900,7 +926,7 @@ def _author_add_page(document: str) -> str:
 
     _write_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}/{new_page_id}.rm", page_bytes)
     _write_content_file(ssh_client, doc_uuid, updated["content"])
-    restarted = _maybe_restart_xochitl(ssh_client)
+    restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
     _update_deferred_ssh_cache(ssh_client, restarted)
     _clear_document_extraction_cache(doc_uuid)
 
@@ -911,16 +937,25 @@ def _author_add_page(document: str) -> str:
         "total_pages": updated["total_pages"],
         "paper_size": list(nb.DEFAULT_PAPER),
         "transport": "ssh",
+        "refresh_pending": not restarted,
     }
-    hint = (
-        f"Added a blank page (now page {updated['page_index']} of "
-        f"{updated['total_pages']}). Call remarkable_canvas('{target.VissibleName}', "
-        f"{updated['page_index']}) to draw on it."
+    hint = _write_result_message(
+        restarted,
+        (f"Added a blank page (now page {updated['page_index']} of {updated['total_pages']})."),
+        (
+            f"Call remarkable_canvas('{target.VissibleName}', "
+            f"{updated['page_index']}) to draw on it."
+        ),
     )
     return make_response(result, hint)
 
 
-def _author_create_document(name: str, text: Optional[str], folder: Optional[str]) -> str:
+def _author_create_document(
+    name: str,
+    text: Optional[str],
+    folder: Optional[str],
+    defer_restart: bool = False,
+) -> str:
     """Create a new native notebook (blank, or seeded with typed text)."""
     if not name:
         return make_error(
@@ -955,7 +990,7 @@ def _author_create_document(name: str, text: Optional[str], folder: Optional[str
     _write_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}/{page_id}.rm", page_bytes)
     _write_content_file(ssh_client, doc_uuid, content_data)
     _write_metadata(ssh_client, doc_uuid, metadata)
-    restarted = _maybe_restart_xochitl(ssh_client)
+    restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
     cached_doc = Document(
         id=doc_uuid,
         hash=doc_uuid,
@@ -978,8 +1013,13 @@ def _author_create_document(name: str, text: Optional[str], folder: Optional[str
         "has_text": bool(text),
         "folder": folder or "/",
         "transport": "ssh",
+        "refresh_pending": not restarted,
     }
-    hint = f"Created notebook '{name}'. Call remarkable_canvas('{name}', 1) to view or draw on it."
+    hint = _write_result_message(
+        restarted,
+        f"Created notebook '{name}'.",
+        f"Call remarkable_canvas('{name}', 1) to view or draw on it.",
+    )
     return make_response(result, hint)
 
 
@@ -999,6 +1039,7 @@ def register_write_tools():
         text: Optional[str] = None,
         folder: Optional[str] = None,
         ui_submitted: bool = False,
+        defer_restart: bool = False,
         ctx: Context = None,
     ) -> str:
         """
@@ -1056,6 +1097,9 @@ def register_write_tools():
             placeholder text. Paragraphs split on newlines.
         - folder: Destination folder path (create_document; default "/").
         - ui_submitted: Set by the canvas app when the user clicked Save. Models omit it.
+        - defer_restart: Skip the xochitl restart for this write. Call
+          remarkable_refresh() once after the batch. The response sets
+          refresh_pending=true while a refresh is owed.
         </parameters>
         <examples>
         - remarkable_author(method="draw", document="Ideas", page=1,
@@ -1073,11 +1117,11 @@ def register_write_tools():
                 return error
 
             if method == "draw":
-                return _author_draw(document, page, strokes, ui_submitted)
+                return _author_draw(document, page, strokes, ui_submitted, defer_restart)
             if method == "add_page":
-                return _author_add_page(document)
+                return _author_add_page(document, defer_restart)
             if method == "create_document":
-                return _author_create_document(name, text, folder)
+                return _author_create_document(name, text, folder, defer_restart)
             return make_error(
                 error_type="unknown_method",
                 message=f"Unknown method: '{method}'.",
@@ -1712,7 +1756,12 @@ def register_write_tools():
             document: str,
             defer_restart: bool = False,
             permanent: bool = False,
-            ctx: Optional[Context] = None,
+            *,
+            confirmation: Annotated[
+                ElicitationResult[_DeleteConfirmation],
+                Resolve(_resolve_delete_confirmation),
+            ],
+            confirmation_available: Annotated[bool, Resolve(_delete_confirmation_available)],
         ) -> str:
             """
             <usecase>Delete a document or folder on the reMarkable tablet.</usecase>
@@ -1747,7 +1796,7 @@ def register_write_tools():
             if error:
                 return error
 
-            abort = await _confirm_delete(ctx, document)
+            abort = _delete_confirmation_abort(confirmation, confirmation_available, document)
             if abort:
                 return abort
 

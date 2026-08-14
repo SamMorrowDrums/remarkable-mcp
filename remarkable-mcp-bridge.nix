@@ -63,6 +63,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [{
+      assertion = cfg.host != "0.0.0.0" && cfg.host != "::";
+      message = ''
+        services.remarkable-mcp.host must be loopback or a concrete interface
+        address. Wildcard binds cannot use a strict Host allowlist.
+      '';
+    }];
     warnings = lib.optional (!(builtins.elem cfg.host loopbackHosts)) ''
       services.remarkable-mcp.host is non-loopback. Streamable HTTP has no
       authentication. Prefer the loopback default; an authenticated reverse

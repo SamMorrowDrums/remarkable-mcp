@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   create-release:
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -44,16 +45,19 @@ jobs:
         run: uv python install 3.12
       
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --all-extras
       
       - name: Run tests
-        run: uv run pytest test_server.py -v
+        run: uv run pytest -v
       
       - name: Run linting
         run: uv run ruff check .
 
+      - name: Check formatting
+        run: uv run ruff format --check .
+
   build:
-    needs: [create-release, test]
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -85,7 +89,7 @@ jobs:
           path: dist/
 
   publish-pypi:
-    needs: build
+    needs: [build, create-release]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

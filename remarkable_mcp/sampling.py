@@ -24,10 +24,18 @@ API keys or services.
 import base64
 from typing import TYPE_CHECKING, List, Optional
 
-from mcp.types import ImageContent, ModelHint, ModelPreferences, SamplingMessage, TextContent
+from mcp.server.mcpserver import Sample
+from mcp.types import (
+    CreateMessageResult,
+    ImageContent,
+    ModelHint,
+    ModelPreferences,
+    SamplingMessage,
+    TextContent,
+)
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import Context
+    from mcp.server.mcpserver import Context
 
 
 # Model preferences for OCR tasks - prioritize intelligence for better vision/OCR
@@ -49,9 +57,9 @@ OCR_MODEL_PREFERENCES = ModelPreferences(
         ModelHint(name="claude-3-5-sonnet"),
         ModelHint(name="gemini-1.5-pro"),
     ],
-    intelligencePriority=1.0,  # Maximize intelligence for OCR accuracy
-    speedPriority=0.2,  # Speed is not critical for OCR
-    costPriority=0.0,  # Cost doesn't matter - we need accuracy
+    intelligence_priority=1.0,  # Maximize intelligence for OCR accuracy
+    speed_priority=0.2,  # Speed is not critical for OCR
+    cost_priority=0.0,  # Cost doesn't matter - we need accuracy
 )
 
 
@@ -73,6 +81,44 @@ You are extracting handwritten notes from a reMarkable tablet. Focus on accuracy
 OCR_USER_PROMPT = "Extract all text from this image. Output only the text content, nothing else."
 
 
+def make_ocr_sample(png_data: bytes, max_tokens: int = 2000) -> Sample:
+    """Build an era-portable OCR sampling request for a resolver."""
+    image_b64 = base64.b64encode(png_data).decode("utf-8")
+    return Sample(
+        [
+            SamplingMessage(
+                role="user",
+                content=ImageContent(
+                    type="image",
+                    data=image_b64,
+                    mime_type="image/png",
+                ),
+            ),
+            SamplingMessage(
+                role="user",
+                content=TextContent(type="text", text=OCR_USER_PROMPT),
+            ),
+        ],
+        system_prompt=OCR_SYSTEM_PROMPT,
+        max_tokens=max_tokens,
+        temperature=0.0,
+        model_preferences=OCR_MODEL_PREFERENCES,
+    )
+
+
+def sampling_result_text(result: CreateMessageResult | None) -> Optional[str]:
+    """Extract a usable OCR string from an MCP sampling result."""
+    if result is None:
+        return None
+    content = result.content
+    if not isinstance(content, TextContent):
+        return None
+    text = content.text
+    if not text or "[NO TEXT DETECTED]" in text:
+        return None
+    return text.strip()
+
+
 async def ocr_via_sampling(
     ctx: "Context",
     png_data: bytes,
@@ -82,7 +128,7 @@ async def ocr_via_sampling(
     Perform OCR on an image using the client's LLM via MCP sampling.
 
     Args:
-        ctx: The FastMCP Context object from a tool function
+        ctx: The MCPServer Context object from a tool function
         png_data: PNG image bytes to perform OCR on
         max_tokens: Maximum tokens for the response (default: 2000)
 
@@ -103,49 +149,18 @@ async def ocr_via_sampling(
         if not session:
             return None
 
-        # Encode image as base64
-        image_b64 = base64.b64encode(png_data).decode("utf-8")
-
-        # Create the sampling message with image
-        messages = [
-            SamplingMessage(
-                role="user",
-                content=ImageContent(
-                    type="image",
-                    data=image_b64,
-                    mimeType="image/png",
-                ),
-            ),
-            SamplingMessage(
-                role="user",
-                content=TextContent(type="text", text=OCR_USER_PROMPT),
-            ),
-        ]
+        request = make_ocr_sample(png_data, max_tokens)
 
         # Request completion from the client's LLM
         # Use model preferences to request a capable vision model
         result = await session.create_message(
-            messages=messages,
-            system_prompt=OCR_SYSTEM_PROMPT,
-            max_tokens=max_tokens,
-            temperature=0.0,  # Use low temperature for consistency
-            model_preferences=OCR_MODEL_PREFERENCES,
+            messages=request.params.messages,
+            system_prompt=request.params.system_prompt,
+            max_tokens=request.params.max_tokens,
+            temperature=request.params.temperature,
+            model_preferences=request.params.model_preferences,
         )
-
-        # Extract text from the result
-        if result and result.content:
-            if isinstance(result.content, TextContent):
-                text = result.content.text
-            elif hasattr(result.content, "text"):
-                text = result.content.text
-            else:
-                return None
-
-            # Check for "no text" response
-            if text and "[NO TEXT DETECTED]" not in text:
-                return text.strip()
-
-        return None
+        return sampling_result_text(result)
 
     except Exception:
         # Sampling may fail for various reasons: client doesn't support sampling,
@@ -164,7 +179,7 @@ async def ocr_pages_via_sampling(
     Perform OCR on multiple pages using the client's LLM via MCP sampling.
 
     Args:
-        ctx: The FastMCP Context object from a tool function
+        ctx: The MCPServer Context object from a tool function
         png_data_list: List of PNG image bytes to perform OCR on
         max_tokens: Maximum tokens for each response (default: 2000)
 
@@ -217,7 +232,7 @@ def should_use_sampling_ocr(ctx: "Context") -> bool:
     2. The client supports the sampling capability
 
     Args:
-        ctx: The FastMCP Context object
+        ctx: The MCPServer Context object
 
     Returns:
         True if sampling OCR should be used, False otherwise
