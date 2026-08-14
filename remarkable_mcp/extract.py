@@ -2181,7 +2181,10 @@ def extract_handwriting_ocr(rm_files: List[Path]) -> tuple[Optional[List[str]], 
 
     if backend == "google":
         result = _ocr_google_vision(rm_files)
-        return (result, "google")
+        if result:
+            return (result, "google")
+        result = _ocr_tesseract(rm_files)
+        return (result, "tesseract")
     result = _ocr_tesseract(rm_files)
     return (result, "tesseract")
 

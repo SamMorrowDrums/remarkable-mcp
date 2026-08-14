@@ -1895,6 +1895,33 @@ class TestOCRBackendConfiguration:
         with pytest.raises(ValueError, match="Supported values"):
             get_ocr_backend()
 
+    @pytest.mark.parametrize("backend", ["auto", "google"])
+    def test_google_handwriting_failure_falls_back_to_tesseract(
+        self,
+        monkeypatch,
+        backend,
+    ):
+        from remarkable_mcp import extract
+
+        monkeypatch.setenv("REMARKABLE_OCR_BACKEND", backend)
+        if backend == "auto":
+            monkeypatch.setenv("GOOGLE_VISION_API_KEY", "configured")
+
+        with (
+            patch.object(extract, "_ocr_google_vision", return_value=None) as google_ocr,
+            patch.object(
+                extract,
+                "_ocr_tesseract",
+                return_value=["tesseract fallback"],
+            ) as tesseract_ocr,
+        ):
+            result, used_backend = extract.extract_handwriting_ocr([Path("page.rm")])
+
+        assert result == ["tesseract fallback"]
+        assert used_backend == "tesseract"
+        google_ocr.assert_called_once()
+        tesseract_ocr.assert_called_once()
+
 
 # =============================================================================
 # Test Tag Support
