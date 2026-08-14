@@ -383,7 +383,9 @@ loopback default:
 ```
 
 The service user must have its reMarkable credentials under
-`/var/lib/remarkable-mcp` (or the configured `home`).
+`/var/lib/remarkable-mcp` (or the configured `home`). The module adds
+Tesseract to the service's executable search path; install the configured
+`command` separately.
 
 ---
 

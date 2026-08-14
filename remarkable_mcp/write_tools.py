@@ -390,9 +390,9 @@ def _pending_refresh_error(error_type: str, message: str, suggestion: str) -> st
 
 async def _refresh_ssh_client(ssh_client: SSHClient) -> None:
     try:
-        await ssh_client.run_operation_async(
+        await ssh_client.run_refresh_operation_async(
             "xochitl-refresh",
-            lambda: _restart_xochitl(ssh_client),
+            lambda: _restart_xochitl(ssh_client, wait_ready=not ssh_client.is_closing()),
         )
     except BaseException:
         _invalidate_client_cache(ssh_client)
@@ -629,26 +629,31 @@ def _resolve_document(
 
 def _invalidate_client_cache(client) -> None:
     """Drop the in-memory document cache so the next read reflects the write."""
-    metadata_lock = getattr(client, "_metadata_lock", None)
-    context = metadata_lock if metadata_lock is not None else nullcontext()
-    with context:
-        client._documents = []
-        client._documents_by_id = {}
-        if hasattr(client, "_metadata_loaded_all"):
-            client._metadata_loaded_all = False
-        if hasattr(client, "_metadata_generation"):
-            client._metadata_generation += 1
+    client_state = getattr(client, "__dict__", {})
+    invalidate_metadata = getattr(type(client), "invalidate_metadata_cache", None)
+    if callable(invalidate_metadata):
+        invalidate_metadata(client)
+    else:
+        metadata_lock = client_state.get("_metadata_lock")
+        context = metadata_lock if metadata_lock is not None else nullcontext()
+        with context:
+            client._documents = []
+            client._documents_by_id = {}
+            if "_metadata_loaded_all" in client_state:
+                client._metadata_loaded_all = False
+            if "_metadata_generation" in client_state:
+                client._metadata_generation += 1
 
-    file_type_lock = getattr(client, "_file_type_lock", None)
+    file_type_lock = client_state.get("_file_type_lock")
     context = file_type_lock if file_type_lock is not None else nullcontext()
     with context:
         from remarkable_mcp.local_dir import LocalDirClient
 
         if isinstance(client, (SSHClient, LocalDirClient)):
             client._file_type_cache = None
-        elif hasattr(client, "_file_type_cache"):
+        elif "_file_type_cache" in client_state:
             client._file_type_cache = {}
-        if hasattr(client, "_file_type_generation"):
+        if "_file_type_generation" in client_state:
             client._file_type_generation += 1
 
 
@@ -1462,8 +1467,7 @@ def register_write_tools():
 
                     # Clear cached documents
                     client = get_rmapi()
-                    client._documents = []
-                    client._documents_by_id = {}
+                    _invalidate_client_cache(client)
 
                     result = {
                         "uploaded": True,

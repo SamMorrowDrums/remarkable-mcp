@@ -21,8 +21,10 @@ Benefits:
 - Officially supported by reMarkable
 """
 
+import asyncio
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -120,6 +122,11 @@ class USBWebClient:
         self.timeout = timeout
         self._documents: List[Document] = []
         self._documents_by_id: Dict[str, Document] = {}
+        self._metadata_loaded_all = False
+        self._metadata_lock = threading.RLock()
+        self._metadata_condition = threading.Condition(self._metadata_lock)
+        self._metadata_loading = False
+        self._metadata_generation = 0
         try:
             max_concurrency = int(os.environ.get("REMARKABLE_USB_MAX_CONCURRENCY", "2"))
         except ValueError as exc:
@@ -191,11 +198,14 @@ class USBWebClient:
             raise RuntimeError(f"USB web interface request failed: {e}")
 
     async def run_method_async(self, func, *args, **kwargs):
-        """Await USB operations on its bounded dispatcher."""
+        """Await USB operations while keeping HTTP I/O on the bounded dispatcher."""
         if func.__name__ == "get_meta_items":
             limit = args[0] if args else kwargs.get("limit")
-            if self._documents and (limit is None or len(self._documents) >= limit):
+            if self._get_cached_meta_items(limit) is not None:
                 return func(*args, **kwargs)
+            # Metadata waiters must not occupy dispatcher workers needed by
+            # independent downloads. The traversal's _request calls remain bounded.
+            return await asyncio.to_thread(func, *args, **kwargs)
         return await self._dispatcher.call_async(
             func.__name__.replace("_", "-"),
             lambda: func(*args, **kwargs),
@@ -209,6 +219,9 @@ class USBWebClient:
 
     def close(self) -> None:
         self._dispatcher.close()
+
+    async def aclose(self) -> None:
+        await asyncio.to_thread(self._dispatcher.close)
 
     def check_connection(self) -> bool:
         """Check if USB web interface is accessible."""
@@ -250,6 +263,62 @@ class USBWebClient:
             current_page=entry.get("CurrentPage", 0),
         )
 
+    def _get_cached_meta_items_locked(self, limit: Optional[int]) -> Optional[List[Document]]:
+        if self._metadata_loaded_all:
+            return self._documents if limit is None else self._documents[:limit]
+        if limit is not None and len(self._documents) >= limit:
+            return self._documents[:limit]
+        return None
+
+    def _get_cached_meta_items(self, limit: Optional[int]) -> Optional[List[Document]]:
+        with self._metadata_lock:
+            return self._get_cached_meta_items_locked(limit)
+
+    def _publish_metadata_locked(self, documents: List[Document], *, loaded_all: bool) -> None:
+        self._documents = documents
+        self._documents_by_id = {document.id: document for document in documents}
+        self._metadata_loaded_all = loaded_all
+
+    def invalidate_metadata_cache(self) -> None:
+        """Clear metadata atomically and reject any traversal already in flight."""
+        with self._metadata_condition:
+            self._documents = []
+            self._documents_by_id = {}
+            self._metadata_loaded_all = False
+            self._metadata_generation += 1
+            self._metadata_condition.notify_all()
+
+    def _load_meta_items(self, limit: Optional[int]) -> tuple[List[Document], bool]:
+        documents = []
+        folders_to_process = [("", DOCUMENTS_URL)]  # (parent_id, url)
+        processed_folders = set()
+
+        while folders_to_process:
+            parent_id, url = folders_to_process.pop(0)
+            if url in processed_folders:
+                continue
+            processed_folders.add(url)
+
+            try:
+                response = self._request(url)
+                entries = response.json()
+            except Exception as exc:
+                raise RuntimeError(f"Failed to fetch documents from {url}: {exc}") from exc
+
+            for index, entry in enumerate(entries):
+                doc = self._parse_document_entry(entry, parent=parent_id)
+                documents.append(doc)
+
+                if doc.is_folder:
+                    folder_url = f"/documents/{doc.id}"
+                    folders_to_process.append((doc.id, folder_url))
+
+                if limit is not None and len(documents) >= limit:
+                    loaded_all = index == len(entries) - 1 and not folders_to_process
+                    return documents, loaded_all
+
+        return documents, True
+
     def get_meta_items(self, limit: Optional[int] = None) -> List[Document]:
         """
         Fetch documents and folders from the tablet via USB web interface.
@@ -259,62 +328,44 @@ class USBWebClient:
 
         Returns a list of Document objects.
         """
-        # Return cached documents if available and no limit specified
-        if self._documents and limit is None:
-            return self._documents
-
-        # If we have cached docs and limit is within cache, return slice
-        if self._documents and limit is not None and len(self._documents) >= limit:
-            return self._documents[:limit]
-
-        documents = []
-        folders_to_process = [("", DOCUMENTS_URL)]  # (parent_id, url)
-        processed_folders = set()
-
-        # Recursively fetch all documents from all folders
-        while folders_to_process:
-            parent_id, url = folders_to_process.pop(0)
-
-            # Skip if already processed
-            if url in processed_folders:
-                continue
-            processed_folders.add(url)
-
-            try:
-                response = self._request(url)
-                entries = response.json()
-
-                for entry in entries:
-                    doc = self._parse_document_entry(entry, parent=parent_id)
-                    documents.append(doc)
-
-                    # If it's a folder, add it to the queue
-                    if doc.is_folder:
-                        folder_url = f"/documents/{doc.id}"
-                        folders_to_process.append((doc.id, folder_url))
-
-                    # Check limit
-                    if limit is not None and len(documents) >= limit:
-                        break
-
-                if limit is not None and len(documents) >= limit:
+        with self._metadata_condition:
+            while True:
+                cached = self._get_cached_meta_items_locked(limit)
+                if cached is not None:
+                    return cached
+                if not self._metadata_loading:
+                    self._metadata_loading = True
+                    generation = self._metadata_generation
                     break
+                self._metadata_condition.wait()
 
-            except Exception as e:
-                logger.warning(f"Failed to fetch documents from {url}: {e}")
-                continue
+        try:
+            documents, loaded_all = self._load_meta_items(limit)
+        except BaseException:
+            with self._metadata_condition:
+                self._metadata_loading = False
+                self._metadata_condition.notify_all()
+            raise
 
-        self._documents = documents
-        self._documents_by_id = {d.id: d for d in documents}
+        with self._metadata_condition:
+            try:
+                if generation == self._metadata_generation:
+                    self._publish_metadata_locked(documents, loaded_all=loaded_all)
+            finally:
+                self._metadata_loading = False
+                self._metadata_condition.notify_all()
 
-        logger.info(f"Loaded {len(documents)} documents via USB web interface")
+        logger.info(f"Fetched {len(documents)} documents via USB web interface")
         return documents
 
     def get_doc(self, doc_id: str) -> Optional[Document]:
         """Get a document by ID."""
-        if not self._documents_by_id:
+        while True:
+            with self._metadata_lock:
+                document = self._documents_by_id.get(doc_id)
+                if document is not None or self._metadata_loaded_all:
+                    return document
             self.get_meta_items()
-        return self._documents_by_id.get(doc_id)
 
     # Downloads can be large — use a longer timeout
     DOWNLOAD_TIMEOUT = 120
@@ -394,10 +445,8 @@ class USBWebClient:
 
         Uses the fileType field from the USB web API response.
         """
-        if not self._documents_by_id:
-            self.get_meta_items()
-
-        return {doc_id: self.get_file_type(doc) for doc_id, doc in self._documents_by_id.items()}
+        documents = self.get_meta_items()
+        return {doc.id: self.get_file_type(doc) for doc in documents}
 
 
 def check_usb_web_available(host: str = DEFAULT_USB_HOST) -> bool:

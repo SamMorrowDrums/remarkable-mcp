@@ -71,3 +71,19 @@ jobs:
 
       - name: Install built wheel
         run: uv run --isolated --no-project --with dist/*.whl remarkable-mcp --help
+  nixos-module:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31.11.1
+
+      - name: Check module syntax
+        run: nix-instantiate --parse remarkable-mcp-bridge.nix >/dev/null
+
+      - name: Evaluate default NixOS module
+        run: >-
+          nix-instantiate --eval --strict
+          -I nixpkgs=https://github.com/NixOS/nixpkgs/archive/0e251e24a4f24e036a084b6b4b2d2491af4167f4.tar.gz
+          tests/nixos-module-eval.nix
