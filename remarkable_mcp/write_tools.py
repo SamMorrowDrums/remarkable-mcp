@@ -26,9 +26,10 @@ import json
 import logging
 import os
 import shlex
+import threading
 import time
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from typing import Annotated, Optional
 
@@ -44,8 +45,14 @@ from remarkable_mcp.api import (
 from remarkable_mcp.capabilities import client_supports_elicitation
 from remarkable_mcp.responses import make_error, make_response
 from remarkable_mcp.ssh import XOCHITL_PATH, Document, SSHClient
+from remarkable_mcp.ssh_reliability import (
+    SSHExecutionUnknownError,
+    SSHPreExecutionError,
+    SSHReliabilityError,
+)
 
 logger = logging.getLogger(__name__)
+_write_context = threading.local()
 
 # Tool annotations for write operations
 WRITE_ANNOTATIONS = ToolAnnotations(read_only_hint=False)
@@ -202,10 +209,15 @@ def _restart_xochitl(ssh_client: SSHClient, wait_ready: bool = True) -> None:
     only completes once the tablet is ready for the next operation. Pass
     ``wait_ready=False`` to restore the old fire-and-return behaviour.
     """
-    operation_lock = getattr(ssh_client, "_io_lock", None)
-    context = operation_lock if operation_lock is not None else nullcontext()
-    with context:
-        _restart_xochitl_locked(ssh_client, wait_ready)
+    runner = getattr(ssh_client, "run_operation", None)
+    in_dispatcher = getattr(ssh_client, "in_dispatcher_thread", lambda: False)
+    if callable(runner) and not in_dispatcher():
+        runner(
+            "xochitl-refresh",
+            lambda: _restart_xochitl_locked(ssh_client, wait_ready),
+        )
+        return
+    _restart_xochitl_locked(ssh_client, wait_ready)
 
 
 def _restart_xochitl_locked(ssh_client: SSHClient, wait_ready: bool) -> None:
@@ -256,10 +268,197 @@ def _maybe_restart_xochitl(ssh_client: SSHClient, defer_restart: bool = False) -
     so the caller must run remarkable_refresh once the batch is complete for the
     changes to become visible in the UI.
     """
-    if defer_restart or _defer_restart_enabled():
+    if (
+        defer_restart
+        or _defer_restart_enabled()
+        or getattr(_write_context, "suppress_restart", False)
+    ):
         return False
     _restart_xochitl(ssh_client)
     return True
+
+
+@contextmanager
+def _suppress_automatic_restart():
+    previous = getattr(_write_context, "suppress_restart", False)
+    _write_context.suppress_restart = True
+    try:
+        yield
+    finally:
+        _write_context.suppress_restart = previous
+
+
+def _response_persisted(response: str) -> bool:
+    try:
+        data = json.loads(response)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return "_error" not in data
+
+
+def _validate_author_request(
+    method: str,
+    document: Optional[str],
+    page: Optional[int],
+    strokes: Optional[list],
+    name: Optional[str],
+) -> Optional[str]:
+    """Return transport-free validation errors before resolving an SSH client."""
+    if method == "draw":
+        if not document or page is None:
+            return make_error(
+                error_type="missing_parameter",
+                message="draw requires 'document' and 'page'.",
+                suggestion=(
+                    'Call remarkable_author(method="draw", document=..., page=1, strokes=[...]).'
+                ),
+            )
+        if not strokes:
+            return make_error(
+                error_type="no_strokes",
+                message="No strokes provided to write.",
+                suggestion=(
+                    "Pass a non-empty list of stroke dicts, e.g. "
+                    '[{"points": [[0.1,0.2],[0.8,0.2]], '
+                    '"tool": "fineliner", "color": "black"}].'
+                ),
+            )
+        return None
+    if method == "add_page":
+        if not document:
+            return make_error(
+                error_type="missing_parameter",
+                message="add_page requires 'document'.",
+                suggestion='Call remarkable_author(method="add_page", document=...).',
+            )
+        return None
+    if method == "create_document":
+        if not name:
+            return make_error(
+                error_type="missing_parameter",
+                message="create_document requires 'name'.",
+                suggestion=('Call remarkable_author(method="create_document", name="My notes").'),
+            )
+        return None
+    return make_error(
+        error_type="unknown_method",
+        message=f"Unknown method: '{method}'.",
+        suggestion='Use method="draw", "add_page", or "create_document".',
+        did_you_mean=["draw", "add_page", "create_document"],
+    )
+
+
+def _mark_response_refreshed(response: str) -> str:
+    try:
+        data = json.loads(response)
+    except (TypeError, json.JSONDecodeError):
+        return response
+    if "_error" in data:
+        return response
+    data["refresh_pending"] = False
+    hint = data.get("_hint", "")
+    deferred_text = "Restart deferred — call remarkable_refresh() once your batch is done."
+    if deferred_text in hint:
+        hint = hint.replace(
+            deferred_text,
+            "Concurrent writes were applied with one completed xochitl refresh.",
+        )
+    data["_hint"] = hint
+    return json.dumps(data, indent=2)
+
+
+def _mark_response_pending(response: str) -> str:
+    try:
+        data = json.loads(response)
+    except (TypeError, json.JSONDecodeError):
+        return response
+    if "_error" in data:
+        return response
+    data["refresh_pending"] = True
+    hint = data.get("_hint", "")
+    if "remarkable_refresh" not in hint:
+        hint = f"{hint} Restart deferred — call remarkable_refresh() once your batch is done."
+    data["_hint"] = hint.strip()
+    return json.dumps(data, indent=2)
+
+
+def _pending_refresh_error(error_type: str, message: str, suggestion: str) -> str:
+    data = json.loads(make_error(error_type, message, suggestion))
+    data["refresh_pending"] = True
+    return json.dumps(data, indent=2)
+
+
+async def _refresh_ssh_client(ssh_client: SSHClient) -> None:
+    try:
+        await ssh_client.run_operation_async(
+            "xochitl-refresh",
+            lambda: _restart_xochitl(ssh_client),
+        )
+    except BaseException:
+        _invalidate_client_cache(ssh_client)
+        raise
+    _invalidate_client_cache(ssh_client)
+
+
+async def _run_ssh_tool_operation(
+    ssh_client: SSHClient,
+    operation: str,
+    implementation,
+    *,
+    defer_restart: bool = False,
+) -> str:
+    deferred = defer_restart or _defer_restart_enabled()
+
+    def mutation() -> str:
+        with _suppress_automatic_restart():
+            return implementation()
+
+    try:
+        response, refreshed = await ssh_client._refresh_coordinator.run_write(
+            lambda: ssh_client.run_operation_async(operation, mutation),
+            lambda: _refresh_ssh_client(ssh_client),
+            deferred=deferred,
+            persisted=_response_persisted,
+        )
+    except SSHPreExecutionError as e:
+        return make_error(
+            error_type="ssh_unavailable",
+            message=str(e),
+            suggestion="Wake and unlock the tablet, verify the USB cable, then try again.",
+        )
+    except SSHExecutionUnknownError as e:
+        _invalidate_client_cache(ssh_client)
+        return make_error(
+            error_type="write_execution_unknown",
+            message=str(e),
+            suggestion=(
+                "Do not repeat the write automatically. Run remarkable_refresh(), "
+                "then browse the tablet to determine whether the change was applied."
+            ),
+        )
+    except SSHReliabilityError as e:
+        _invalidate_client_cache(ssh_client)
+        return _pending_refresh_error(
+            error_type="write_persisted_refresh_failed",
+            message=str(e),
+            suggestion=(
+                "The write may already be on disk. Do not repeat it; restore the "
+                "connection and call remarkable_refresh()."
+            ),
+        )
+    except Exception as e:
+        _invalidate_client_cache(ssh_client)
+        return _pending_refresh_error(
+            error_type="write_persisted_refresh_failed",
+            message=f"Write persisted but the shared refresh failed: {e}",
+            suggestion=(
+                "Do not repeat the write. Restore the SSH connection and call "
+                "remarkable_refresh() to make the pending change visible."
+            ),
+        )
+    if refreshed:
+        return _mark_response_refreshed(response)
+    return _mark_response_pending(response) if deferred else response
 
 
 def _write_result_message(
@@ -300,6 +499,8 @@ def _read_remote_bytes(ssh_client: SSHClient, remote_path: str) -> Optional[byte
     """Download a remote file's bytes, or None if it does not exist / fails."""
     try:
         return ssh_client._scp_download(remote_path)
+    except SSHReliabilityError:
+        raise
     except Exception as e:
         logger.debug(f"Remote read failed for {remote_path}: {e}")
         return None
@@ -435,6 +636,8 @@ def _invalidate_client_cache(client) -> None:
         client._documents_by_id = {}
         if hasattr(client, "_metadata_loaded_all"):
             client._metadata_loaded_all = False
+        if hasattr(client, "_metadata_generation"):
+            client._metadata_generation += 1
 
     file_type_lock = getattr(client, "_file_type_lock", None)
     context = file_type_lock if file_type_lock is not None else nullcontext()
@@ -445,6 +648,8 @@ def _invalidate_client_cache(client) -> None:
             client._file_type_cache = None
         elif hasattr(client, "_file_type_cache"):
             client._file_type_cache = {}
+        if hasattr(client, "_file_type_generation"):
+            client._file_type_generation += 1
 
 
 def _clear_document_extraction_cache(doc_id: str) -> None:
@@ -1038,8 +1243,8 @@ def register_write_tools():
         name: Optional[str] = None,
         text: Optional[str] = None,
         folder: Optional[str] = None,
-        ui_submitted: bool = False,
         defer_restart: bool = False,
+        ui_submitted: bool = False,
         ctx: Context = None,
     ) -> str:
         """
@@ -1111,6 +1316,16 @@ def register_write_tools():
         </examples>
         """
 
+        validation_error = _validate_author_request(
+            method,
+            document,
+            page,
+            strokes,
+            name,
+        )
+        if validation_error:
+            return validation_error
+
         def _impl() -> str:
             error = _require_write_transport()
             if error:
@@ -1122,13 +1337,16 @@ def register_write_tools():
                 return _author_add_page(document, defer_restart)
             if method == "create_document":
                 return _author_create_document(name, text, folder, defer_restart)
-            return make_error(
-                error_type="unknown_method",
-                message=f"Unknown method: '{method}'.",
-                suggestion='Use method="draw", "add_page", or "create_document".',
-                did_you_mean=["draw", "add_page", "create_document"],
-            )
+            raise AssertionError(f"Validated author method is unsupported: {method}")
 
+        ssh_client = _get_ssh_client()
+        if isinstance(ssh_client, SSHClient):
+            return await _run_ssh_tool_operation(
+                ssh_client,
+                f"author-{method}",
+                _impl,
+                defer_restart=defer_restart,
+            )
         return await asyncio.to_thread(_impl)
 
     # Native ink/notebook authoring is SSH-only today (cloud/USB-web write-back
@@ -1348,6 +1566,8 @@ def register_write_tools():
                     ),
                 )
 
+            except SSHReliabilityError:
+                raise
             except Exception as e:
                 transport = "USB web" if _is_usb_web_mode() else "SSH"
                 return make_error(
@@ -1356,6 +1576,20 @@ def register_write_tools():
                     suggestion=f"Check {transport} connection and try again.",
                 )
 
+        if _is_ssh_mode():
+            ssh_client = _get_ssh_client()
+            if isinstance(ssh_client, SSHClient):
+                return await _run_ssh_tool_operation(
+                    ssh_client,
+                    "upload",
+                    _impl,
+                    defer_restart=defer_restart,
+                )
+        if _is_usb_web_mode():
+            usb_client = get_rmapi()
+            run_operation = getattr(type(usb_client), "run_operation_async", None)
+            if callable(run_operation):
+                return await run_operation(usb_client, "upload", _impl)
         return await asyncio.to_thread(_impl)
 
     @mcp.tool(annotations=UPLOAD_ANNOTATIONS)
@@ -1525,6 +1759,8 @@ def register_write_tools():
                         _write_result_message(restarted, "Folder created."),
                     )
 
+                except SSHReliabilityError:
+                    raise
                 except Exception as e:
                     return make_error(
                         error_type="mkdir_failed",
@@ -1532,6 +1768,15 @@ def register_write_tools():
                         suggestion="Check SSH connection and try again.",
                     )
 
+            if _is_ssh_mode():
+                ssh_client = _get_ssh_client()
+                if isinstance(ssh_client, SSHClient):
+                    return await _run_ssh_tool_operation(
+                        ssh_client,
+                        "mkdir",
+                        _impl,
+                        defer_restart=defer_restart,
+                    )
             return await asyncio.to_thread(_impl)
 
         @mcp.tool(annotations=MOVE_ANNOTATIONS)
@@ -1650,6 +1895,8 @@ def register_write_tools():
                         _write_result_message(restarted, "Document moved."),
                     )
 
+                except SSHReliabilityError:
+                    raise
                 except Exception as e:
                     return make_error(
                         error_type="move_failed",
@@ -1657,6 +1904,15 @@ def register_write_tools():
                         suggestion="Check SSH connection and try again.",
                     )
 
+            if _is_ssh_mode():
+                ssh_client = _get_ssh_client()
+                if isinstance(ssh_client, SSHClient):
+                    return await _run_ssh_tool_operation(
+                        ssh_client,
+                        "move",
+                        _impl,
+                        defer_restart=defer_restart,
+                    )
             return await asyncio.to_thread(_impl)
 
         @mcp.tool(annotations=RENAME_ANNOTATIONS)
@@ -1742,6 +1998,8 @@ def register_write_tools():
                         _write_result_message(restarted, "Document renamed."),
                     )
 
+                except SSHReliabilityError:
+                    raise
                 except Exception as e:
                     return make_error(
                         error_type="rename_failed",
@@ -1749,6 +2007,15 @@ def register_write_tools():
                         suggestion="Check SSH connection and try again.",
                     )
 
+            if _is_ssh_mode():
+                ssh_client = _get_ssh_client()
+                if isinstance(ssh_client, SSHClient):
+                    return await _run_ssh_tool_operation(
+                        ssh_client,
+                        "rename",
+                        _impl,
+                        defer_restart=defer_restart,
+                    )
             return await asyncio.to_thread(_impl)
 
         @mcp.tool(annotations=DELETE_ANNOTATIONS)
@@ -1891,6 +2158,8 @@ def register_write_tools():
                         ),
                     )
 
+                except SSHReliabilityError:
+                    raise
                 except Exception as e:
                     return make_error(
                         error_type="delete_failed",
@@ -1898,6 +2167,14 @@ def register_write_tools():
                         suggestion="Check SSH connection and try again.",
                     )
 
+            ssh_client = _get_ssh_client()
+            if isinstance(ssh_client, SSHClient):
+                return await _run_ssh_tool_operation(
+                    ssh_client,
+                    "delete",
+                    _impl,
+                    defer_restart=defer_restart,
+                )
             return await asyncio.to_thread(_impl)
 
     async def remarkable_refresh() -> str:
@@ -1923,36 +2200,33 @@ def register_write_tools():
         </examples>
         """
 
-        def _impl() -> str:
-            error = _require_write_transport()
-            if error:
-                return error
+        error = _require_write_transport()
+        if error:
+            return error
 
-            ssh_client = None
-            try:
-                ssh_client = _get_ssh_client()
-                _restart_xochitl(ssh_client)
-                # Drop any cache populated while restarts were deferred so the
-                # next read reflects the just-applied changes.
+        ssh_client = None
+        try:
+            ssh_client = _get_ssh_client()
+            if isinstance(ssh_client, SSHClient):
+                await ssh_client._refresh_coordinator.refresh_explicit(
+                    lambda: _refresh_ssh_client(ssh_client)
+                )
+            else:
+                await asyncio.to_thread(_restart_xochitl, ssh_client)
                 _invalidate_client_cache(ssh_client)
-                return make_response(
-                    {"refreshed": True, "transport": "ssh"},
-                    "xochitl restarted; any deferred changes are now visible. "
-                    "Use remarkable_browse() to verify.",
-                )
-            except Exception as e:
-                # A failed refresh leaves the relationship between on-disk state,
-                # xochitl, and our deferred cache uncertain. Force the next read
-                # to rebuild rather than presenting the cache as authoritative.
-                if ssh_client is not None:
-                    _invalidate_client_cache(ssh_client)
-                return make_error(
-                    error_type="refresh_failed",
-                    message=f"Failed to refresh tablet UI: {e}",
-                    suggestion="Check SSH connection and try again.",
-                )
-
-        return await asyncio.to_thread(_impl)
+            return make_response(
+                {"refreshed": True, "transport": "ssh", "refresh_pending": False},
+                "xochitl restarted; any deferred changes are now visible. "
+                "Use remarkable_browse() to verify.",
+            )
+        except Exception as e:
+            if ssh_client is not None:
+                _invalidate_client_cache(ssh_client)
+            return make_error(
+                error_type="refresh_failed",
+                message=f"Failed to refresh tablet UI: {e}",
+                suggestion="Check SSH connection and try again.",
+            )
 
     # Refreshing is meaningful only for the SSH transport's xochitl restart;
     # cloud/USB clients have no equivalent, so the tool is hidden there.

@@ -95,5 +95,17 @@ upload row still PASSes on a successful upload call).
 - Writes are confined to a unique per-run folder and cleaned up afterwards
   (cloud/SSH). The only exception is the USB-root upload noted above.
 
+  The SSH write phase also launches two folder writes concurrently with automatic
+  refresh enabled. It requires both calls to pass and `remarkable_status` to
+  report exactly one completed refresh, proving that the FIFO dispatcher and
+  generation barrier coalesce the burst. The remaining smoke mutations use
+  `defer_restart=True` and finish with exactly one explicit
+  `remarkable_refresh`, so both automatic and explicit batching paths are covered.
+
+  SSH snapshots retain the process/tablet diagnostics from issue #157 and include
+  the reliability status returned by the server: queue depth, active operation,
+  pre-execution retry count, last classified connection failure, refresh
+  generation, pending/deferred state, and completed refresh count.
+
 Run artifacts (`smoke/snapshots/*.json`) are written on every run and are
 git-ignored.

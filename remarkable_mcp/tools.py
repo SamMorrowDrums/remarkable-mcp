@@ -1641,6 +1641,9 @@ async def remarkable_status() -> str:
             "capabilities": effective_caps,
             "capabilities_by_transport": capability_matrix,
         }
+        reliability_status = getattr(type(client), "reliability_status", None)
+        if callable(reliability_status):
+            result["reliability"] = reliability_status(client)
         if fell_back:
             result["fell_back_to_cloud"] = True
 

@@ -177,21 +177,22 @@ You're connected directly to the tablet via SSH. This enables:
 
 Write operations are enabled. These tools modify your tablet's filesystem:
 
-- `remarkable_upload(file_path, parent_folder, document_name)` - Upload a PDF/EPUB
+- `remarkable_upload(file_path, parent_folder, document_name, defer_restart)` - Upload a PDF/EPUB
 - `remarkable_markdown_to_pdf(markdown, document_name, parent_folder, defer_restart)` -
   Render Markdown as a PDF and upload it
-- `remarkable_mkdir(folder_name, parent)` - Create a folder
-- `remarkable_move(document, dest_folder)` - Move a document/folder
-- `remarkable_rename(document, new_name)` - Rename a document/folder
-- `remarkable_delete(document)` - Delete a document/folder (destructive)
+- `remarkable_mkdir(folder_name, parent, defer_restart)` - Create a folder
+- `remarkable_move(document, dest_folder, defer_restart)` - Move a document/folder
+- `remarkable_rename(document, new_name, defer_restart)` - Rename a document/folder
+- `remarkable_delete(document, defer_restart, permanent)` - Delete a document/folder
+- `remarkable_author(method, ..., defer_restart)` - Author native ink/notebooks
 - `remarkable_refresh()` - Restart xochitl once to apply writes deferred with `defer_restart=True`
 
 ### Safety
 - **Delete is destructive** and immediate — the MCP client should confirm with the user first
-- After each write operation, the tablet UI restarts automatically (the call waits for it
-  to settle). For batches, pass `defer_restart=True` to each write (or set
-  `REMARKABLE_DEFER_RESTART=1`) and call `remarkable_refresh()` once at the end, to restart
-  a single time instead of once per write
+- Concurrent writes are serialized and share one bounded xochitl refresh; every
+  participating call waits for that refresh before returning success
+- For explicit batches, pass `defer_restart=True` to each write (or set
+  `REMARKABLE_DEFER_RESTART=1`) and call `remarkable_refresh()` once at the end
 - Use `remarkable_browse()` to verify changes after write operations
 - Run with `--read-only` to disable all write tools
 """
@@ -315,6 +316,9 @@ async def lifespan(app: MCPServer) -> AsyncIterator[None]:
     finally:
         # Stop background loader on shutdown (if running)
         await stop_background_loader(task)
+        from remarkable_mcp.api import close_device_client
+
+        await close_device_client()
 
 
 try:

@@ -119,7 +119,33 @@ export REMARKABLE_USB_HOST="http://192.168.1.100:8080"
 
 # Adjust timeout in seconds (default: 10)
 export REMARKABLE_USB_TIMEOUT="30"
+
+# Bound concurrent requests to xochitl's USB HTTP service (default: 2)
+export REMARKABLE_USB_MAX_CONCURRENCY="2"
 ```
+
+USB requests use the shared operation dispatcher, so downloads and recursive
+listing requests have a single configurable concurrency limit. Safe GET
+responses that return HTTP 408 retain their existing bounded exponential
+backoff; write requests are not automatically replayed.
+
+## Comparison: USB Web vs SSH vs Cloud
+
+| Feature | USB Web | SSH | Cloud |
+|---------|---------|-----|-------|
+| **Setup** | ✅ Easy | ⚠️ Complex | ✅ Easy |
+| **Developer Mode** | ✅ Not needed | ❌ Required | ✅ Not needed |
+| **Factory Reset** | ✅ No | ❌ Yes | ✅ No |
+| **Subscription** | ✅ Not needed | ✅ Not needed | ❌ Required |
+| **Speed** | ✅ Fast | ✅✅ Very Fast | ⚠️ Slow |
+| **Offline** | ✅ Yes | ✅ Yes | ❌ No |
+| **Connection** | USB only | USB only | Internet |
+| **Stability** | ✅ Good | ✅ Good | ⚠️ Variable |
+
+**Recommendation:**
+- **Most users:** USB Web Interface — Best balance of ease and performance
+- **Advanced users:** SSH — Fastest, but requires developer mode enabled
+- **Remote access:** Cloud API — Works anywhere, but slower and needs subscription
 
 ## Technical Details
 

@@ -2581,6 +2581,59 @@ class TestUSBWebInterface:
 
                 importlib.reload(remarkable_mcp.api)
 
+    @pytest.mark.asyncio
+    async def test_usb_uploads_use_configured_operation_bound(self, monkeypatch, tmp_path):
+        import asyncio
+        import time
+
+        from remarkable_mcp.usb_web import USBWebClient
+
+        monkeypatch.setenv("REMARKABLE_USE_USB_WEB", "1")
+        monkeypatch.delenv("REMARKABLE_USE_SSH", raising=False)
+        monkeypatch.setenv("REMARKABLE_USB_MAX_CONCURRENCY", "1")
+        client = USBWebClient()
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def upload(*args, **kwargs):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.03)
+            with lock:
+                active -= 1
+            return {"ok": True}
+
+        files = []
+        for index in range(3):
+            path = tmp_path / f"{index}.pdf"
+            path.write_bytes(b"%PDF")
+            files.append(path)
+
+        try:
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+                patch(
+                    "remarkable_mcp.write_tools._upload_via_usb_web",
+                    side_effect=upload,
+                ),
+            ):
+                results = await asyncio.gather(
+                    *(
+                        _call_tool(
+                            "remarkable_upload",
+                            {"file_path": str(path)},
+                        )
+                        for path in files
+                    )
+                )
+            assert all(json.loads(result.content[0].text)["uploaded"] is True for result in results)
+            assert max_active == 1
+        finally:
+            client.close()
+
 
 # =============================================================================
 # Test Retry Backoff
@@ -4192,10 +4245,11 @@ class TestCloudStartupFallback:
 
         api.reset_client_cache()
         try:
-            # Returns the unreachable device client so its own errors surface;
-            # the unreachable client is NOT cached, so a later call can succeed
-            # once the device is connected.
+            # Keep one dispatcher/client so bounded wake retries cannot create
+            # independent queues on every tool call.
             assert api.get_rmapi() is device
+            assert api.get_rmapi() is device
+            device.check_connection.assert_called_once()
             assert api.get_active_transport() == "usb-web"
         finally:
             api.reset_client_cache()
@@ -4345,12 +4399,67 @@ class TestSSHCacheConcurrency:
         assert client.get_all_file_types() == {"doc-1": "pdf"}
         assert attempts == 2
 
-    def test_file_type_preload_serializes_other_ssh_io(self):
+    @pytest.mark.asyncio
+    async def test_cached_metadata_bypasses_busy_dispatcher(self):
+        import asyncio
+
         from remarkable_mcp.ssh import Document, SSHClient
 
         client = SSHClient()
-        lock = self.AttemptLock()
-        client._io_lock = lock
+        doc = Document(id="doc-1", hash="doc-1", name="One", doc_type="DocumentType")
+        client._documents = [doc]
+        client._documents_by_id = {doc.ID: doc}
+        client._metadata_loaded_all = True
+        started = threading.Event()
+        release = threading.Event()
+        blocking = client._dispatcher.submit(
+            "file-type-preload",
+            lambda: (started.set(), release.wait(2)),
+        )
+        try:
+            assert started.wait(1)
+            result = await asyncio.wait_for(
+                client.run_method_async(client.get_meta_items),
+                timeout=0.2,
+            )
+            assert result == [doc]
+        finally:
+            release.set()
+            blocking.future.result(timeout=2)
+            client.close()
+
+    def test_stale_metadata_fill_cannot_repopulate_after_invalidation(self):
+        from remarkable_mcp.ssh import SSHClient
+        from remarkable_mcp.write_tools import _invalidate_client_cache
+
+        client = SSHClient()
+        load_started = threading.Event()
+        release_load = threading.Event()
+
+        def fake_command(command, timeout=30):
+            load_started.set()
+            assert release_load.wait(2)
+            return '===FILE===doc-1\n{"visibleName":"One","type":"DocumentType","parent":""}\n'
+
+        client._ssh_command = fake_command
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                load = executor.submit(client.get_meta_items)
+                assert load_started.wait(1)
+                _invalidate_client_cache(client)
+                release_load.set()
+                assert [doc.ID for doc in load.result(timeout=2)] == ["doc-1"]
+            assert client._documents == []
+            assert client._metadata_loaded_all is False
+        finally:
+            client.close()
+
+    def test_file_type_preload_serializes_other_ssh_io(self):
+        import time
+
+        from remarkable_mcp.ssh import Document, SSHClient
+
+        client = SSHClient()
         preload_started = threading.Event()
         release_preload = threading.Event()
 
@@ -4369,19 +4478,21 @@ class TestSSHCacheConcurrency:
             preload = executor.submit(client.get_all_file_types)
             assert preload_started.wait(1)
             download = executor.submit(client.download_raw_file, doc, "pdf")
-            assert lock.second_attempted.wait(1)
+            deadline = time.monotonic() + 1
+            while client.reliability_status()["operations"]["queue_depth"] < 1:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
             assert not download.done()
             release_preload.set()
             assert preload.result(timeout=2) == {"doc-1": "pdf"}
             assert download.result(timeout=2) == b"%PDF"
 
     def test_upload_serializes_with_file_type_preload(self, monkeypatch, tmp_path):
-        import remarkable_mcp.ssh as ssh_mod
+        import time
+
         from remarkable_mcp.ssh import SSHClient
 
         client = SSHClient()
-        lock = self.AttemptLock()
-        client._io_lock = lock
         preload_started = threading.Event()
         release_preload = threading.Event()
 
@@ -4390,11 +4501,7 @@ class TestSSHCacheConcurrency:
             assert release_preload.wait(2)
             return '===FILE===doc-1\n{"fileType":"pdf"}\n'
 
-        monkeypatch.setattr(
-            ssh_mod.subprocess,
-            "run",
-            lambda *args, **kwargs: Mock(returncode=0, stdout=b"", stderr=b""),
-        )
+        monkeypatch.setattr(client, "_upload_file_unlocked", lambda *args: None)
         client._ssh_command_unlocked = fake_command
         local = tmp_path / "upload.pdf"
         local.write_bytes(b"%PDF")
@@ -4407,11 +4514,477 @@ class TestSSHCacheConcurrency:
                 str(local),
                 "/home/root/upload.pdf",
             )
-            assert lock.second_attempted.wait(1)
+            deadline = time.monotonic() + 1
+            while client.reliability_status()["operations"]["queue_depth"] < 1:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
             assert not upload.done()
             release_preload.set()
             assert preload.result(timeout=2) == {"doc-1": "pdf"}
             assert upload.result(timeout=2) is None
+
+
+class TestOperationDispatcher:
+    def test_fifo_order_and_single_concurrency(self):
+        from remarkable_mcp.operation_queue import OperationDispatcher
+
+        dispatcher = OperationDispatcher(name="test", max_concurrency=1)
+        first_started = threading.Event()
+        release_first = threading.Event()
+        order = []
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def operation(value):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+                order.append(value)
+            if value == 1:
+                first_started.set()
+                assert release_first.wait(2)
+            with lock:
+                active -= 1
+            return value
+
+        try:
+            jobs = [
+                dispatcher.submit(str(value), lambda value=value: operation(value))
+                for value in range(1, 4)
+            ]
+            assert first_started.wait(1)
+            release_first.set()
+            assert [job.future.result(timeout=2) for job in jobs] == [1, 2, 3]
+            assert order == [1, 2, 3]
+            assert max_active == 1
+        finally:
+            dispatcher.close()
+
+    def test_cancelled_queued_job_never_runs(self):
+        from remarkable_mcp.operation_queue import (
+            OperationCancelled,
+            OperationDispatcher,
+        )
+
+        dispatcher = OperationDispatcher(name="test", max_concurrency=1)
+        first_started = threading.Event()
+        release_first = threading.Event()
+        ran_second = False
+
+        def first():
+            first_started.set()
+            assert release_first.wait(2)
+
+        def second():
+            nonlocal ran_second
+            ran_second = True
+
+        try:
+            first_job = dispatcher.submit("first", first)
+            assert first_started.wait(1)
+            second_job = dispatcher.submit("second", second)
+            dispatcher.cancel(second_job)
+            release_first.set()
+            first_job.future.result(timeout=2)
+            with pytest.raises(OperationCancelled):
+                second_job.future.result(timeout=2)
+            assert ran_second is False
+        finally:
+            dispatcher.close()
+
+    @pytest.mark.asyncio
+    async def test_async_queued_cancellation_reports_not_started(self):
+        import asyncio
+        import time
+
+        from remarkable_mcp.operation_queue import OperationDispatcher
+
+        dispatcher = OperationDispatcher(name="test", max_concurrency=1)
+        first_started = threading.Event()
+        release_first = threading.Event()
+        ran_second = False
+
+        def first():
+            first_started.set()
+            assert release_first.wait(2)
+
+        def second():
+            nonlocal ran_second
+            ran_second = True
+
+        try:
+            first_job = dispatcher.submit("first", first)
+            assert first_started.wait(1)
+            task = asyncio.create_task(dispatcher.call_async("second", second))
+            deadline = time.monotonic() + 1
+            while dispatcher.diagnostics()["queue_depth"] < 1:
+                assert time.monotonic() < deadline
+                await asyncio.sleep(0.01)
+            task.cancel()
+            await asyncio.sleep(0)
+            release_first.set()
+            first_job.future.result(timeout=2)
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert ran_second is False
+        finally:
+            dispatcher.close()
+
+
+class TestSSHReliabilityPolicy:
+    @pytest.mark.parametrize(
+        ("stderr", "expected"),
+        [
+            (
+                b"ssh: connect to host 10.11.99.1 port 22: Connection refused\n",
+                "connection_refused",
+            ),
+            (b"ssh: connect to host rm port 22: Connection timed out\n", "connection_timeout"),
+            (b"ssh: connect to host rm port 22: No route to host\n", "network_unreachable"),
+            (b"Connection timed out during banner exchange\n", "banner_timeout"),
+            (b"Permission denied (publickey).\n", None),
+            (b"Connection reset by peer\n", None),
+        ],
+    )
+    def test_pre_execution_classifier(self, stderr, expected):
+        from remarkable_mcp.ssh_reliability import classify_pre_execution_failure
+
+        assert (
+            classify_pre_execution_failure(
+                255,
+                b"",
+                stderr,
+                execution_marker=b"started",
+            )
+            == expected
+        )
+
+    def test_execution_marker_forbids_retry(self):
+        from remarkable_mcp.ssh_reliability import classify_pre_execution_failure
+
+        assert (
+            classify_pre_execution_failure(
+                255,
+                b"",
+                b"started\nssh: connect to host rm port 22: Connection refused\n",
+                execution_marker=b"started",
+            )
+            is None
+        )
+
+    def test_pre_execution_failure_retries_then_succeeds(self, monkeypatch):
+        import remarkable_mcp.ssh as ssh_mod
+        from remarkable_mcp.ssh import SSHClient
+
+        class Process:
+            def __init__(self, returncode, stdout, stderr):
+                self.returncode = returncode
+                self.output = (stdout, stderr)
+
+            def communicate(self, timeout=None):
+                return self.output
+
+            def poll(self):
+                return self.returncode
+
+        processes = iter(
+            [
+                Process(
+                    255,
+                    b"",
+                    b"ssh: connect to host 10.11.99.1 port 22: Connection refused\n",
+                ),
+                Process(0, b"ok\n", b"__REMARKABLE_MCP_REMOTE_STARTED__\n"),
+            ]
+        )
+        monkeypatch.setenv("REMARKABLE_SSH_BACKOFF_INITIAL", "0")
+        monkeypatch.setenv("REMARKABLE_SSH_MAX_ATTEMPTS", "3")
+        monkeypatch.setattr(ssh_mod.subprocess, "Popen", lambda *args, **kwargs: next(processes))
+        client = SSHClient()
+        try:
+            assert client._ssh_command("echo ok") == "ok\n"
+            status = client.reliability_status()["operations"]
+            assert status["pre_execution_retries"] == 1
+            assert status["last_connection_failure"] == "connection_refused"
+        finally:
+            client.close()
+
+    def test_ambiguous_exit_is_not_retried(self, monkeypatch):
+        import remarkable_mcp.ssh as ssh_mod
+        from remarkable_mcp.ssh import SSHClient
+        from remarkable_mcp.ssh_reliability import SSHExecutionUnknownError
+
+        class Process:
+            returncode = 255
+
+            def communicate(self, timeout=None):
+                return b"", b"Connection reset by peer\n"
+
+            def poll(self):
+                return self.returncode
+
+        calls = 0
+
+        def popen(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return Process()
+
+        monkeypatch.setenv("REMARKABLE_SSH_BACKOFF_INITIAL", "0")
+        monkeypatch.setattr(ssh_mod.subprocess, "Popen", popen)
+        client = SSHClient()
+        try:
+            with pytest.raises(SSHExecutionUnknownError):
+                client._ssh_command("touch /tmp/test")
+            assert calls == 1
+        finally:
+            client.close()
+
+    @pytest.mark.asyncio
+    async def test_cancellation_interrupts_retry_backoff(self, monkeypatch):
+        import asyncio
+        import time
+
+        import remarkable_mcp.ssh as ssh_mod
+        from remarkable_mcp.ssh import SSHClient
+
+        class Process:
+            returncode = 255
+
+            def communicate(self, timeout=None):
+                return (
+                    b"",
+                    b"ssh: connect to host 10.11.99.1 port 22: Connection refused\n",
+                )
+
+            def poll(self):
+                return self.returncode
+
+        calls = 0
+
+        def popen(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return Process()
+
+        monkeypatch.setenv("REMARKABLE_SSH_BACKOFF_INITIAL", "30")
+        monkeypatch.setenv("REMARKABLE_SSH_BACKOFF_MAX", "30")
+        monkeypatch.setenv("REMARKABLE_SSH_WAKE_GRACE", "60")
+        monkeypatch.setattr(ssh_mod.subprocess, "Popen", popen)
+        client = SSHClient()
+        started = time.monotonic()
+        task = asyncio.create_task(
+            client.run_operation_async(
+                "connection-check",
+                lambda: client._ssh_command_unlocked("echo ok", 30),
+            )
+        )
+        try:
+            deadline = time.monotonic() + 1
+            while client.reliability_status()["operations"]["pre_execution_retries"] < 1:
+                assert time.monotonic() < deadline
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+            assert time.monotonic() - started < 1
+            assert calls == 1
+        finally:
+            client.close()
+
+
+class TestSSHRefreshCoordinator:
+    def test_uncancel_helper_is_python_310_compatible(self):
+        from remarkable_mcp.ssh_reliability import _uncancel_current_task
+
+        with patch("remarkable_mcp.ssh_reliability.asyncio.current_task", return_value=object()):
+            _uncancel_current_task()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_writes_share_one_refresh(self, monkeypatch):
+        import asyncio
+
+        from remarkable_mcp.ssh_reliability import SSHRefreshCoordinator
+
+        monkeypatch.setenv("REMARKABLE_SSH_REFRESH_DEBOUNCE", "0.01")
+        coordinator = SSHRefreshCoordinator()
+        all_started = asyncio.Event()
+        started = 0
+        refreshes = 0
+
+        async def mutation(value):
+            nonlocal started
+            started += 1
+            if started == 3:
+                all_started.set()
+            await all_started.wait()
+            return value
+
+        async def refresh():
+            nonlocal refreshes
+            refreshes += 1
+
+        results = await asyncio.gather(
+            *(
+                coordinator.run_write(
+                    lambda value=value: mutation(value),
+                    refresh,
+                    deferred=False,
+                    persisted=lambda result: result > 0,
+                )
+                for value in range(1, 4)
+            )
+        )
+        assert [result for result, refreshed in results] == [1, 2, 3]
+        assert all(refreshed for result, refreshed in results)
+        assert refreshes == 1
+
+    @pytest.mark.asyncio
+    async def test_deferred_write_stays_pending_without_refresh(self):
+        from remarkable_mcp.ssh_reliability import SSHRefreshCoordinator
+
+        coordinator = SSHRefreshCoordinator()
+        refreshes = 0
+
+        async def refresh():
+            nonlocal refreshes
+            refreshes += 1
+
+        result, refreshed = await coordinator.run_write(
+            lambda: _async_value("saved"),
+            refresh,
+            deferred=True,
+            persisted=lambda value: value == "saved",
+        )
+        assert result == "saved"
+        assert refreshed is False
+        assert refreshes == 0
+        assert coordinator.diagnostics()["deferred_dirty"] is True
+
+    @pytest.mark.asyncio
+    async def test_refresh_failure_retains_dirty_state_for_explicit_recovery(self):
+        from remarkable_mcp.ssh_reliability import SSHRefreshCoordinator
+
+        coordinator = SSHRefreshCoordinator()
+
+        async def failed_refresh():
+            raise RuntimeError("tablet disconnected")
+
+        with pytest.raises(RuntimeError, match="tablet disconnected"):
+            await coordinator.run_write(
+                lambda: _async_value("saved"),
+                failed_refresh,
+                deferred=False,
+                persisted=lambda value: value == "saved",
+            )
+        assert coordinator.diagnostics()["deferred_dirty"] is True
+
+        await coordinator.refresh_explicit(lambda: _async_value(None))
+        assert coordinator.diagnostics()["deferred_dirty"] is False
+
+    @pytest.mark.asyncio
+    async def test_not_started_cancellation_does_not_refresh(self):
+        import asyncio
+
+        from remarkable_mcp.ssh_reliability import SSHRefreshCoordinator
+
+        coordinator = SSHRefreshCoordinator()
+        refreshes = 0
+
+        async def cancelled_mutation():
+            raise asyncio.CancelledError()
+
+        async def refresh():
+            nonlocal refreshes
+            refreshes += 1
+
+        with pytest.raises(asyncio.CancelledError):
+            await coordinator.run_write(
+                cancelled_mutation,
+                refresh,
+                deferred=False,
+                persisted=lambda value: True,
+            )
+        assert refreshes == 0
+
+    @pytest.mark.asyncio
+    async def test_follower_cancellation_does_not_cancel_shared_generation(self, monkeypatch):
+        import asyncio
+
+        from remarkable_mcp.ssh_reliability import SSHRefreshCoordinator
+
+        monkeypatch.setenv("REMARKABLE_SSH_REFRESH_DEBOUNCE", "0.01")
+        coordinator = SSHRefreshCoordinator()
+        all_started = asyncio.Event()
+        started = 0
+        refreshes = 0
+
+        async def mutation(value):
+            nonlocal started
+            started += 1
+            if started == 3:
+                all_started.set()
+            await all_started.wait()
+            return value
+
+        async def refresh():
+            nonlocal refreshes
+            refreshes += 1
+
+        tasks = [
+            asyncio.create_task(
+                coordinator.run_write(
+                    lambda value=value: mutation(value),
+                    refresh,
+                    deferred=False,
+                    persisted=lambda result: result > 0,
+                )
+            )
+            for value in range(1, 4)
+        ]
+        await all_started.wait()
+        tasks[1].cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        assert results[0][0] == 1
+        assert isinstance(results[1], asyncio.CancelledError)
+        assert results[2][0] == 3
+        assert refreshes == 1
+
+    @pytest.mark.asyncio
+    async def test_explicit_refresh_leader_cancellation_does_not_cancel_follower(
+        self,
+    ):
+        import asyncio
+
+        from remarkable_mcp.ssh_reliability import SSHRefreshCoordinator
+
+        coordinator = SSHRefreshCoordinator()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        refreshes = 0
+
+        async def refresh():
+            nonlocal refreshes
+            refreshes += 1
+            started.set()
+            await release.wait()
+
+        leader = asyncio.create_task(coordinator.refresh_explicit(refresh))
+        await started.wait()
+        follower = asyncio.create_task(coordinator.refresh_explicit(refresh))
+        await asyncio.sleep(0)
+        leader.cancel()
+        release.set()
+        results = await asyncio.gather(leader, follower, return_exceptions=True)
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert results[1] is None
+        assert refreshes == 1
+
+
+async def _async_value(value):
+    return value
 
 
 class TestExtractionCacheGeneration:
@@ -4548,17 +5121,17 @@ class TestSSHKeyAuth:
     """SSH command construction for key-based / password / agent-free auth."""
 
     def _capture(self, monkeypatch, *, text):
-        """Patch subprocess.run in ssh module and capture the argv it receives."""
-        import remarkable_mcp.ssh as ssh_mod
+        """Patch the process seam and capture the argv it receives."""
+        from remarkable_mcp.ssh import SSHClient
 
         captured = {}
 
-        def fake_run(args, **kwargs):
+        def fake_run(self, args, **kwargs):
             captured["args"] = args
             captured["kwargs"] = kwargs
-            return Mock(returncode=0, stdout=("ok" if text else b"ok"), stderr="")
+            return 0, b"ok", b""
 
-        monkeypatch.setattr(ssh_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(SSHClient, "_run_process", fake_run)
         return captured
 
     def test_explicit_key_pins_identity_and_ignores_agent(self, monkeypatch):
@@ -4576,7 +5149,8 @@ class TestSSHKeyAuth:
         assert expected_key in argv
         assert "IdentitiesOnly=yes" in argv
         # Identity must be supplied before the destination/command.
-        assert argv.index(expected_key) < argv.index("echo ok")
+        assert argv.index(expected_key) < len(argv) - 1
+        assert "echo ok" in argv[-1]
 
     def test_keyless_default_has_batchmode_but_no_identity(self, monkeypatch):
         from remarkable_mcp.ssh import SSHClient
@@ -4618,18 +5192,16 @@ class TestSSHKeyAuth:
         assert "BatchMode=yes" in argv
 
     def test_upload_file_bytes_pins_identity(self, monkeypatch, tmp_path):
-        import subprocess as subprocess_mod
-
         from remarkable_mcp.ssh import SSHClient
         from remarkable_mcp.write_tools import _upload_file_bytes
 
         captured = {}
 
-        def fake_run(args, **kwargs):
+        def fake_run(self, args, **kwargs):
             captured["args"] = args
-            return Mock(returncode=0, stdout=b"", stderr=b"")
+            return 0, b"", b""
 
-        monkeypatch.setattr(subprocess_mod, "run", fake_run)
+        monkeypatch.setattr(SSHClient, "_run_process", fake_run)
         local = tmp_path / "page.rm"
         local.write_bytes(b"data")
 
@@ -4643,21 +5215,20 @@ class TestSSHKeyAuth:
         assert "IdentitiesOnly=yes" in argv
         assert "BatchMode=yes" in argv
         # Identity must be supplied before the destination/command.
-        assert argv.index("/keys/rm_ed25519") < argv.index("cat > '/home/root/remote.rm'")
+        assert argv.index("/keys/rm_ed25519") < len(argv) - 1
+        assert "cat > '/home/root/remote.rm'" in argv[-1]
 
     def test_upload_file_bytes_password_uses_sshpass(self, monkeypatch, tmp_path):
-        import subprocess as subprocess_mod
-
         from remarkable_mcp.ssh import SSHClient
         from remarkable_mcp.write_tools import _upload_file_bytes
 
         captured = {}
 
-        def fake_run(args, **kwargs):
+        def fake_run(self, args, **kwargs):
             captured["args"] = args
-            return Mock(returncode=0, stdout=b"", stderr=b"")
+            return 0, b"", b""
 
-        monkeypatch.setattr(subprocess_mod, "run", fake_run)
+        monkeypatch.setattr(SSHClient, "_run_process", fake_run)
         local = tmp_path / "page.rm"
         local.write_bytes(b"data")
 
@@ -5518,7 +6089,13 @@ class TestCanvasWrite:
 
     @pytest.mark.asyncio
     async def test_empty_strokes_rejected(self):
-        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch(
+                "remarkable_mcp.write_tools.get_rmapi",
+                side_effect=AssertionError("invalid requests must not resolve a client"),
+            ),
+        ):
             result = await _call_tool(
                 "remarkable_author",
                 {"method": "draw", "document": "Sketchbook", "page": 1, "strokes": []},
@@ -5528,7 +6105,13 @@ class TestCanvasWrite:
 
     @pytest.mark.asyncio
     async def test_unknown_method_is_educational(self):
-        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch(
+                "remarkable_mcp.write_tools.get_rmapi",
+                side_effect=AssertionError("invalid requests must not resolve a client"),
+            ),
+        ):
             result = await _call_tool("remarkable_author", {"method": "frobnicate"})
             data = json.loads(result.content[0].text)
             assert data["_error"]["type"] == "unknown_method"
@@ -5893,7 +6476,13 @@ class TestCanvasWrite:
 
     @pytest.mark.asyncio
     async def test_create_document_requires_name(self):
-        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch(
+                "remarkable_mcp.write_tools.get_rmapi",
+                side_effect=AssertionError("invalid requests must not resolve a client"),
+            ),
+        ):
             result = await _call_tool("remarkable_author", {"method": "create_document"})
             data = json.loads(result.content[0].text)
             assert data["_error"]["type"] == "missing_parameter"
@@ -6406,6 +6995,70 @@ class TestDeferRestart:
                 assert data["refresh_pending"] is False
                 mock_restart.assert_called_once_with(client)
         finally:
+            self._cleanup_tools()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_real_ssh_client_writes_share_refresh(self):
+        import asyncio
+
+        from remarkable_mcp.ssh import SSHClient
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+        client = SSHClient()
+        client._metadata_loaded_all = True
+        try:
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+                patch("remarkable_mcp.write_tools._write_metadata"),
+                patch("remarkable_mcp.write_tools._restart_xochitl") as mock_restart,
+                patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            ):
+                results = await asyncio.gather(
+                    _call_tool("remarkable_mkdir", {"folder_name": "One"}),
+                    _call_tool("remarkable_mkdir", {"folder_name": "Two"}),
+                )
+            payloads = [json.loads(result.content[0].text) for result in results]
+            assert [payload["created"] for payload in payloads] == [True, True]
+            assert all(payload["refresh_pending"] is False for payload in payloads)
+            mock_restart.assert_called_once_with(client)
+        finally:
+            client.close()
+            self._cleanup_tools()
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_write_is_not_replayed_and_forces_refresh(self, tmp_path):
+        from remarkable_mcp.ssh import SSHClient
+        from remarkable_mcp.ssh_reliability import SSHExecutionUnknownError
+        from remarkable_mcp.write_tools import register_write_tools
+
+        pdf = tmp_path / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4 test")
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+        client = SSHClient()
+        client._metadata_loaded_all = True
+        try:
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+                patch(
+                    "remarkable_mcp.write_tools._upload_file_bytes",
+                    side_effect=SSHExecutionUnknownError("remote state unknown"),
+                ) as mock_upload,
+                patch("remarkable_mcp.write_tools._restart_xochitl") as mock_restart,
+                patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            ):
+                result = await _call_tool(
+                    "remarkable_upload",
+                    {"file_path": str(pdf)},
+                )
+            data = json.loads(result.content[0].text)
+            assert data["_error"]["type"] == "write_execution_unknown"
+            mock_upload.assert_called_once()
+            mock_restart.assert_called_once_with(client)
+        finally:
+            client.close()
             self._cleanup_tools()
 
     @pytest.mark.asyncio

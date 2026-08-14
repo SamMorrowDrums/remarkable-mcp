@@ -187,18 +187,39 @@ Note: WiFi is slower than USB but works from anywhere on your network.
 | `REMARKABLE_SSH_PORT` | `22` | SSH port |
 | `REMARKABLE_SSH_PASSWORD` | *(none)* | SSH password (requires `sshpass`, key auth recommended) |
 | `REMARKABLE_SSH_KEY` | *(none)* | Path to a private key for key auth. Pins this on-disk identity (`IdentitiesOnly`) and ignores any ssh-agent. |
+| `REMARKABLE_SSH_MAX_ATTEMPTS` | `4` | Maximum attempts for failures proven to occur before remote execution |
+| `REMARKABLE_SSH_BACKOFF_INITIAL` | `0.5` | Initial retry delay in seconds |
+| `REMARKABLE_SSH_BACKOFF_MULTIPLIER` | `2` | Exponential retry multiplier |
+| `REMARKABLE_SSH_BACKOFF_MAX` | `2` | Maximum delay between SSH attempts |
+| `REMARKABLE_SSH_WAKE_GRACE` | `8` | Total seconds allowed for bounded wake/reconnect retries |
+| `REMARKABLE_SSH_REFRESH_DEBOUNCE` | `0.15` | Stable window used to coalesce concurrent writes into one refresh |
+| `REMARKABLE_SSH_REFRESH_MAX_WAIT` | `1` | Hard maximum seconds before a write generation closes |
+| `REMARKABLE_SSH_SHUTDOWN_TIMEOUT` | `5` | Maximum seconds to drain/terminate SSH work during server shutdown |
 | `REMARKABLE_RESTART_TIMEOUT` | `30` | Max seconds to wait for `xochitl` to report active again after a write restarts it |
 | `REMARKABLE_RESTART_POLL_INTERVAL` | `1` | Seconds between `systemctl is-active` polls while waiting for `xochitl` |
 | `REMARKABLE_RESTART_SETTLE` | `3` | Extra settle delay (seconds) after `xochitl` is active, before the next operation runs |
 | `REMARKABLE_DEFER_RESTART` | *(unset)* | When set (`1`/`true`/`yes`), write tools skip their per-write `xochitl` restart; call `remarkable_refresh` once to apply a whole batch with a single restart |
+| `REMARKABLE_USB_MAX_CONCURRENCY` | `2` | Maximum concurrent requests to the USB HTTP interface |
 
 Direct SSH writes bypass the live library control plane used by cloud sync and
 the USB web upload service. Stock firmware exposes no external library reload
 API, and xochitl does not automatically ingest raw metadata/filesystem changes.
-That is why a refresh restart is still required after an SSH write batch.
-`remarkable_refresh` performs one restart for all writes deferred with
-`defer_restart=True`; it is preferable to restarting after every item in a
-large batch.
+That is why a refresh restart is still required after an SSH write batch. The
+server serializes all SSH subprocesses through one FIFO dispatcher. Concurrent
+non-deferred writes form a bounded generation: every mutation completes, one
+participant restarts `xochitl`, and all callers wait for that same refresh
+before returning success.
+
+`remarkable_refresh` performs one restart for all writes explicitly deferred
+with `defer_restart=True`; it remains preferable for a known large batch. A
+refresh failure is reported as persisted-but-unrefreshed with
+`refresh_pending: true`, so do not repeat the mutation automatically.
+
+Only failures that prove no remote command started are retried. Generic SSH
+exit 255, authentication failures, connection resets after session start,
+remote command failures, and local process timeouts are not replayed because a
+write may already be on disk. `remarkable_status` exposes queue depth, the
+active operation, retry counts, refresh generation state, and refresh count.
 
 ## Troubleshooting
 
@@ -207,6 +228,8 @@ large batch.
 - Make sure developer mode is enabled
 - Verify the tablet is connected via USB and unlocked
 - Check that the IP is correct (`10.11.99.1` for USB)
+- The server waits briefly with bounded exponential backoff so a sleeping tablet
+  can wake. The final error reports the attempts and elapsed grace window.
 
 ### "Permission denied"
 
