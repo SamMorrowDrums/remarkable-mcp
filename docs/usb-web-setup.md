@@ -131,7 +131,15 @@ export REMARKABLE_USB_HOST="http://192.168.1.100:8080"
 
 # Adjust timeout in seconds (default: 10)
 export REMARKABLE_USB_TIMEOUT="30"
+
+# Bound concurrent requests to xochitl's USB HTTP service (default: 2)
+export REMARKABLE_USB_MAX_CONCURRENCY="2"
 ```
+
+USB requests use the shared operation dispatcher, so downloads and recursive
+listing requests have a single configurable concurrency limit. Safe GET
+responses that return HTTP 408 retain their existing bounded exponential
+backoff; write requests are not automatically replayed.
 
 ## Comparison: USB Web vs SSH vs Cloud
 

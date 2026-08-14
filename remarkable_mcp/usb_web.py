@@ -22,12 +22,15 @@ Benefits:
 """
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
+
+from remarkable_mcp.operation_queue import OperationDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -117,19 +120,37 @@ class USBWebClient:
         self.timeout = timeout
         self._documents: List[Document] = []
         self._documents_by_id: Dict[str, Document] = {}
+        try:
+            max_concurrency = int(os.environ.get("REMARKABLE_USB_MAX_CONCURRENCY", "2"))
+        except ValueError as exc:
+            raise ValueError("REMARKABLE_USB_MAX_CONCURRENCY must be an integer") from exc
+        if not 1 <= max_concurrency <= 16:
+            raise ValueError("REMARKABLE_USB_MAX_CONCURRENCY must be between 1 and 16")
+        self._dispatcher = OperationDispatcher(
+            name="USB HTTP",
+            max_concurrency=max_concurrency,
+        )
 
     def _request(
         self, endpoint: str, method: str = "GET", timeout: int | None = None
     ) -> requests.Response:
         """Make an HTTP request to the USB web interface."""
+        normalized_method = method.upper()
+        return self._dispatcher.call(
+            f"{normalized_method} {endpoint}",
+            lambda: self._request_unqueued(endpoint, normalized_method, timeout),
+        )
+
+    def _request_unqueued(
+        self, endpoint: str, method: str, timeout: int | None
+    ) -> requests.Response:
         url = f"{self.host}{endpoint}"
         request_timeout = self.timeout if timeout is None else timeout
-        normalized_method = method.upper()
 
         try:
             for attempt in range(GET_408_MAX_ATTEMPTS):
-                response = requests.request(normalized_method, url, timeout=request_timeout)
-                if response.status_code != 408 or normalized_method != "GET":
+                response = requests.request(method, url, timeout=request_timeout)
+                if response.status_code != 408 or method != "GET":
                     response.raise_for_status()
                     return response
 
@@ -168,6 +189,26 @@ class USBWebClient:
             )
         except requests.HTTPError as e:
             raise RuntimeError(f"USB web interface request failed: {e}")
+
+    async def run_method_async(self, func, *args, **kwargs):
+        """Await USB operations on its bounded dispatcher."""
+        if func.__name__ == "get_meta_items":
+            limit = args[0] if args else kwargs.get("limit")
+            if self._documents and (limit is None or len(self._documents) >= limit):
+                return func(*args, **kwargs)
+        return await self._dispatcher.call_async(
+            func.__name__.replace("_", "-"),
+            lambda: func(*args, **kwargs),
+        )
+
+    async def run_operation_async(self, operation: str, callback):
+        return await self._dispatcher.call_async(operation, callback)
+
+    def reliability_status(self) -> dict:
+        return {"operations": self._dispatcher.diagnostics()}
+
+    def close(self) -> None:
+        self._dispatcher.close()
 
     def check_connection(self) -> bool:
         """Check if USB web interface is accessible."""
@@ -375,8 +416,6 @@ def create_usb_web_client(
     - REMARKABLE_USB_HOST: USB web interface host (default: http://10.11.99.1)
     - REMARKABLE_USB_TIMEOUT: Request timeout in seconds (default: 10)
     """
-    import os
-
     return USBWebClient(
         host=host or os.environ.get("REMARKABLE_USB_HOST", DEFAULT_USB_HOST),
         timeout=timeout or int(os.environ.get("REMARKABLE_USB_TIMEOUT", "10")),

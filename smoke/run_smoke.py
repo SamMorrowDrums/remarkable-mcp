@@ -153,10 +153,6 @@ MODES = {
         "env": {
             "REMARKABLE_USE_SSH": "1",
             "REMARKABLE_DISABLE_CLOUD_FALLBACK": "1",
-            # A smoke run is a write batch. Restart xochitl once after cleanup
-            # rather than after every operation, which would force repeated
-            # full-library rescans and obscure sequencing failures.
-            "REMARKABLE_DEFER_RESTART": "1",
         },
         "probe_port": 22,
     },
@@ -646,13 +642,53 @@ async def run_write_phase(session, mode, rec, registered):
     shutil.copyfile(FIXTURE_PDF, tmp_pdf)
 
     try:
+        if is_ssh and "remarkable_mkdir" in registered:
+            burst_names = [f"{runid}-burst-1", f"{runid}-burst-2"]
+            burst_results = await asyncio.gather(
+                *(
+                    call_tool(
+                        session,
+                        "remarkable_mkdir",
+                        {"folder_name": name, "parent": "/"},
+                        TIMEOUTS["_default"],
+                    )
+                    for name in burst_names
+                )
+            )
+            burst_states = [
+                classify_ok(payload, is_err, exc)[0] for payload, is_err, exc in burst_results
+            ]
+            status_payload, status_err, status_exc = await call_tool(
+                session,
+                "remarkable_status",
+                {},
+                TIMEOUTS["remarkable_status"],
+            )
+            refreshes = (
+                status_payload.get("reliability", {}).get("refresh", {}).get("refreshes")
+                if not status_err and status_exc is None
+                else None
+            )
+            probe_state = (
+                PASS if all(state == PASS for state in burst_states) and refreshes == 1 else FAIL
+            )
+            rec.modes[mode]["ssh_auto_refresh_probe"] = {
+                "state": probe_state,
+                "writes": burst_states,
+                "refreshes": refreshes,
+            }
+            created.extend(("folder", f"/{name}") for name in burst_names)
+
         # --- mkdir -------------------------------------------------------
         upload_parent = "/"
         if "remarkable_mkdir" in registered:
+            mkdir_args = {"folder_name": runid, "parent": "/"}
+            if is_ssh:
+                mkdir_args["defer_restart"] = True
             payload, is_err, exc = await call_tool(
                 session,
                 "remarkable_mkdir",
-                {"folder_name": runid, "parent": "/"},
+                mkdir_args,
                 TIMEOUTS["_default"],
             )
             state, note = classify_ok(payload, is_err, exc)
@@ -667,6 +703,8 @@ async def run_write_phase(session, mode, rec, registered):
             if managed:
                 up_args["parent_folder"] = upload_parent
                 up_args["document_name"] = f"{runid}-doc"
+            if is_ssh:
+                up_args["defer_restart"] = True
             payload, is_err, exc = await call_tool(
                 session, "remarkable_upload", up_args, TIMEOUTS["remarkable_upload"]
             )
@@ -706,10 +744,13 @@ async def run_write_phase(session, mode, rec, registered):
             doc_entry = next((p for k, p in created if k == "doc"), None)
             if doc_entry:
                 new_name = f"{runid}-renamed"
+                rename_args = {"document": doc_entry, "new_name": new_name}
+                if is_ssh:
+                    rename_args["defer_restart"] = True
                 payload, is_err, exc = await call_tool(
                     session,
                     "remarkable_rename",
-                    {"document": doc_entry, "new_name": new_name},
+                    rename_args,
                     TIMEOUTS["_default"],
                 )
                 state, note = classify_ok(payload, is_err, exc)
@@ -723,10 +764,13 @@ async def run_write_phase(session, mode, rec, registered):
         # --- move --------------------------------------------------------
         if "remarkable_move" in registered:
             if renamed_path:
+                move_args = {"document": renamed_path, "dest_folder": "/"}
+                if is_ssh:
+                    move_args["defer_restart"] = True
                 payload, is_err, exc = await call_tool(
                     session,
                     "remarkable_move",
-                    {"document": renamed_path, "dest_folder": "/"},
+                    move_args,
                     TIMEOUTS["_default"],
                 )
                 state, note = classify_ok(payload, is_err, exc)
@@ -743,7 +787,12 @@ async def run_write_phase(session, mode, rec, registered):
             payload, is_err, exc = await call_tool(
                 session,
                 "remarkable_author",
-                {"method": "create_document", "name": nb_name, "folder": folder_path},
+                {
+                    "method": "create_document",
+                    "name": nb_name,
+                    "folder": folder_path,
+                    "defer_restart": True,
+                },
                 TIMEOUTS["remarkable_author"],
             )
             state, note = classify_ok(payload, is_err, exc)
@@ -753,7 +802,7 @@ async def run_write_phase(session, mode, rec, registered):
                 ap_payload, ap_err, ap_exc = await call_tool(
                     session,
                     "remarkable_author",
-                    {"method": "add_page", "document": nb_path},
+                    {"method": "add_page", "document": nb_path, "defer_restart": True},
                     TIMEOUTS["remarkable_author"],
                 )
                 ap_state, _ = classify_ok(ap_payload, ap_err, ap_exc)
@@ -764,6 +813,7 @@ async def run_write_phase(session, mode, rec, registered):
                         "method": "draw",
                         "document": nb_path,
                         "page": 1,
+                        "defer_restart": True,
                         "strokes": [
                             {
                                 "points": [[0.1, 0.5], [0.9, 0.5]],
@@ -798,6 +848,7 @@ async def run_write_phase(session, mode, rec, registered):
                     # Smoke artifacts are disposable test data; do not fill the
                     # tablet's Trash or let sync restore them after validation.
                     delete_args["permanent"] = True
+                    delete_args["defer_restart"] = True
                 payload, is_err, exc = await call_tool(
                     session,
                     "remarkable_delete",
@@ -945,6 +996,17 @@ def print_report(rec: Recorder, modes: list[str], started: str) -> bool:
             signal = process.get("signal")
             suffix = f" (signal {signal})" if signal is not None else ""
             print(f"    SERVER PROCESS EXIT: returncode={returncode}{suffix}")
+
+        reliability_probe = data.get("ssh_auto_refresh_probe")
+        if isinstance(reliability_probe, dict):
+            if reliability_probe.get("state") != PASS:
+                any_fail = True
+            print(
+                "    SSH AUTO-REFRESH: "
+                f"{reliability_probe.get('state')} "
+                f"writes={reliability_probe.get('writes')} "
+                f"refreshes={reliability_probe.get('refreshes')}"
+            )
 
         tablet_after = data.get("tablet_after")
         tablet_probe_failed = isinstance(tablet_after, dict) and (

@@ -35,4 +35,8 @@ def run_blocking(func: Callable[..., T], *args: Any, **kwargs: Any) -> Awaitable
     offload blocking I/O from an ``async def`` MCP tool handler so other
     concurrent tool calls can make progress on the event loop.
     """
+    owner = getattr(func, "__self__", None)
+    queued_runner = getattr(type(owner), "run_method_async", None)
+    if callable(queued_runner):
+        return queued_runner(owner, func, *args, **kwargs)
     return asyncio.to_thread(func, *args, **kwargs)

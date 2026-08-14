@@ -68,12 +68,36 @@ def reset_client_cache() -> None:
     """Clear the cached clients (e.g. after re-registering a token)."""
     global _cloud_client, _cloud_client_key
     global _device_client, _fell_back_to_cloud
+    old_device = None
     with _cloud_client_lock:
         _cloud_client = None
         _cloud_client_key = None
     with _device_resolve_lock:
+        old_device = _device_client
         _device_client = None
         _fell_back_to_cloud = False
+    close = getattr(old_device, "close", None)
+    if callable(close):
+        close()
+
+
+async def close_device_client() -> None:
+    """Detach and close the cached device client without creating a new one."""
+    global _device_client
+    with _device_resolve_lock:
+        client = _device_client
+        _device_client = None
+    if client is None:
+        return
+    async_close = getattr(client, "aclose", None)
+    if callable(async_close):
+        await async_close()
+        return
+    close = getattr(client, "close", None)
+    if callable(close):
+        import asyncio
+
+        await asyncio.to_thread(close)
 
 
 def _is_cloud_token_available() -> bool:
@@ -202,6 +226,9 @@ def get_rmapi():
 
             # Device unreachable — fall back to cloud if allowed and possible.
             if not REMARKABLE_DISABLE_CLOUD_FALLBACK and _is_cloud_token_available():
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
                 logger.warning(
                     "%s is not reachable; falling back to cloud mode because a "
                     "cloud token is configured. Set "
@@ -211,10 +238,11 @@ def get_rmapi():
                 _fell_back_to_cloud = True
                 return _get_cloud_client()
 
-            # No fallback: return the (unreachable) device client so its own
-            # operation errors surface, and don't cache it so a later call
-            # works once the device is connected.
-            return client
+            # Keep one client/dispatcher for the server lifetime. Its bounded
+            # wake retries can recover when the device becomes reachable without
+            # creating independent queues on each tool call.
+            _device_client = client
+            return _device_client
 
     # Cloud API mode (default).
     return _get_cloud_client()
