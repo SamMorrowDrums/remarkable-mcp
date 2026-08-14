@@ -3182,6 +3182,63 @@ class TestWriteTools:
                 mcp._tool_manager._tools.pop(name, None)
 
     @pytest.mark.asyncio
+    async def test_permanent_delete_rejects_non_empty_folder(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+
+        try:
+            folder = Mock()
+            folder.VissibleName = "Smoke Folder"
+            folder.ID = "folder-123"
+            folder.Parent = ""
+            folder.is_folder = True
+            child = Mock()
+            child.VissibleName = "Child"
+            child.ID = "child-123"
+            child.Parent = folder.ID
+            child.is_folder = False
+
+            mock_client = Mock(
+                spec=[
+                    "get_meta_items",
+                    "_documents",
+                    "_documents_by_id",
+                    "host",
+                    "user",
+                    "port",
+                    "password",
+                ]
+            )
+            mock_client.get_meta_items.return_value = [folder, child]
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=mock_client),
+                patch("remarkable_mcp.write_tools._permanently_delete_ssh_entry") as mock_purge,
+                patch.dict(
+                    os.environ,
+                    {"REMARKABLE_USE_SSH": "1", "REMARKABLE_SKIP_CONFIRM": "1"},
+                ),
+            ):
+                result = await mcp.call_tool(
+                    "remarkable_delete",
+                    {"document": "Smoke Folder", "permanent": True},
+                )
+                data = json.loads(result[0][0].text)
+
+            assert data["_error"]["type"] == "folder_not_empty"
+            mock_purge.assert_not_called()
+        finally:
+            for name in [
+                "remarkable_upload",
+                "remarkable_mkdir",
+                "remarkable_move",
+                "remarkable_rename",
+                "remarkable_delete",
+            ]:
+                mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
     async def test_managed_write_tools_registered_in_cloud_mode(self):
         """Cloud mode now has full write parity: mkdir/move/rename/delete register."""
         from remarkable_mcp.write_tools import register_write_tools
@@ -6122,6 +6179,17 @@ class TestDeferRestart:
 
         assert client._documents == []
         assert client._documents_by_id == {}
+        assert client._file_type_cache is None
+
+    def test_local_dir_invalidation_preserves_reload_sentinel(self, tmp_path):
+        from remarkable_mcp.local_dir import LocalDirClient
+        from remarkable_mcp.write_tools import _invalidate_client_cache
+
+        client = LocalDirClient(tmp_path)
+        client._file_type_cache = {"doc-1": "pdf"}
+
+        _invalidate_client_cache(client)
+
         assert client._file_type_cache is None
 
     @pytest.mark.asyncio

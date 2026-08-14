@@ -439,7 +439,9 @@ def _invalidate_client_cache(client) -> None:
     file_type_lock = getattr(client, "_file_type_lock", None)
     context = file_type_lock if file_type_lock is not None else nullcontext()
     with context:
-        if isinstance(client, SSHClient):
+        from remarkable_mcp.local_dir import LocalDirClient
+
+        if isinstance(client, (SSHClient, LocalDirClient)):
             client._file_type_cache = None
         elif hasattr(client, "_file_type_cache"):
             client._file_type_cache = {}
@@ -1784,6 +1786,21 @@ def register_write_tools():
                     doc_path = get_item_path(target, items_by_id)
 
                     if permanent:
+                        if target.is_folder and any(
+                            item.Parent == target.ID for item in collection
+                        ):
+                            return make_error(
+                                error_type="folder_not_empty",
+                                message=(
+                                    f"Cannot permanently delete non-empty folder "
+                                    f"'{target.VissibleName}'."
+                                ),
+                                suggestion=(
+                                    "Permanently delete its child documents and "
+                                    "folders first, or omit permanent=True to move "
+                                    "the whole folder to Trash."
+                                ),
+                            )
                         _permanently_delete_ssh_entry(ssh_client, target.ID)
                     else:
                         meta_content = ssh_client._scp_download(
