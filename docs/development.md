@@ -166,7 +166,7 @@ The workflow automatically:
 | `requests` | HTTP client for reMarkable Cloud API |
 | `paramiko` | SSH client for direct tablet access |
 | `rmscene` | Native .rm file parser for text extraction |
-| `pymupdf` | PDF text extraction |
+| `pymupdf` | PDF text extraction and Cairo-free SVG/PDF rasterization |
 | `ebooklib` | EPUB text extraction |
 | `pytesseract` | OCR fallback |
 | `google-cloud-vision` | OCR (recommended) |

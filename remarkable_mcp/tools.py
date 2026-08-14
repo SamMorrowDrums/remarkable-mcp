@@ -1805,14 +1805,14 @@ async def remarkable_image(
                     )
 
                 # Portable fallback: the local stroke renderer can fail to
-                # produce an image for empty pages, newer .rm block formats, or
-                # when the client machine lacks a working cairo/libcairo for
-                # cairosvg. In that case we rasterize the requested page from the
-                # document's source PDF with PyMuPDF (which needs no system
-                # cairo). USB/SSH expose the tablet's natively-rendered (merged)
+                # produce an image for empty pages or newer .rm block formats.
+                # In that case we rasterize the requested page from the document's
+                # source PDF. USB/SSH expose the tablet's natively-rendered (merged)
                 # PDF; cloud exposes the original source PDF — either covers the
-                # failure cases above. Notebooks have no PDF, so download_raw_file
-                # returns None and this safely no-ops. Credit: ljdutel (#95).
+                # failure cases above. Both SVG and PDF rasterization use PyMuPDF,
+                # which needs no system Cairo. Notebooks have no PDF, so
+                # download_raw_file returns None and this safely no-ops.
+                # Credit: ljdutel (#95).
                 rendered_via_pdf = False
                 if png_data is None:
                     png_data, has_source_pdf = await run_blocking(
@@ -1848,10 +1848,10 @@ async def remarkable_image(
                         error_type="render_failed",
                         message="Failed to render page to image.",
                         suggestion=(
-                            "The page may be empty, or local rendering "
-                            "dependencies (cairo/libcairo for cairosvg) may be "
-                            "missing. For PDF-backed documents the source PDF is "
-                            "used automatically as a fallback. You can also try "
+                            "Local stroke parsing and PyMuPDF SVG rasterization both "
+                            "failed. Reinstall remarkable-mcp to restore its Python "
+                            "dependencies. For PDF-backed documents the source PDF is "
+                            "used automatically as a fallback; otherwise try "
                             "remarkable_read() to extract text instead."
                         ),
                     )
