@@ -1881,19 +1881,19 @@ class TestOCRBackendConfiguration:
         monkeypatch.setenv("REMARKABLE_OCR_BACKEND", backend.upper())
         assert get_ocr_backend() == backend
 
-    def test_get_ocr_backend_rejects_legacy_value(self, monkeypatch):
+    def test_get_ocr_backend_migrates_legacy_value(self, monkeypatch, caplog):
         from remarkable_mcp.extract import get_ocr_backend
 
         monkeypatch.setenv("REMARKABLE_OCR_BACKEND", "sampling")
-        with pytest.raises(ValueError, match="has been removed"):
-            get_ocr_backend()
+        assert get_ocr_backend() == "auto"
+        assert "has been removed" in caplog.text
 
-    def test_get_ocr_backend_rejects_unknown_value(self, monkeypatch):
+    def test_get_ocr_backend_falls_back_for_unknown_value(self, monkeypatch, caplog):
         from remarkable_mcp.extract import get_ocr_backend
 
         monkeypatch.setenv("REMARKABLE_OCR_BACKEND", "unknown")
-        with pytest.raises(ValueError, match="Supported values"):
-            get_ocr_backend()
+        assert get_ocr_backend() == "auto"
+        assert "Unsupported REMARKABLE_OCR_BACKEND" in caplog.text
 
     @pytest.mark.parametrize("backend", ["auto", "google"])
     def test_google_handwriting_failure_falls_back_to_tesseract(

@@ -122,18 +122,24 @@ OCR_BACKENDS = frozenset({"auto", "google", "tesseract"})
 
 
 def get_ocr_backend() -> str:
-    """Return the configured OCR backend after validating it."""
+    """Return a supported OCR backend, falling back to ``auto`` safely."""
     backend = os.environ.get("REMARKABLE_OCR_BACKEND", "auto").strip().lower()
     if backend not in OCR_BACKENDS:
         supported = ", ".join(sorted(OCR_BACKENDS))
         if backend == "sampling":
-            raise ValueError(
+            logger.warning(
                 "The 'sampling' OCR backend has been removed. "
-                f"Set REMARKABLE_OCR_BACKEND to one of: {supported}."
+                "Falling back to 'auto'. Set REMARKABLE_OCR_BACKEND to one of: %s.",
+                supported,
             )
-        raise ValueError(
-            f"Invalid REMARKABLE_OCR_BACKEND value {backend!r}. Supported values are: {supported}."
-        )
+        else:
+            logger.warning(
+                "Unsupported REMARKABLE_OCR_BACKEND value %r. "
+                "Falling back to 'auto'. Supported values are: %s.",
+                backend,
+                supported,
+            )
+        return "auto"
     return backend
 
 
