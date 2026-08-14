@@ -11,7 +11,7 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 import requests
@@ -2256,6 +2256,80 @@ class TestUSBWebInterface:
 
         content = client.download(doc)
         assert content == b"fake zip content"
+
+    @patch("remarkable_mcp.usb_web.time.sleep")
+    @patch("requests.request")
+    def test_usb_web_get_retries_408_until_success(self, mock_request, mock_sleep):
+        """A transient xochitl 408 is retried for a safe GET request."""
+        from remarkable_mcp.usb_web import USBWebClient
+
+        timed_out = Mock(status_code=408)
+        succeeded = Mock(status_code=200)
+        mock_request.side_effect = [timed_out, succeeded]
+
+        result = USBWebClient(timeout=37)._request("/documents/")
+
+        assert result is succeeded
+        assert mock_request.call_count == 2
+        assert all(call.kwargs["timeout"] == 37 for call in mock_request.call_args_list)
+        timed_out.close.assert_called_once_with()
+        mock_sleep.assert_called_once_with(0.25)
+
+    @patch("remarkable_mcp.usb_web.time.sleep")
+    @patch("requests.request")
+    def test_usb_web_get_408_exhaustion_is_educational(self, mock_request, mock_sleep):
+        """Exhausted GET retries explain that xochitl may be temporarily busy."""
+        from remarkable_mcp.usb_web import USBWebClient
+
+        responses = [Mock(status_code=408) for _ in range(3)]
+        mock_request.side_effect = responses
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"HTTP 408 after 3 GET attempts.*temporarily busy.*try again",
+        ):
+            USBWebClient()._request("/download/doc1/pdf", timeout=120)
+
+        assert mock_request.call_count == 3
+        assert all(call.kwargs["timeout"] == 120 for call in mock_request.call_args_list)
+        assert mock_sleep.call_args_list == [call(0.25), call(0.5)]
+        responses[0].close.assert_called_once_with()
+        responses[1].close.assert_called_once_with()
+        responses[2].close.assert_called_once_with()
+
+    @patch("remarkable_mcp.usb_web.time.sleep")
+    @patch("requests.request")
+    def test_usb_web_does_not_retry_408_for_non_get(self, mock_request, mock_sleep):
+        """Potentially mutating requests retain their single-attempt behavior."""
+        from remarkable_mcp.usb_web import USBWebClient
+
+        response = Mock(status_code=408)
+        response.raise_for_status.side_effect = requests.HTTPError(
+            "408 Client Error: Request Timeout"
+        )
+        mock_request.return_value = response
+
+        with pytest.raises(RuntimeError, match="USB web interface request failed: 408"):
+            USBWebClient()._request("/upload", method="POST")
+
+        mock_request.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    @patch("remarkable_mcp.usb_web.time.sleep")
+    @patch("requests.request")
+    def test_usb_web_does_not_retry_non_transient_http_error(self, mock_request, mock_sleep):
+        """Non-transient HTTP errors keep the existing error behavior."""
+        from remarkable_mcp.usb_web import USBWebClient
+
+        response = Mock(status_code=404)
+        response.raise_for_status.side_effect = requests.HTTPError("404 Client Error: Not Found")
+        mock_request.return_value = response
+
+        with pytest.raises(RuntimeError, match="USB web interface request failed: 404"):
+            USBWebClient()._request("/documents/missing")
+
+        mock_request.assert_called_once()
+        mock_sleep.assert_not_called()
 
     @patch("remarkable_mcp.usb_web.create_usb_web_client")
     def test_get_rmapi_usb_web_mode(self, mock_create_client):
