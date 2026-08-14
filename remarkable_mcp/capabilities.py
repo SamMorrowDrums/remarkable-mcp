@@ -2,7 +2,7 @@
 Client capability checking utilities for reMarkable MCP Server.
 
 This module provides utilities to check MCP client capabilities during
-the request lifecycle. FastMCP supports capability negotiation through
+the request lifecycle. MCPServer supports capability negotiation through
 the MCP protocol's initialize handshake.
 
 ## How MCP Capability Negotiation Works
@@ -34,7 +34,7 @@ Servers declare what they offer:
 Use the Context object in tools to check what the client supports:
 
 ```python
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from remarkable_mcp.capabilities import get_client_capabilities, client_supports_sampling
 
 @mcp.tool()
@@ -64,7 +64,7 @@ supporting protocol version 2024-11-05 or later should handle embedded resources
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import Context
+    from mcp.server.mcpserver import Context
     from mcp.types import ClientCapabilities
 
 
@@ -73,8 +73,7 @@ if TYPE_CHECKING:
 #   capabilities.extensions["io.modelcontextprotocol/ui"] = {
 #       "mimeTypes": ["text/html;profile=mcp-app"]
 #   }
-# The MCP SDK (as of 1.27) has no typed field for this, but ClientCapabilities
-# allows extra fields, so we read it from model_extra.
+# MCP SDK v2 exposes this as ClientCapabilities.extensions.
 APP_UI_EXTENSION_ID = "io.modelcontextprotocol/ui"
 APP_UI_MIME = "text/html;profile=mcp-app"
 
@@ -85,7 +84,7 @@ def get_client_capabilities(ctx: "Context") -> Optional["ClientCapabilities"]:
     Returns None if the context is not available or client hasn't sent capabilities.
 
     Args:
-        ctx: The FastMCP Context object from a tool or resource function
+        ctx: The MCPServer Context object from a tool or resource function
 
     Returns:
         ClientCapabilities object or None if not available
@@ -99,9 +98,7 @@ def get_client_capabilities(ctx: "Context") -> Optional["ClientCapabilities"]:
                 pass
     """
     try:
-        session = ctx.session
-        if session and hasattr(session, "client_params") and session.client_params:
-            return session.client_params.capabilities
+        return ctx.client_capabilities
     except (ValueError, AttributeError):
         # Context not available (e.g., outside of request lifecycle)
         pass
@@ -114,7 +111,7 @@ def client_supports_sampling(ctx: "Context") -> bool:
     When true, the server can request the client's LLM to generate completions.
 
     Args:
-        ctx: The FastMCP Context object
+        ctx: The MCPServer Context object
 
     Returns:
         True if client supports sampling, False otherwise
@@ -129,7 +126,7 @@ def client_supports_elicitation(ctx: "Context") -> bool:
     When true, the server can request interactive user input during tool execution.
 
     Args:
-        ctx: The FastMCP Context object
+        ctx: The MCPServer Context object
 
     Returns:
         True if client supports elicitation, False otherwise
@@ -144,7 +141,7 @@ def client_supports_roots(ctx: "Context") -> bool:
     When true, the server can query for filesystem root directories.
 
     Args:
-        ctx: The FastMCP Context object
+        ctx: The MCPServer Context object
 
     Returns:
         True if client supports roots, False otherwise
@@ -157,7 +154,7 @@ def client_supports_experimental(ctx: "Context", feature: str) -> bool:
     """Check if the client supports a specific experimental feature.
 
     Args:
-        ctx: The FastMCP Context object
+        ctx: The MCPServer Context object
         feature: The experimental feature name to check
 
     Returns:
@@ -175,19 +172,25 @@ def get_client_info(ctx: "Context") -> Optional[dict]:
     Returns client name, version, and other metadata from the initialize request.
 
     Args:
-        ctx: The FastMCP Context object
+        ctx: The MCPServer Context object
 
     Returns:
         Dictionary with client info or None if not available
     """
     try:
         session = ctx.session
-        if session and hasattr(session, "client_params") and session.client_params:
-            params = session.client_params
+        params = session.client_params if session else None
+        if params:
             return {
-                "name": params.clientInfo.name if params.clientInfo else None,
-                "version": params.clientInfo.version if params.clientInfo else None,
-                "protocol_version": params.protocolVersion,
+                "name": params.client_info.name if params.client_info else None,
+                "version": params.client_info.version if params.client_info else None,
+                "protocol_version": ctx.protocol_version,
+            }
+        if ctx.protocol_version:
+            return {
+                "name": None,
+                "version": None,
+                "protocol_version": ctx.protocol_version,
             }
     except (ValueError, AttributeError):
         pass
@@ -198,15 +201,13 @@ def get_protocol_version(ctx: "Context") -> Optional[str]:
     """Get the MCP protocol version negotiated with the client.
 
     Args:
-        ctx: The FastMCP Context object
+        ctx: The MCPServer Context object
 
     Returns:
         Protocol version string (e.g., "2024-11-05") or None
     """
     try:
-        session = ctx.session
-        if session and hasattr(session, "client_params") and session.client_params:
-            return session.client_params.protocolVersion
+        return ctx.protocol_version
     except (ValueError, AttributeError):
         pass
     return None
@@ -215,11 +216,10 @@ def get_protocol_version(ctx: "Context") -> Optional[str]:
 def get_client_extensions(ctx: "Context") -> dict:
     """Get the client's declared protocol extensions (SEP-1724).
 
-    Extensions are not a typed field on ClientCapabilities in the current MCP
-    SDK, but the model permits extra fields, so they are read from model_extra.
+    Extensions are a typed field on ClientCapabilities in MCP SDK v2.
 
     Args:
-        ctx: The FastMCP Context object
+        ctx: The MCPServer Context object
 
     Returns:
         The extensions mapping (extension id -> config dict), or {} if none.
@@ -227,8 +227,10 @@ def get_client_extensions(ctx: "Context") -> dict:
     caps = get_client_capabilities(ctx)
     if caps is None:
         return {}
-    extra = getattr(caps, "model_extra", None) or {}
-    extensions = extra.get("extensions")
+    extensions = getattr(caps, "extensions", None)
+    if extensions is None:
+        extra = getattr(caps, "model_extra", None) or {}
+        extensions = extra.get("extensions")
     return extensions if isinstance(extensions, dict) else {}
 
 
@@ -246,7 +248,7 @@ def client_supports_apps(ctx: "Context") -> bool:
     app-capable, app tools should still return a useful text/image fallback.
 
     Args:
-        ctx: The FastMCP Context object
+        ctx: The MCPServer Context object
 
     Returns:
         True if the client advertises the MCP Apps UI extension, else False.

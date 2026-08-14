@@ -19,7 +19,7 @@ cd remarkable-mcp
 uv sync --all-extras
 
 # Verify setup
-uv run pytest test_server.py -v
+uv run pytest -v
 ```
 
 ## Project Structure
@@ -27,33 +27,40 @@ uv run pytest test_server.py -v
 ```
 remarkable-mcp/
 ├── server.py              # Entry point (backwards compatible)
-├── remarkable_mcp/        # Main package
-│   ├── __init__.py
-│   ├── server.py          # FastMCP server initialization
-│   ├── api.py             # reMarkable Cloud API helpers
-│   ├── ssh.py             # SSH transport implementation
-│   ├── extract.py         # Text extraction utilities
-│   ├── responses.py       # Response formatting
-│   ├── tools.py           # MCP tools with annotations
-│   ├── resources.py       # MCP resources
-│   └── prompts.py         # MCP prompts
-├── test_server.py         # Test suite
-├── pyproject.toml         # Project config and dependencies
-├── docs/                  # Documentation
-└── README.md              # Main documentation
+├── remarkable_mcp/
+│   ├── server.py           # MCPServer and transports
+│   ├── tools.py            # Read and render tools
+│   ├── write_tools.py      # Upload, management, and authoring tools
+│   ├── api.py              # Transport selection and cloud fallback
+│   ├── sync.py             # Cloud sync client
+│   ├── ssh.py              # SSH client
+│   ├── usb_web.py          # USB web client
+│   ├── local_dir.py        # Desktop cache client
+│   ├── extract.py          # Text and image extraction
+│   ├── markdown_pdf.py     # Markdown-to-PDF rendering
+│   └── app_canvas.py       # MCP Apps canvas
+├── test_server.py
+├── test_mcp_v2.py          # Modern/legacy protocol compatibility tests
+├── test_page_mapping.py
+├── test_local_dir.py
+├── test_integration.py
+├── smoke/
+├── docs/
+├── server.json
+└── pyproject.toml
 ```
 
 ## Running Tests
 
 ```bash
 # Run all tests
-uv run pytest test_server.py -v
+uv run pytest -v
 
 # Run specific test class
-uv run pytest test_server.py -v -k "TestClassName"
+uv run pytest -v -k "TestClassName"
 
 # Run with coverage
-uv run pytest test_server.py -v --cov=remarkable_mcp
+uv run pytest -v --cov=remarkable_mcp
 ```
 
 Tests use `pytest-asyncio` for async testing. All async tests use the `@pytest.mark.asyncio` decorator.
@@ -98,24 +105,24 @@ Branch protection is enabled on `main` - all changes must go through pull reques
 3. Add tests in `test_server.py`
 4. Update the tools table in README.md
 5. Update `docs/tools.md` with detailed documentation
-6. Run tests: `uv run pytest test_server.py -v`
+6. Run tests: `uv run pytest -v`
 
 ### Tool Design Principles
 
-- **Intent-based design** — Tools should map to user intents, not API endpoints
-- **XML-structured docstrings** — Use `<usecase>`, `<instructions>`, `<parameters>`, `<examples>` tags
-- **Response hints** — Always include `_hint` field suggesting next actions
-- **Educational errors** — Errors should explain what went wrong and how to fix it
-- **Minimal tool count** — Prefer fewer, more capable tools over many simple ones
+- **Intent-based design**: tools should map to user intents, not API endpoints
+- **XML-structured docstrings**: use `<usecase>`, `<instructions>`, `<parameters>`, and `<examples>`
+- **Response hints**: include an actionable `_hint`
+- **Educational errors**: explain the failure and a safe next step
+- **Minimal tool count**: prefer fewer, more capable tools
 
 Example tool structure:
 
 ```python
 EXAMPLE_ANNOTATIONS = ToolAnnotations(
     title="Descriptive Tool Name",  # Shown in VS Code
-    readOnlyHint=True,
-    destructiveHint=False,
-    idempotentHint=True,
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
 )
 
 @mcp.tool(annotations=EXAMPLE_ANNOTATIONS)
@@ -162,9 +169,9 @@ The workflow automatically:
 
 | Package | Purpose |
 |---------|---------|
-| `mcp` | Model Context Protocol SDK |
+| `mcp>=2,<3` | Stable Model Context Protocol Python SDK 2.x |
 | `requests` | HTTP client for reMarkable Cloud API |
-| `paramiko` | SSH client for direct tablet access |
+| system `ssh` and `scp` | Direct tablet access; `sshpass` is optional for password auth |
 | `rmscene` | Native .rm file parser for text extraction |
 | `pymupdf` | PDF text extraction, Cairo-free SVG/PDF rendering, and Markdown PDF generation |
 | `markdown-it-py` | Safe Markdown-to-HTML parsing for PDF writeback |
@@ -177,8 +184,15 @@ The workflow automatically:
 | Variable | Description |
 |----------|-------------|
 | `REMARKABLE_TOKEN` | Cloud API authentication token |
+| `REMARKABLE_LOCAL_DIR` | Desktop cache or xochitl-style directory |
+| `REMARKABLE_USB_HOST` | USB web base URL |
 | `REMARKABLE_SSH_HOST` | SSH hostname (default: `10.11.99.1`) |
 | `REMARKABLE_SSH_USER` | SSH username (default: `root`) |
 | `REMARKABLE_SSH_PORT` | SSH port (default: `22`) |
+| `REMARKABLE_SSH_KEY` | Explicit private key path |
+| `REMARKABLE_READ_ONLY` | Disable write tools |
+| `REMARKABLE_ROOT_PATH` | Scope document access to one folder |
+| `REMARKABLE_MCP_HOST` | Streamable HTTP bind address |
+| `REMARKABLE_MCP_PORT` | Streamable HTTP port |
 | `GOOGLE_VISION_API_KEY` | Google Vision API key for OCR |
-| `REMARKABLE_OCR_BACKEND` | Force OCR backend: `auto`, `google`, `tesseract` |
+| `REMARKABLE_OCR_BACKEND` | OCR backend: `auto`, `sampling`, `google`, `tesseract` |

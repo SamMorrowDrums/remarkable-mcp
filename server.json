@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
   "name": "io.github.SamMorrowDrums/remarkable",
   "title": "reMarkable MCP Server",
-  "description": "Access your reMarkable tablet - read documents, browse files, extract text and OCR",
+  "description": "Read, render, search, and manage reMarkable documents through MCP",
   "repository": {
     "url": "https://github.com/SamMorrowDrums/remarkable-mcp",
     "source": "github"
@@ -19,8 +19,8 @@
       "environmentVariables": [
         {
           "name": "REMARKABLE_TOKEN",
-          "description": "Authentication token for reMarkable Cloud API. Get one by registering at https://my.remarkable.com/device/browser/connect",
-          "isRequired": true,
+          "description": "Optional cloud credential. Prefer `remarkable-mcp --register CODE`, which saves it to ~/.rmapi. USB, SSH, and local-directory modes do not require it.",
+          "isRequired": false,
           "format": "string",
           "isSecret": true
         }

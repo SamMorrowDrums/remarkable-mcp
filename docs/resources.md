@@ -37,7 +37,8 @@ remarkable:///Journals/November.txt
 | **EPUB** | Your annotations, highlights, and typed notes |
 | **Notebook** | Typed text, highlights, and handwritten content (OCR) |
 
-**Note:** Text resources contain only user-created content—not the original PDF/EPUB text. Use raw resources (`remarkableraw:///`) for the original document content. OCR is automatically applied for notebooks with handwritten content.
+Text resources contain user-created content, not original PDF/EPUB text. Use
+`remarkableraw:///` for source text. Notebook handwriting may require OCR.
 
 ### Response
 
@@ -56,7 +57,8 @@ Action Items:
 
 ## Raw Resources (`remarkableraw:///`)
 
-Original PDF and EPUB text content is available as raw resources in SSH mode. These resources extract and return the full text from the original document file—the actual content of the PDF or EPUB, not your annotations.
+Original PDF and EPUB text is available as raw resources in supported transports.
+These resources return source text, not annotations.
 
 ### URI Format
 
@@ -86,12 +88,13 @@ This paper explores the relationship between...
 
 | Mode | Text Resources | Raw Resources |
 |------|----------------|---------------|
-| Cloud | ✅ Yes | ✅ Yes (PDF/EPUB) |
-| SSH | ✅ Yes | ✅ Yes (PDF/EPUB) |
-| USB Web | ✅ Yes | ✅ Yes (PDF) |
+| Local directory | Yes | Yes (PDF/EPUB) |
+| Cloud | Yes | Yes (PDF/EPUB) |
+| USB web | Yes | Yes (PDF) |
+| SSH | Yes | Yes (PDF/EPUB) |
 
 All modes can access the original source files. Cloud stores the source blob
-alongside the notebook data, so PDFs/EPUBs are available wirelessly — though
+alongside the notebook data, so PDFs/EPUBs are available wirelessly, though
 very large files that the device hasn't synced to the cloud may be missing.
 USB web exposes the tablet's PDF export.
 
@@ -139,10 +142,10 @@ remarkablesvg:///Sketches/Logo.page-2.svg
 
 On server startup, remarkable-mcp:
 
-1. Connects to your reMarkable (via SSH or Cloud)
+1. Resolves the configured local directory, cloud, USB web, or SSH transport
 2. Fetches the document list
 3. Registers each document as an MCP resource
-4. For SSH mode, also registers raw PDF/EPUB resources
+4. Registers raw resources when source files are available
 
 Resources are registered once at startup. If you add new documents, restart the MCP server to pick them up.
 
@@ -181,8 +184,8 @@ Paths in URIs must be URL-encoded:
 | `&` | `%26` |
 
 Examples:
-- `Meeting Notes` → `Meeting%20Notes`
-- `/Work/Q4 Report` → `/Work/Q4%20Report`
+- `Meeting Notes` becomes `Meeting%20Notes`
+- `/Work/Q4 Report` becomes `/Work/Q4%20Report`
 
 ## Filtering
 
@@ -201,7 +204,7 @@ When `REMARKABLE_ROOT_PATH` is configured, only documents within that folder are
 ```
 
 With this configuration:
-- `/Work/Meeting Notes` → `remarkable:///Meeting%20Notes.txt`
+- `/Work/Meeting Notes` becomes `remarkable:///Meeting%20Notes.txt`
 - Documents outside `/Work` are not registered
 
 ## Performance Considerations

@@ -1,6 +1,6 @@
 """Concurrency helpers for offloading blocking work from the asyncio event loop.
 
-FastMCP awaits ``async def`` tool handlers directly on the asyncio event loop
+MCPServer awaits ``async def`` tool handlers directly on the asyncio event loop
 without dispatching them to a thread pool, and it also calls plain ``def``
 handlers inline. Any blocking I/O performed inside a tool handler — SSH
 subprocess calls, ``requests`` HTTP requests, ``pymupdf`` rendering,

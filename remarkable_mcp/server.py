@@ -5,11 +5,13 @@ reMarkable MCP Server initialization.
 import logging
 import os
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version
 from ipaddress import ip_address
 from typing import AsyncIterator
 from urllib.parse import quote, unquote
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
 from mcp.server.transport_security import TransportSecuritySettings
 
 logger = logging.getLogger(__name__)
@@ -17,8 +19,8 @@ logger = logging.getLogger(__name__)
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
-class RemarkableMCP(FastMCP):
-    """Custom FastMCP server that handles VS Code's URI quirks.
+class RemarkableMCP(MCPServer):
+    """Custom MCP server that handles VS Code's URI quirks.
 
     VS Code:
     - Appends ?version=... to resource URIs for cache busting
@@ -28,7 +30,7 @@ class RemarkableMCP(FastMCP):
     normalize incoming URIs to match.
     """
 
-    async def read_resource(self, uri):
+    async def read_resource(self, uri, context: Context | None = None):
         """Read a resource, normalizing the URI for lookup.
 
         Handles:
@@ -57,7 +59,7 @@ class RemarkableMCP(FastMCP):
             uri_str = scheme + encoded_path
             logger.debug(f"Normalized resource URI path: {path} -> {encoded_path}")
 
-        return await super().read_resource(uri_str)
+        return await super().read_resource(uri_str, context)
 
 
 def _build_instructions() -> str:
@@ -268,7 +270,7 @@ on handwriting. For better results, either:
 
 
 @asynccontextmanager
-async def lifespan(app: FastMCP) -> AsyncIterator[None]:
+async def lifespan(app: MCPServer) -> AsyncIterator[None]:
     """Lifespan context manager for the MCP server."""
     import asyncio
     import os
@@ -319,8 +321,20 @@ async def lifespan(app: FastMCP) -> AsyncIterator[None]:
         await close_device_client()
 
 
-# Initialize FastMCP server with lifespan and instructions
-mcp = RemarkableMCP("remarkable", instructions=_build_instructions(), lifespan=lifespan)
+try:
+    _SERVER_VERSION = version("remarkable-mcp")
+except PackageNotFoundError:
+    _SERVER_VERSION = ""
+
+# One MCPServer serves modern 2026-07-28 requests and legacy initialize/session
+# clients concurrently. reMarkable credentials and transport selection remain
+# process configuration; MCP HTTP authorization headers are intentionally unused.
+mcp = RemarkableMCP(
+    "remarkable",
+    instructions=_build_instructions(),
+    version=_SERVER_VERSION,
+    lifespan=lifespan,
+)
 
 # Import tools, resources, and prompts to register them
 from remarkable_mcp import (  # noqa: E402
@@ -352,6 +366,8 @@ _app_canvas.register_app_tools()
 def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     """Build a strict Host/Origin allowlist for the actual HTTP bind address."""
     normalized = host.strip().strip("[]")
+    if normalized in ("0.0.0.0", "::"):
+        raise ValueError("Wildcard HTTP bind addresses are not supported; use a concrete address.")
     if normalized in _LOOPBACK_HOSTS:
         return TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
@@ -389,7 +405,11 @@ def run(
 ):
     """Run the MCP server over stdio or Streamable HTTP."""
     if transport == "streamable-http":
-        mcp.settings.host = host
-        mcp.settings.port = port
-        mcp.settings.transport_security = _transport_security_for_host(host)
+        mcp.run(
+            transport=transport,
+            host=host,
+            port=port,
+            transport_security=_transport_security_for_host(host),
+        )
+        return
     mcp.run(transport=transport)

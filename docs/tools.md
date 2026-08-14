@@ -1,6 +1,7 @@
 # MCP Tools Reference
 
-This document provides detailed documentation for all MCP tools provided by remarkable-mcp.
+This document describes the read and render tools. Write tools are listed in the
+[README](../README.md#write-tools-by-transport).
 
 ## Overview
 
@@ -13,7 +14,7 @@ This document provides detailed documentation for all MCP tools provided by rema
 | [`remarkable_status`](#remarkable_status) | Check connection status |
 | [`remarkable_image`](#remarkable_image) | Get page images (PNG or SVG) |
 
-These core tools are **read-only** and return structured JSON with hints for logical next actions. Write tools (upload, mkdir, move, rename, delete) are enabled by default and documented in the [README](../README.md#write-tools-cloud-ssh--usb-web).
+These tools are read-only and return structured JSON with next-step hints.
 
 ## Root Path Filtering
 
@@ -50,9 +51,9 @@ With this configuration:
 
 ### Content Types
 
-- **`"text"`** — Full extracted text: raw document content plus annotations, highlights, and typed text (default)
-- **`"raw"`** — Only the original PDF/EPUB text, no annotations. Works in all modes when the source file is present (very large PDFs/EPUBs may not be synced to the cloud).
-- **`"annotations"`** — Only annotations: highlights, typed text from notebooks, and OCR content
+- **`"text"`**: source text plus annotations, highlights, and typed text (default)
+- **`"raw"`**: original PDF/EPUB text without annotations
+- **`"annotations"`**: highlights, typed notebook text, and OCR content
 
 ### Examples
 
@@ -119,6 +120,7 @@ When `more: true`, use the `page` parameter to continue reading.
 |-----------|------|---------|-------------|
 | `path` | string | `"/"` | Folder path to browse |
 | `query` | string | `None` | Search documents by name |
+| `tags` | list[string] | `None` | Require all listed tags (case-insensitive) |
 
 ### Examples
 
@@ -134,6 +136,9 @@ remarkable_browse(query="meeting")
 
 # Combine path and search
 remarkable_browse("/Work", query="report")
+
+# Filter by tag
+remarkable_browse("/Work", tags=["project", "active"])
 ```
 
 ### Response Format
@@ -176,6 +181,7 @@ remarkable_browse("/Work", query="report")
 | `grep` | string | `None` | Pattern to search within content |
 | `limit` | int | `5` | Maximum documents to search (max: 5) |
 | `include_ocr` | bool | `False` | Enable OCR for handwritten content |
+| `tags` | list[string] | `None` | Require all listed tags (case-insensitive) |
 
 ### Examples
 
@@ -188,6 +194,9 @@ remarkable_search("meeting", grep="action items")
 
 # Search journals for a specific topic
 remarkable_search("journal", grep="project idea", include_ocr=True)
+
+# Search only tagged documents
+remarkable_search("project", tags=["work"])
 ```
 
 ### Response Format
@@ -300,7 +309,7 @@ remarkable_status()
 | Field | Description |
 |-------|-------------|
 | `authenticated` | Whether authentication succeeded |
-| `transport` | `"cloud"`, `"ssh"`, or `"usb-web"` |
+| `transport` | `"local-dir"`, `"cloud"`, `"usb-web"`, or `"ssh"` |
 | `connection` | Connection details |
 | `document_count` | Total documents in library (filtered by root if configured) |
 | `write_enabled` | Whether write tools are enabled (the default; `false` only with `--read-only`) |
@@ -325,13 +334,14 @@ remarkable_status()
 | `output_format` | string | `"png"` | Output format: `"png"` or `"svg"` |
 | `include_ocr` | bool | `False` | Enable OCR on the image (uses sampling if configured) |
 | `compatibility` | bool | `False` | Return resource URI instead of embedded resource |
+| `render_merged` | bool | `False` | Composite an imported PDF page with its reMarkable annotations (PNG only) |
 
 ### Background Colors
 
-- **`"#FBFBFB"`** — Default reMarkable paper color (light cream)
-- **`"#FFFFFF"`** — Pure white
-- **`"#00000000"`** — Fully transparent (RGBA format)
-- **`"#80008080"`** — Semi-transparent purple (RGBA format)
+- **`"#FBFBFB"`**: default reMarkable paper color
+- **`"#FFFFFF"`**: white
+- **`"#00000000"`**: fully transparent
+- **`"#80008080"`**: semi-transparent purple
 
 **Tip:** Set `REMARKABLE_BACKGROUND_COLOR` environment variable to change the default for all image operations.
 
@@ -361,6 +371,9 @@ remarkable_image("Handwritten Notes", include_ocr=True)
 
 # Compatibility mode: return resource URI instead of embedded resource
 remarkable_image("Diagram", compatibility=True)
+
+# Composite a PDF page with annotations
+remarkable_image("Research Paper", page=3, render_merged=True)
 ```
 
 ### Response Format
@@ -407,6 +420,6 @@ All tools return structured errors with suggestions:
 ```
 
 Common error types:
-- `document_not_found` — Document doesn't exist (includes suggestions)
-- `authentication_failed` — Token invalid or SSH connection failed
-- `connection_error` — Network or SSH connection issue
+- `document_not_found`: document does not exist (includes suggestions)
+- `authentication_failed`: token invalid or SSH connection failed
+- `connection_error`: network or SSH connection issue

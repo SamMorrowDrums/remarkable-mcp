@@ -4,8 +4,8 @@ This folder contains screenshots used in the documentation.
 
 ## Required Images
 
-- `resources-screenshot.png` — MCP resources appearing in VS Code
-- `tool-calls-screenshot.png` — Tool calls being executed in VS Code
+- `resources-screenshot.png`: MCP resources in VS Code
+- `tool-calls-screenshot.png`: tool calls in VS Code
 
 ## How to Update
 

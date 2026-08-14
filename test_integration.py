@@ -177,7 +177,7 @@ class TestMCPTools:
             from remarkable_mcp.server import mcp
 
             result = await mcp.call_tool("remarkable_status", {})
-            data = json.loads(result[0][0].text)
+            data = json.loads(result.content[0].text)
             assert data["authenticated"] is True
             assert data["transport"] == "ssh"
             assert data["document_count"] > 0

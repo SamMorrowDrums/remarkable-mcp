@@ -58,7 +58,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from mcp import ClientSession, StdioServerParameters
+from mcp import Client, StdioServerParameters
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
@@ -299,6 +299,12 @@ async def diagnostic_stdio_client(params):
             stdio_module._create_platform_compatible_process = original_create
 
 
+@asynccontextmanager
+async def existing_stdio_streams(read, write):
+    """Adapt already-open diagnostic streams for SDK v2's high-level Client."""
+    yield read, write
+
+
 def _run_diagnostic_command(args: list[str], timeout: int = 10) -> dict[str, Any]:
     try:
         result = subprocess.run(
@@ -444,7 +450,7 @@ def _parse_payload(result) -> dict:
                 return json.loads(text)
             except (json.JSONDecodeError, TypeError):
                 continue
-    structured = getattr(result, "structuredContent", None)
+    structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
         return structured
     return {}
@@ -496,7 +502,7 @@ async def call_tool(session, tool, args, timeout):
     except Exception as exc:  # noqa: BLE001 - report any client/transport error
         return {}, True, f"{type(exc).__name__}: {exc}"
     payload = _parse_payload(result)
-    return payload, bool(getattr(result, "isError", False)), None
+    return payload, bool(getattr(result, "is_error", False)), None
 
 
 def classify_ok(payload, is_error, exc, ok_error_types=()):
@@ -925,10 +931,9 @@ async def run_mode(mode: str, rec: Recorder, read_only: bool):
         rec.modes.setdefault(mode, {})["tablet_before"] = _tablet_diagnostics()
     try:
         async with diagnostic_stdio_client(params) as (read, write, diagnostics):
-            async with ClientSession(read, write) as session:
-                await asyncio.wait_for(session.initialize(), 60)
-
-                # status decides availability for real (handles fallback / auth).
+            async with Client(existing_stdio_streams(read, write)) as session:
+                # Client auto-negotiates 2026-07-28 and falls back to initialize
+                # when this smoke harness is pointed at a legacy server.
                 payload, is_err, exc = await call_tool(
                     session, "remarkable_status", {}, TIMEOUTS["remarkable_status"]
                 )
@@ -949,7 +954,11 @@ async def run_mode(mode: str, rec: Recorder, read_only: bool):
 
                 rec.ensure_mode(mode, transport, payload.get("document_count"), "connected")
                 rec.record(
-                    mode, "remarkable_status", PASS, "", _detail_for("remarkable_status", payload)
+                    mode,
+                    "remarkable_status",
+                    PASS,
+                    "",
+                    _detail_for("remarkable_status", payload),
                 )
 
                 # tools/list is the source of truth for what this mode supports.
@@ -962,7 +971,12 @@ async def run_mode(mode: str, rec: Recorder, read_only: bool):
                 if read_only:
                     for tool in WRITE_TOOLS:
                         if tool in registered:
-                            rec.record(mode, tool, SKIP, "write phase skipped (--read-only)")
+                            rec.record(
+                                mode,
+                                tool,
+                                SKIP,
+                                "write phase skipped (--read-only)",
+                            )
                 else:
                     await run_write_phase(session, mode, rec, registered)
     except Exception as exc:  # noqa: BLE001
