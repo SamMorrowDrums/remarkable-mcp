@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -320,3 +322,84 @@ class TestExportResourceStore:
         assert store.read_text(published.resource.export_id, "markdown") == "ready"
         store.cleanup()
         assert list(tmp_path.rglob("*")) == []
+
+    def test_slow_read_does_not_block_other_store_operations(self, tmp_path):
+        store = ExportResourceStore(ttl_seconds=60, max_entries=4, root=tmp_path)
+
+        def publish(name: str, content: bytes):
+            return store.publish(
+                filename=name,
+                output_format="pdf",
+                writer=lambda path: path.write_bytes(content),
+            )
+
+        slow = publish("slow.pdf", b"slow")
+        other = publish("other.pdf", b"other")
+        slow_started = threading.Event()
+        release_slow_read = threading.Event()
+        original_read_bytes = Path.read_bytes
+
+        def controlled_read(path: Path) -> bytes:
+            if path.name == slow.resource.filename:
+                slow_started.set()
+                assert release_slow_read.wait(timeout=5)
+            return original_read_bytes(path)
+
+        with (
+            patch.object(Path, "read_bytes", controlled_read),
+            ThreadPoolExecutor(max_workers=3) as executor,
+        ):
+            slow_read = executor.submit(store.read_bytes, slow.resource.export_id, "pdf")
+            assert slow_started.wait(timeout=1)
+            try:
+                published = executor.submit(publish, "new.pdf", b"new").result(timeout=1)
+                other_read = executor.submit(
+                    store.read_bytes,
+                    other.resource.export_id,
+                    "pdf",
+                ).result(timeout=1)
+            finally:
+                release_slow_read.set()
+
+            assert published.resource.filename == "new.pdf"
+            assert other_read == b"other"
+            assert slow_read.result(timeout=1) == b"slow"
+
+    def test_eviction_racing_unlocked_read_returns_missing_resource_error(self, tmp_path):
+        store = ExportResourceStore(ttl_seconds=60, max_entries=1, root=tmp_path)
+        target = store.publish(
+            filename="target.pdf",
+            output_format="pdf",
+            writer=lambda path: path.write_bytes(b"target"),
+        )
+        read_started = threading.Event()
+        continue_read = threading.Event()
+        original_read_bytes = Path.read_bytes
+
+        def controlled_read(path: Path) -> bytes:
+            if path.name == target.resource.filename:
+                read_started.set()
+                assert continue_read.wait(timeout=5)
+            return original_read_bytes(path)
+
+        def publish_replacement():
+            return store.publish(
+                filename="replacement.pdf",
+                output_format="pdf",
+                writer=lambda path: path.write_bytes(b"replacement"),
+            )
+
+        with (
+            patch.object(Path, "read_bytes", controlled_read),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            racing_read = executor.submit(store.read_bytes, target.resource.export_id, "pdf")
+            assert read_started.wait(timeout=1)
+            try:
+                replacement = executor.submit(publish_replacement).result(timeout=1)
+            finally:
+                continue_read.set()
+
+            assert replacement.resource.filename == "replacement.pdf"
+            with pytest.raises(FileNotFoundError, match="not found or has expired"):
+                racing_read.result(timeout=1)

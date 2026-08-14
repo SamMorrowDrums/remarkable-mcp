@@ -188,11 +188,16 @@ class ExportResourceStore:
             record = self._records.get(export_id)
             if record is None or record.resource.output_format != output_format:
                 raise FileNotFoundError("Temporary export was not found or has expired")
-            if not record.path.is_file():
-                self._records.pop(export_id, None)
-                raise FileNotFoundError("Temporary export file is no longer available")
             self._records.move_to_end(export_id)
-            return record.path.read_bytes()
+            path = record.path
+
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            # Expiry/LRU cleanup may remove the captured path after the lock is
+            # released. Keep the same educational resource-level failure without
+            # serializing large file I/O behind the global store lock.
+            raise FileNotFoundError("Temporary export was not found or has expired") from None
 
     def read_text(self, export_id: str, output_format: ExportFormat) -> str:
         """Read a UTF-8 text export."""
