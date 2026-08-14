@@ -249,19 +249,24 @@ class SSHRefreshCoordinator:
         self._generations: dict[int, _RefreshGeneration] = {}
         self._next_generation = 1
         self._deferred_dirty = False
+        self._pending_state_known = False
+        self._dirty_epoch = 0
         self._refresh_count = 0
+        self._last_refresh_error: Optional[str] = None
         self._closing = False
-        self._explicit_future: Optional[asyncio.Future[None]] = None
+        self._explicit_future: Optional[asyncio.Future[bool]] = None
         self._snapshot_lock = threading.Lock()
         self._snapshot: dict = {
             "generation": None,
             "participants": 0,
             "dirty": False,
             "deferred_dirty": False,
+            "pending_state_known": False,
             "closing": False,
             "debounce": self.debounce,
             "max_wait": self.max_wait,
             "refreshes": 0,
+            "last_error": None,
         }
 
     async def run_write(
@@ -271,13 +276,41 @@ class SSHRefreshCoordinator:
         *,
         deferred: bool,
         persisted: Callable[[T], bool],
+        observe_dirty: Optional[Callable[[bool], None]] = None,
     ) -> tuple[T, bool]:
+        consume_operation_cancel_dirty()
         if deferred:
-            result = await mutation()
-            if persisted(result):
+            try:
+                result = await mutation()
+                operation_dirty = bool(consume_operation_cancel_dirty())
+                dirty = persisted(result) or operation_dirty
+            except BaseException as exc:
+                operation_dirty = bool(consume_operation_cancel_dirty())
+                if isinstance(exc, asyncio.CancelledError):
+                    dirty = operation_dirty
+                else:
+                    dirty = operation_dirty or not isinstance(
+                        exc,
+                        (
+                            SSHPreExecutionError,
+                            SSHJobCancelled,
+                            OperationCancelled,
+                            OperationQueueClosed,
+                        ),
+                    )
+                if observe_dirty is not None:
+                    observe_dirty(dirty)
+                if dirty:
+                    async with self._lock:
+                        self._mark_pending_locked()
+                        self._update_snapshot_locked()
+                raise
+            if dirty:
                 async with self._lock:
-                    self._deferred_dirty = True
+                    self._mark_pending_locked()
                     self._update_snapshot_locked()
+            if observe_dirty is not None:
+                observe_dirty(dirty)
             return result, False
 
         generation = await self._join_generation()
@@ -286,13 +319,15 @@ class SSHRefreshCoordinator:
         dirty = False
         try:
             result = await mutation()
-            dirty = persisted(result)
+            operation_dirty = bool(consume_operation_cancel_dirty())
+            dirty = persisted(result) or operation_dirty
         except BaseException as exc:
             mutation_error = exc
+            operation_dirty = bool(consume_operation_cancel_dirty())
             if isinstance(exc, asyncio.CancelledError):
-                dirty = bool(consume_operation_cancel_dirty())
+                dirty = operation_dirty
             else:
-                dirty = not isinstance(
+                dirty = operation_dirty or not isinstance(
                     exc,
                     (
                         SSHPreExecutionError,
@@ -301,6 +336,8 @@ class SSHRefreshCoordinator:
                         OperationQueueClosed,
                     ),
                 )
+        if observe_dirty is not None:
+            observe_dirty(dirty)
 
         leader = False
         async with self._lock:
@@ -315,6 +352,7 @@ class SSHRefreshCoordinator:
 
         cancellation: Optional[asyncio.CancelledError] = None
         leader_task: Optional[asyncio.Task[None]] = None
+        refresh_error: Optional[BaseException] = None
         try:
             if leader:
                 leader_task = asyncio.create_task(self._lead_generation(generation, refresh))
@@ -335,26 +373,33 @@ class SSHRefreshCoordinator:
                         "SSH safety refresh failed while preserving cancellation: %s",
                         drain_error,
                     )
+        except BaseException as exc:
+            refresh_error = exc
 
         if cancellation is not None:
             raise cancellation
+        if refresh_error is not None and dirty:
+            raise refresh_error
         if mutation_error is not None:
             raise mutation_error
         return result, generation.dirty
 
-    async def refresh_explicit(self, refresh: Callable[[], Awaitable[None]]) -> None:
+    async def refresh_explicit(self, refresh: Callable[[], Awaitable[None]]) -> bool:
+        refresh_epoch = 0
         async with self._lock:
             existing = self._explicit_future
             if existing is not None and not existing.done():
                 follower = existing
                 leader = False
+            elif self._pending_state_known and not self._deferred_dirty:
+                return False
             else:
                 follower = asyncio.get_running_loop().create_future()
                 self._explicit_future = follower
+                refresh_epoch = self._dirty_epoch
                 leader = True
         if not leader:
-            await asyncio.shield(follower)
-            return
+            return await asyncio.shield(follower)
         refresh_task = asyncio.create_task(refresh())
         cancellation: Optional[asyncio.CancelledError] = None
         failure: Optional[BaseException] = None
@@ -372,6 +417,9 @@ class SSHRefreshCoordinator:
 
         try:
             if failure is not None:
+                async with self._lock:
+                    self._mark_pending_locked(failure)
+                    self._update_snapshot_locked()
                 if not follower.done():
                     follower.set_exception(failure)
                     follower.exception()
@@ -379,13 +427,17 @@ class SSHRefreshCoordinator:
                     raise cancellation
                 raise failure
             async with self._lock:
-                self._deferred_dirty = False
+                self._pending_state_known = True
+                if self._dirty_epoch == refresh_epoch:
+                    self._deferred_dirty = False
                 self._refresh_count += 1
+                self._last_refresh_error = None
                 self._update_snapshot_locked()
             if not follower.done():
-                follower.set_result(None)
+                follower.set_result(True)
             if cancellation is not None:
                 raise cancellation
+            return True
         except BaseException:
             if not follower.done():
                 follower.set_exception(SSHDispatcherClosed("Explicit refresh did not complete"))
@@ -415,7 +467,7 @@ class SSHRefreshCoordinator:
                 f"Server shutdown timed out after {timeout:.1f}s waiting for refresh"
             )
             async with self._lock:
-                self._deferred_dirty = True
+                self._mark_pending_locked(failure)
                 for future in futures:
                     if not future.done():
                         future.set_exception(failure)
@@ -475,13 +527,20 @@ class SSHRefreshCoordinator:
         await generation.all_mutations_done.wait()
 
         did_refresh = False
+        refresh_epoch = 0
         try:
             if generation.dirty:
+                async with self._lock:
+                    refresh_epoch = self._dirty_epoch
                 await refresh()
                 did_refresh = True
         except BaseException as exc:
+            try:
+                setattr(exc, "_remarkable_refresh_failed", True)
+            except (AttributeError, TypeError):
+                pass
             async with self._lock:
-                self._deferred_dirty = True
+                self._mark_pending_locked(exc)
                 self._update_snapshot_locked()
             if not generation.future.done():
                 generation.future.set_exception(exc)
@@ -490,7 +549,11 @@ class SSHRefreshCoordinator:
         else:
             if did_refresh:
                 async with self._lock:
+                    self._pending_state_known = True
+                    if self._dirty_epoch == refresh_epoch:
+                        self._deferred_dirty = False
                     self._refresh_count += 1
+                    self._last_refresh_error = None
                     self._update_snapshot_locked()
             if not generation.future.done():
                 generation.future.set_result(None)
@@ -501,6 +564,13 @@ class SSHRefreshCoordinator:
                     self._generation = None
                 self._update_snapshot_locked()
 
+    def _mark_pending_locked(self, error: Optional[BaseException] = None) -> None:
+        self._deferred_dirty = True
+        self._pending_state_known = True
+        self._dirty_epoch += 1
+        if error is not None:
+            self._last_refresh_error = f"{type(error).__name__}: {error}"
+
     def _update_snapshot_locked(self) -> None:
         generation = self._generation
         snapshot = {
@@ -508,10 +578,12 @@ class SSHRefreshCoordinator:
             "participants": generation.participants if generation else 0,
             "dirty": generation.dirty if generation else False,
             "deferred_dirty": self._deferred_dirty,
+            "pending_state_known": self._pending_state_known,
             "closing": self._closing,
             "debounce": self.debounce,
             "max_wait": self.max_wait,
             "refreshes": self._refresh_count,
+            "last_error": self._last_refresh_error,
         }
         with self._snapshot_lock:
             self._snapshot = snapshot

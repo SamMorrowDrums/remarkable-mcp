@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import shlex
+import socket
 import threading
 import time
 import uuid
@@ -166,6 +167,7 @@ def _write_metadata(ssh_client: SSHClient, doc_uuid: str, metadata: dict) -> Non
     content = json.dumps(metadata, indent=2)
     remote_path = f"{XOCHITL_PATH}/{doc_uuid}.metadata"
     ssh_client._ssh_command(f"cat > '{remote_path}' << 'REMARKABLE_EOF'\n{content}\nREMARKABLE_EOF")
+    ssh_client.mark_operation_dirty()
 
 
 def _write_content_file(ssh_client: SSHClient, doc_uuid: str, content_data: dict) -> None:
@@ -173,6 +175,7 @@ def _write_content_file(ssh_client: SSHClient, doc_uuid: str, content_data: dict
     content = json.dumps(content_data, indent=2)
     remote_path = f"{XOCHITL_PATH}/{doc_uuid}.content"
     ssh_client._ssh_command(f"cat > '{remote_path}' << 'REMARKABLE_EOF'\n{content}\nREMARKABLE_EOF")
+    ssh_client.mark_operation_dirty()
 
 
 def _permanently_delete_ssh_entry(ssh_client: SSHClient, doc_uuid: str) -> None:
@@ -180,34 +183,86 @@ def _permanently_delete_ssh_entry(ssh_client: SSHClient, doc_uuid: str) -> None:
     entry = shlex.quote(f"{XOCHITL_PATH}/{doc_uuid}")
     sidecar_prefix = shlex.quote(f"{XOCHITL_PATH}/{doc_uuid}.")
     ssh_client._ssh_command(f"rm -rf {entry} {sidecar_prefix}*")
+    ssh_client.mark_operation_dirty()
 
 
 def _upload_file_bytes(ssh_client: SSHClient, local_path: str, remote_path: str) -> None:
     """Upload a local file to the tablet via SSH stdin pipe."""
     ssh_client._upload_file(local_path, remote_path)
+    ssh_client.mark_operation_dirty()
 
 
 # Tunables for the post-restart readiness wait (see _restart_xochitl). All are
 # overridable by env var so the wait can be tightened or relaxed per device
 # without code changes.
-_RESTART_READY_TIMEOUT = float(os.environ.get("REMARKABLE_RESTART_TIMEOUT", "30"))
+_RESTART_READY_TIMEOUT = float(os.environ.get("REMARKABLE_RESTART_TIMEOUT", "60"))
 _RESTART_POLL_INTERVAL = float(os.environ.get("REMARKABLE_RESTART_POLL_INTERVAL", "1"))
 _RESTART_SETTLE_SECONDS = float(os.environ.get("REMARKABLE_RESTART_SETTLE", "3"))
+_RESTART_WEB_PORT = 80
+_RESTART_WEB_PROBE_TIMEOUT = 1.0
+
+
+def _tcp_port_open(host: str, port: int, timeout: float) -> bool:
+    """Return whether a fresh TCP connection reaches ``host:port``."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _probe_xochitl_ready(
+    ssh_client: SSHClient,
+    expected_boot_id: str,
+    require_web: bool,
+    web_host: str,
+) -> tuple[bool, str]:
+    """Probe xochitl through a fresh SSH session and optional USB web socket."""
+    try:
+        boot_id = ssh_client.probe_fresh_session(
+            "cat /proc/sys/kernel/random/boot_id",
+            timeout=10,
+        ).strip()
+    except RuntimeError as exc:
+        return False, f"fresh SSH boot-ID probe failed: {exc}"
+    if boot_id != expected_boot_id:
+        raise RuntimeError(
+            "Tablet boot ID changed after the xochitl restart "
+            f"({expected_boot_id} -> {boot_id or 'unknown'}). The firmware emergency "
+            "target rebooted the device, commonly after xochitl start-limit-hit. "
+            "Do not repeat writes; wake and unlock the tablet before recovery."
+        )
+
+    try:
+        state = ssh_client.probe_fresh_session(
+            "systemctl is-active xochitl",
+            timeout=10,
+        ).strip()
+    except RuntimeError as exc:
+        return False, f"xochitl status probe failed in a fresh SSH session: {exc}"
+    if state != "active":
+        return False, f"xochitl state is {state or 'unknown'}"
+    if require_web and not _tcp_port_open(
+        web_host,
+        _RESTART_WEB_PORT,
+        _RESTART_WEB_PROBE_TIMEOUT,
+    ):
+        return False, f"USB web port {_RESTART_WEB_PORT} is not accepting connections"
+    return True, "fresh SSH session and xochitl are ready"
 
 
 def _restart_xochitl(ssh_client: SSHClient, wait_ready: bool = True) -> None:
     """Restart the xochitl UI service so it picks up metadata changes.
 
-    Restarting forces xochitl to rescan the entire document store. On the
-    resource-constrained tablet that briefly starves the SSH daemon, so a
-    follow-up write issued immediately can land mid-rescan and have its
-    connection refused or torn down — the "race" seen during bulk operations.
+    The entire sequence runs under the serialized SSH dispatcher. It verifies
+    xochitl is healthy, records the tablet boot ID, clears only xochitl's
+    systemd start counter, and then restarts it. Readiness requires two fresh
+    SSH sessions separated by a settle interval, an unchanged boot ID, and
+    port 80 recovery when USB web was reachable before the restart.
 
-    To avoid that, after issuing the restart we poll ``systemctl is-active``
-    until xochitl reports ``active`` again, then add a short settle delay so the
-    rescan-driven CPU/IO spike has subsided before we return. The call therefore
-    only completes once the tablet is ready for the next operation. Pass
-    ``wait_ready=False`` to restore the old fire-and-return behaviour.
+    This prevents Paper Pro firmware's four-starts-per-ten-minutes limit from
+    escalating a controlled restart into emergency.target and a device reboot.
+    Pass ``wait_ready=False`` only for bounded shutdown cleanup.
     """
     runner = getattr(ssh_client, "run_operation", None)
     in_dispatcher = getattr(ssh_client, "in_dispatcher_thread", lambda: False)
@@ -222,28 +277,108 @@ def _restart_xochitl(ssh_client: SSHClient, wait_ready: bool = True) -> None:
 
 def _restart_xochitl_locked(ssh_client: SSHClient, wait_ready: bool) -> None:
     """Run restart/readiness/settle while excluding every other SSH operation."""
-    ssh_client._ssh_command("systemctl restart xochitl", timeout=30)
+    try:
+        initial_state = ssh_client._ssh_command(
+            "systemctl is-active xochitl",
+            timeout=10,
+        ).strip()
+    except RuntimeError as exc:
+        raise RuntimeError(f"xochitl pre-restart status probe failed: {exc}") from exc
+    if initial_state != "active":
+        raise RuntimeError(
+            "Refusing to restart xochitl because it is not currently active "
+            f"(state: {initial_state or 'unknown'})."
+        )
+
+    try:
+        boot_id = ssh_client._ssh_command(
+            "cat /proc/sys/kernel/random/boot_id",
+            timeout=10,
+        ).strip()
+    except RuntimeError as exc:
+        raise RuntimeError(f"xochitl pre-restart boot-ID probe failed: {exc}") from exc
+    if not boot_id:
+        raise RuntimeError("xochitl pre-restart boot-ID probe returned an empty value")
+
+    web_host = ssh_client.host
+    require_web = False
+    if wait_ready:
+        try:
+            web_host = ssh_client.effective_host()
+        except RuntimeError as exc:
+            raise RuntimeError(f"xochitl pre-restart host resolution failed: {exc}") from exc
+        require_web = _tcp_port_open(
+            web_host,
+            _RESTART_WEB_PORT,
+            _RESTART_WEB_PROBE_TIMEOUT,
+        )
+    logger.info("Restarting xochitl; require_web=%s", require_web)
+
+    # Stock Paper Pro firmware limits xochitl to four starts per ten minutes and
+    # maps start-limit failure to emergency.target, whose handler reboots the
+    # tablet. Clear only xochitl's manual-start counter before our controlled
+    # restart so repeated write batches cannot cross that firmware tripwire.
+    try:
+        ssh_client._ssh_command("systemctl reset-failed xochitl", timeout=10)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Failed to clear xochitl's systemd start limiter before restart: {exc}"
+        ) from exc
+    try:
+        ssh_client._ssh_command("systemctl restart xochitl", timeout=30)
+    except RuntimeError as exc:
+        detail = str(exc)
+        if any(
+            marker in detail.lower()
+            for marker in ("start-limit-hit", "start request repeated", "attempted too often")
+        ):
+            raise RuntimeError(
+                "xochitl restart was rejected with start-limit-hit. Stock firmware "
+                "routes this failure to emergency.target and may reboot the tablet. "
+                "Do not repeat writes; wake and unlock the tablet before recovery."
+            ) from exc
+        raise RuntimeError(f"xochitl restart command failed: {detail}") from exc
     if not wait_ready:
         return
 
     deadline = time.monotonic() + _RESTART_READY_TIMEOUT
+    last_detail = "restart command completed"
     while time.monotonic() < deadline:
-        try:
-            state = ssh_client._ssh_command("systemctl is-active xochitl", timeout=10).strip()
-        except RuntimeError:
-            # While the unit is still activating, `is-active` exits non-zero
-            # (surfaced as RuntimeError) and the SSH layer itself may be briefly
-            # refusing connections. Either way it isn't ready yet — keep polling.
-            state = "activating"
-        if state == "active":
-            break
-        time.sleep(_RESTART_POLL_INTERVAL)
+        ready, last_detail = _probe_xochitl_ready(
+            ssh_client,
+            boot_id,
+            require_web,
+            web_host,
+        )
+        if ready:
+            remaining = deadline - time.monotonic()
+            if _RESTART_SETTLE_SECONDS > remaining:
+                break
+            if _RESTART_SETTLE_SECONDS > 0:
+                time.sleep(_RESTART_SETTLE_SECONDS)
+            confirmed, last_detail = _probe_xochitl_ready(
+                ssh_client,
+                boot_id,
+                require_web,
+                web_host,
+            )
+            if confirmed:
+                logger.info("xochitl restart readiness confirmed; require_web=%s", require_web)
+                return
 
-    # `systemctl restart` returns once the process is respawned, but the store
-    # rescan continues afterwards; settle briefly so the next reconnect lands
-    # after the spike rather than during it.
-    if _RESTART_SETTLE_SECONDS > 0:
-        time.sleep(_RESTART_SETTLE_SECONDS)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(_RESTART_POLL_INTERVAL, remaining))
+
+    required_state = "fresh SSH sessions and active xochitl"
+    if require_web:
+        required_state += f", plus recovered USB web port {_RESTART_WEB_PORT}"
+    raise RuntimeError(
+        f"xochitl did not sustain {required_state} within "
+        f"{_RESTART_READY_TIMEOUT:g}s after restart ({last_detail}). "
+        "Do not repeat writes; wake and unlock the tablet before recovery."
+    )
 
 
 def _defer_restart_enabled() -> bool:
@@ -353,8 +488,6 @@ def _mark_response_refreshed(response: str) -> str:
         data = json.loads(response)
     except (TypeError, json.JSONDecodeError):
         return response
-    if "_error" in data:
-        return response
     data["refresh_pending"] = False
     hint = data.get("_hint", "")
     deferred_text = "Restart deferred — call remarkable_refresh() once your batch is done."
@@ -372,8 +505,6 @@ def _mark_response_pending(response: str) -> str:
         data = json.loads(response)
     except (TypeError, json.JSONDecodeError):
         return response
-    if "_error" in data:
-        return response
     data["refresh_pending"] = True
     hint = data.get("_hint", "")
     if "remarkable_refresh" not in hint:
@@ -386,6 +517,50 @@ def _pending_refresh_error(error_type: str, message: str, suggestion: str) -> st
     data = json.loads(make_error(error_type, message, suggestion))
     data["refresh_pending"] = True
     return json.dumps(data, indent=2)
+
+
+def _partial_write_error(
+    message: str,
+    *,
+    refresh_pending: bool,
+    cause_type: Optional[str] = None,
+) -> str:
+    if refresh_pending:
+        recovery = (
+            "Restore a fresh SSH connection and call remarkable_refresh(), then "
+            "browse the tablet to inspect the result."
+        )
+    else:
+        recovery = "The safety refresh completed; browse the tablet to inspect the result."
+    data = json.loads(
+        make_error(
+            error_type="write_partially_persisted",
+            message=f"{message} One or more mutation steps may already be on disk.",
+            suggestion=f"Do not repeat the write. {recovery}",
+        )
+    )
+    if cause_type:
+        data["_error"]["cause_type"] = cause_type
+    data["refresh_pending"] = refresh_pending
+    return json.dumps(data, indent=2)
+
+
+def _partial_response_error(response: str, *, refresh_pending: bool) -> str:
+    try:
+        data = json.loads(response)
+    except (TypeError, json.JSONDecodeError):
+        return _partial_write_error(
+            "The write returned an unreadable error after a mutation step completed.",
+            refresh_pending=refresh_pending,
+        )
+    error = data.get("_error")
+    if not isinstance(error, dict):
+        return response
+    return _partial_write_error(
+        error.get("message", "The write failed after a mutation step completed."),
+        refresh_pending=refresh_pending,
+        cause_type=error.get("type"),
+    )
 
 
 async def _refresh_ssh_client(ssh_client: SSHClient) -> None:
@@ -408,6 +583,11 @@ async def _run_ssh_tool_operation(
     defer_restart: bool = False,
 ) -> str:
     deferred = defer_restart or _defer_restart_enabled()
+    operation_dirty = False
+
+    def observe_dirty(dirty: bool) -> None:
+        nonlocal operation_dirty
+        operation_dirty = dirty
 
     def mutation() -> str:
         with _suppress_automatic_restart():
@@ -419,46 +599,70 @@ async def _run_ssh_tool_operation(
             lambda: _refresh_ssh_client(ssh_client),
             deferred=deferred,
             persisted=_response_persisted,
-        )
-    except SSHPreExecutionError as e:
-        return make_error(
-            error_type="ssh_unavailable",
-            message=str(e),
-            suggestion="Wake and unlock the tablet, verify the USB cable, then try again.",
-        )
-    except SSHExecutionUnknownError as e:
-        _invalidate_client_cache(ssh_client)
-        return make_error(
-            error_type="write_execution_unknown",
-            message=str(e),
-            suggestion=(
-                "Do not repeat the write automatically. Run remarkable_refresh(), "
-                "then browse the tablet to determine whether the change was applied."
-            ),
-        )
-    except SSHReliabilityError as e:
-        _invalidate_client_cache(ssh_client)
-        return _pending_refresh_error(
-            error_type="write_persisted_refresh_failed",
-            message=str(e),
-            suggestion=(
-                "The write may already be on disk. Do not repeat it; restore the "
-                "connection and call remarkable_refresh()."
-            ),
+            observe_dirty=observe_dirty,
         )
     except Exception as e:
         _invalidate_client_cache(ssh_client)
-        return _pending_refresh_error(
-            error_type="write_persisted_refresh_failed",
-            message=f"Write persisted but the shared refresh failed: {e}",
-            suggestion=(
-                "Do not repeat the write. Restore the SSH connection and call "
-                "remarkable_refresh() to make the pending change visible."
-            ),
+        refresh_pending = ssh_client._refresh_coordinator.diagnostics()["deferred_dirty"]
+        if getattr(e, "_remarkable_refresh_failed", False):
+            return _pending_refresh_error(
+                error_type="write_persisted_refresh_failed",
+                message=f"Write persisted but the shared refresh failed: {e}",
+                suggestion=(
+                    "Do not repeat the write. Restore the SSH connection and call "
+                    "remarkable_refresh() to make the pending change visible."
+                ),
+            )
+        if operation_dirty:
+            return _partial_write_error(
+                str(e),
+                refresh_pending=refresh_pending,
+                cause_type=(
+                    "ssh_unavailable" if isinstance(e, SSHPreExecutionError) else type(e).__name__
+                ),
+            )
+        if isinstance(e, SSHPreExecutionError):
+            response = make_error(
+                error_type="ssh_unavailable",
+                message=str(e),
+                suggestion="Wake and unlock the tablet, verify the USB cable, then try again.",
+            )
+        elif isinstance(e, SSHExecutionUnknownError):
+            response = make_error(
+                error_type="write_execution_unknown",
+                message=str(e),
+                suggestion=(
+                    "Do not repeat the write automatically. Run remarkable_refresh(), "
+                    "then browse the tablet to determine whether the change was applied."
+                ),
+            )
+        elif isinstance(e, SSHReliabilityError):
+            response = make_error(
+                error_type="ssh_operation_failed",
+                message=str(e),
+                suggestion="Check the SSH connection and inspect the tablet before retrying.",
+            )
+        else:
+            response = make_error(
+                error_type="write_failed",
+                message=f"Write failed before any mutation was confirmed: {e}",
+                suggestion="Check the tablet state and try again.",
+            )
+        return (
+            _mark_response_pending(response)
+            if refresh_pending
+            else _mark_response_refreshed(response)
         )
+    refresh_pending = ssh_client._refresh_coordinator.diagnostics()["deferred_dirty"]
+    if operation_dirty and not _response_persisted(response):
+        return _partial_response_error(response, refresh_pending=refresh_pending)
     if refreshed:
+        if refresh_pending:
+            return _mark_response_pending(response)
         return _mark_response_refreshed(response)
-    return _mark_response_pending(response) if deferred else response
+    return (
+        _mark_response_pending(response) if refresh_pending else _mark_response_refreshed(response)
+    )
 
 
 def _write_result_message(
@@ -1197,6 +1401,7 @@ def _author_create_document(
     metadata = nb.new_document_metadata(name, parent=parent_id)
 
     ssh_client._ssh_command(f"mkdir -p '{XOCHITL_PATH}/{doc_uuid}'")
+    ssh_client.mark_operation_dirty()
     _write_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}/{page_id}.rm", page_bytes)
     _write_content_file(ssh_client, doc_uuid, content_data)
     _write_metadata(ssh_client, doc_uuid, metadata)
@@ -1536,6 +1741,7 @@ def register_write_tools():
 
                 # Create the document directory (required by xochitl)
                 ssh_client._ssh_command(f"mkdir -p '{XOCHITL_PATH}/{doc_uuid}'")
+                ssh_client.mark_operation_dirty()
 
                 # Restart xochitl to pick up changes (unless deferred for a batch)
                 restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
@@ -2196,7 +2402,10 @@ def register_write_tools():
         it pays the restart cost a single time instead of once per write,
         eliminating the per-write race and the redundant rescans.
 
-        Calling it when nothing is pending is harmless — it just restarts the UI.
+        Once this server process has confirmed a clean refresh state, calling it
+        again with nothing pending is a no-op. The first explicit refresh in a
+        new process still restarts xochitl because pending work from an earlier
+        process cannot be inferred safely from memory.
         Requires write mode (the default; disabled with --read-only).
         </instructions>
         <parameters>(none)</parameters>
@@ -2214,25 +2423,44 @@ def register_write_tools():
         ssh_client = None
         try:
             ssh_client = _get_ssh_client()
+            did_refresh = True
+            refresh_pending = False
             if isinstance(ssh_client, SSHClient):
-                await ssh_client._refresh_coordinator.refresh_explicit(
+                did_refresh = await ssh_client._refresh_coordinator.refresh_explicit(
                     lambda: _refresh_ssh_client(ssh_client)
                 )
+                refresh_pending = ssh_client._refresh_coordinator.diagnostics()["deferred_dirty"]
             else:
                 await asyncio.to_thread(_restart_xochitl, ssh_client)
                 _invalidate_client_cache(ssh_client)
+            if not did_refresh:
+                return make_response(
+                    {"refreshed": False, "transport": "ssh", "refresh_pending": False},
+                    "No deferred SSH writes were pending, so xochitl was not restarted.",
+                )
+            if refresh_pending:
+                return make_response(
+                    {"refreshed": True, "transport": "ssh", "refresh_pending": True},
+                    "xochitl restarted successfully, but a concurrent deferred write "
+                    "finished outside that refresh barrier. Do not repeat the write; "
+                    "call remarkable_refresh() once more.",
+                )
             return make_response(
                 {"refreshed": True, "transport": "ssh", "refresh_pending": False},
-                "xochitl restarted; any deferred changes are now visible. "
+                "xochitl restarted and fresh SSH readiness was confirmed; "
+                "any deferred changes are now visible. "
                 "Use remarkable_browse() to verify.",
             )
         except Exception as e:
             if ssh_client is not None:
                 _invalidate_client_cache(ssh_client)
-            return make_error(
+            return _pending_refresh_error(
                 error_type="refresh_failed",
                 message=f"Failed to refresh tablet UI: {e}",
-                suggestion="Check SSH connection and try again.",
+                suggestion=(
+                    "Do not repeat any writes. Wake and unlock the tablet, verify a "
+                    "fresh SSH connection, then retry only the refresh."
+                ),
             )
 
     # Refreshing is meaningful only for the SSH transport's xochitl restart;

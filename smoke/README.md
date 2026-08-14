@@ -106,7 +106,9 @@ for cleanup.
   SSH snapshots retain the process/tablet diagnostics from issue #157 and include
   the reliability status returned by the server: queue depth, active operation,
   pre-execution retry count, last classified connection failure, refresh
-  generation, pending/deferred state, and completed refresh count.
+  generation, known/pending state, completed refresh count, and the last refresh
+  error. Failed cleanup paths remain in `cleanup_pending` so recovery can target
+  only the exact smoke artifacts instead of replaying the write phase.
 
 Run artifacts (`smoke/snapshots/*.json`) are written on every run and are
 git-ignored.
