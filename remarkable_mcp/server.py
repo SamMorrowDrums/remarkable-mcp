@@ -245,9 +245,10 @@ and sync to all your devices:
     uses_google_vision = ocr_backend == "google" or (ocr_backend == "auto" and has_google_vision)
     if uses_google_vision:
         instructions += """
-## OCR (Google Vision Active)
+## OCR (Google Vision Selected)
 
-Google Vision API is configured for high-quality handwriting recognition.
+Google Vision will be tried first. If it is unavailable or detects no text,
+OCR falls back to local Tesseract.
 Use `include_ocr=True` with `remarkable_read()` to extract handwritten content.
 """
     else:

@@ -1783,7 +1783,7 @@ async def remarkable_image(
                             ocr_text = await run_blocking(_ocr_png_google_vision, ocr_tmp_path)
                             if ocr_text:
                                 ocr_backend_used = "google"
-                        if ocr_text is None and backend in ("auto", "tesseract"):
+                        if ocr_text is None:
                             ocr_text = await run_blocking(_ocr_png_tesseract, ocr_tmp_path)
                             if ocr_text:
                                 ocr_backend_used = "tesseract"

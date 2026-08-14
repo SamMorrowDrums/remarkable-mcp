@@ -1003,6 +1003,50 @@ class TestRemarkableImage:
             google_ocr.assert_not_called()
             tesseract_ocr.assert_called_once()
 
+    @pytest.mark.asyncio
+    @patch("remarkable_mcp.tools.get_rmapi")
+    async def test_image_google_ocr_failure_falls_back_to_tesseract(
+        self,
+        mock_get_rmapi,
+        mock_document,
+        monkeypatch,
+    ):
+        """Explicit Google OCR remains usable when Google is unavailable."""
+        from remarkable_mcp import notebooks
+
+        document_zip = _make_notebook_zip(notebooks.page_rm_bytes("OCR source"))
+        mock_client = Mock()
+        mock_get_rmapi.return_value = mock_client
+        mock_document.is_folder = False
+        mock_client.get_meta_items.return_value = [mock_document]
+        mock_client.download.return_value = document_zip
+        monkeypatch.setenv("REMARKABLE_OCR_BACKEND", "google")
+
+        with (
+            patch(
+                "remarkable_mcp.tools._ocr_png_google_vision",
+                return_value=None,
+            ) as google_ocr,
+            patch(
+                "remarkable_mcp.tools._ocr_png_tesseract",
+                return_value="tesseract fallback",
+            ) as tesseract_ocr,
+        ):
+            result = await _call_tool(
+                "remarkable_image",
+                {
+                    "document": "Test Document",
+                    "include_ocr": True,
+                    "compatibility": True,
+                },
+            )
+
+        data = json.loads(result.content[0].text)
+        assert data["ocr_backend"] == "tesseract"
+        assert data["ocr_text"] == "tesseract fallback"
+        google_ocr.assert_called_once()
+        tesseract_ocr.assert_called_once()
+
 
 # =============================================================================
 # Test Merged Rendering
