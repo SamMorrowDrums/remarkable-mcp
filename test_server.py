@@ -12,7 +12,7 @@ import tempfile
 import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -4459,6 +4459,23 @@ class TestExtractionCacheGeneration:
 
 
 class TestSmokeDiagnostics:
+    @pytest.mark.asyncio
+    async def test_stdio_diagnostics_fall_back_without_private_sdk_hook(self, monkeypatch):
+        import mcp.client.stdio as stdio_module
+
+        from smoke.run_smoke import diagnostic_stdio_client
+
+        @asynccontextmanager
+        async def fake_stdio_client(params, errlog):
+            yield "read", "write"
+
+        monkeypatch.delattr(stdio_module, "_create_platform_compatible_process", raising=False)
+        monkeypatch.setattr(stdio_module, "stdio_client", fake_stdio_client)
+
+        async with diagnostic_stdio_client("params") as (read, write, diagnostics):
+            assert (read, write) == ("read", "write")
+            assert diagnostics.process is None
+
     def test_abnormal_server_exit_fails_smoke_verdict(self, capsys):
         from smoke.run_smoke import PASS, Recorder, print_report
 

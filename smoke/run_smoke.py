@@ -282,14 +282,15 @@ async def diagnostic_stdio_client(params):
     import mcp.client.stdio as stdio_module
 
     diagnostics = ProcessDiagnostics()
-    original_create = stdio_module._create_platform_compatible_process
+    original_create = getattr(stdio_module, "_create_platform_compatible_process", None)
 
     async def _capture_process(**kwargs):
         process = await original_create(**kwargs)
         diagnostics.attach(process)
         return process
 
-    stdio_module._create_platform_compatible_process = _capture_process
+    if original_create is not None:
+        stdio_module._create_platform_compatible_process = _capture_process
     try:
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errlog:
             try:
@@ -298,7 +299,8 @@ async def diagnostic_stdio_client(params):
             finally:
                 await diagnostics.finish(errlog)
     finally:
-        stdio_module._create_platform_compatible_process = original_create
+        if original_create is not None:
+            stdio_module._create_platform_compatible_process = original_create
 
 
 def _run_diagnostic_command(args: list[str], timeout: int = 10) -> dict[str, Any]:
