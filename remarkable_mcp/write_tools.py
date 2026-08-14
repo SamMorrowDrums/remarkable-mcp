@@ -466,13 +466,12 @@ def _update_deferred_ssh_cache(
         _invalidate_client_cache(client)
         return
 
-    documents = getattr(client, "_documents", None)
-    if not isinstance(documents, list):
-        return
-
     lock = getattr(client, "_metadata_lock", None)
     context = lock if lock is not None else nullcontext()
     with context:
+        documents = getattr(client, "_documents", None)
+        if not isinstance(documents, list):
+            return
         if remove_id is not None:
             client._documents = [item for item in documents if item.ID != remove_id]
             client._documents_by_id.pop(remove_id, None)

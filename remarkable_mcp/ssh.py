@@ -616,6 +616,7 @@ class SSHClient:
 
             except Exception as e:
                 logger.warning(f"Failed to batch-load file types: {e}")
+                return {}
 
             self._file_type_cache = cache
             return cache

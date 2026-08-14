@@ -4324,6 +4324,26 @@ class TestSSHCacheConcurrency:
 
         assert individual_downloads == 0
 
+    def test_failed_file_type_preload_remains_retryable(self):
+        from remarkable_mcp.ssh import SSHClient
+
+        client = SSHClient()
+        attempts = 0
+
+        def fake_command(command, timeout=30):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("transient SSH failure")
+            return '===FILE===doc-1\n{"fileType":"pdf"}\n'
+
+        client._ssh_command = fake_command
+
+        assert client.get_all_file_types() == {}
+        assert client._file_type_cache is None
+        assert client.get_all_file_types() == {"doc-1": "pdf"}
+        assert attempts == 2
+
     def test_file_type_preload_serializes_other_ssh_io(self):
         from remarkable_mcp.ssh import Document, SSHClient
 
@@ -6178,6 +6198,41 @@ class TestDeferRestart:
         assert client.get_doc("doc-2") is None
         assert "doc-2" not in client._file_type_cache
         assert client.get_doc("doc-1") is original
+
+    def test_deferred_cache_reads_documents_after_acquiring_lock(self):
+        from remarkable_mcp.ssh import Document, SSHClient
+        from remarkable_mcp.write_tools import _update_deferred_ssh_cache
+
+        client = SSHClient()
+        stale = Document(
+            id="stale",
+            hash="stale",
+            name="Stale",
+            doc_type="DocumentType",
+        )
+        current = Document(
+            id="current",
+            hash="current",
+            name="Current",
+            doc_type="DocumentType",
+        )
+        client._documents = [stale]
+        client._documents_by_id = {stale.ID: stale}
+
+        class SwapOnEnter:
+            def __enter__(self):
+                client._documents = [current]
+                client._documents_by_id = {current.ID: current}
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+        client._metadata_lock = SwapOnEnter()
+
+        _update_deferred_ssh_cache(client, False, remove_id=current.ID)
+
+        assert client._documents == []
+        assert client._documents_by_id == {}
 
     def test_restart_invalidates_deferred_cache(self):
         from remarkable_mcp.ssh import Document, SSHClient
