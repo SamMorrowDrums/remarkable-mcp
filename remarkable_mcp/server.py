@@ -364,12 +364,6 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     except ValueError:
         authority = normalized
     else:
-        if address.is_unspecified:
-            raise ValueError(
-                "Wildcard HTTP bind addresses are not supported securely. "
-                "Use a concrete interface address or keep the loopback default "
-                "behind an authenticated reverse proxy."
-            )
         authority = f"[{normalized}]" if address.version == 6 else normalized
 
     return TransportSecuritySettings(
