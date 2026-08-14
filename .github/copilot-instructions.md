@@ -198,7 +198,7 @@ def remarkable_example(param: str) -> str:
 - `REMARKABLE_SSH_KEY` - Explicit SSH private key
 - `REMARKABLE_READ_ONLY` - Disable write tools
 - `REMARKABLE_ROOT_PATH` - Scope access to one folder
-- `REMARKABLE_OCR_BACKEND` - OCR backend selection
+- `REMARKABLE_OCR_BACKEND` - OCR backend selection (`auto`, `google`, or `tesseract`)
 
 ## Testing Patterns
 

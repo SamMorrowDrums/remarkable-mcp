@@ -195,4 +195,4 @@ The workflow automatically:
 | `REMARKABLE_MCP_HOST` | Streamable HTTP bind address |
 | `REMARKABLE_MCP_PORT` | Streamable HTTP port |
 | `GOOGLE_VISION_API_KEY` | Google Vision API key for OCR |
-| `REMARKABLE_OCR_BACKEND` | OCR backend: `auto`, `sampling`, `google`, `tesseract` |
+| `REMARKABLE_OCR_BACKEND` | OCR backend: `auto`, `google`, `tesseract` |

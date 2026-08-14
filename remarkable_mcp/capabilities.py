@@ -15,7 +15,6 @@ When a client connects to an MCP server, the following handshake occurs:
 ## Client Capabilities (from client to server)
 
 Clients declare what features they support:
-- `sampling`: Server can request LLM completions from client
 - `elicitation`: Server can request user input during tool execution
 - `roots`: Server can query filesystem roots
 - `experimental`: Dictionary of experimental feature support
@@ -35,13 +34,12 @@ Use the Context object in tools to check what the client supports:
 
 ```python
 from mcp.server.mcpserver import Context
-from remarkable_mcp.capabilities import get_client_capabilities, client_supports_sampling
+from remarkable_mcp.capabilities import client_supports_elicitation, get_client_capabilities
 
 @mcp.tool()
 async def my_tool(query: str, ctx: Context) -> str:
-    # Check if client supports sampling
-    if client_supports_sampling(ctx):
-        # Can request LLM completions
+    if client_supports_elicitation(ctx):
+        # Can request user input
         pass
 
     # Get full capabilities object
@@ -93,8 +91,8 @@ def get_client_capabilities(ctx: "Context") -> Optional["ClientCapabilities"]:
         @mcp.tool()
         async def my_tool(ctx: Context) -> str:
             caps = get_client_capabilities(ctx)
-            if caps and caps.sampling:
-                # Client supports sampling
+            if caps and caps.elicitation:
+                # Client supports elicitation
                 pass
     """
     try:
@@ -103,21 +101,6 @@ def get_client_capabilities(ctx: "Context") -> Optional["ClientCapabilities"]:
         # Context not available (e.g., outside of request lifecycle)
         pass
     return None
-
-
-def client_supports_sampling(ctx: "Context") -> bool:
-    """Check if the client supports LLM sampling requests.
-
-    When true, the server can request the client's LLM to generate completions.
-
-    Args:
-        ctx: The MCPServer Context object
-
-    Returns:
-        True if client supports sampling, False otherwise
-    """
-    caps = get_client_capabilities(ctx)
-    return caps is not None and caps.sampling is not None
 
 
 def client_supports_elicitation(ctx: "Context") -> bool:

@@ -14,6 +14,8 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.server.transport_security import TransportSecuritySettings
 
+from remarkable_mcp.extract import get_ocr_backend
+
 logger = logging.getLogger(__name__)
 
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
@@ -77,7 +79,7 @@ def _build_instructions() -> str:
         "yes",
     ) or bool(os.environ.get("REMARKABLE_LOCAL_DIR"))
     has_google_vision = bool(os.environ.get("GOOGLE_VISION_API_KEY"))
-    ocr_backend = os.environ.get("REMARKABLE_OCR_BACKEND", "auto").lower()
+    ocr_backend = get_ocr_backend()
 
     read_only_mode = os.environ.get("REMARKABLE_READ_ONLY", "").lower() in (
         "1",
@@ -240,15 +242,8 @@ and sync to all your devices:
 """
 
     # Add OCR instructions based on configuration
-    if ocr_backend == "sampling":
-        instructions += """
-## OCR (Sampling Mode Active)
-
-OCR is configured to use this client's AI model via MCP sampling.
-Use `remarkable_image("Document", include_ocr=True)` to extract text from images.
-This requires no external API keys - it uses your client's capabilities.
-"""
-    elif has_google_vision:
+    uses_google_vision = ocr_backend == "google" or (ocr_backend == "auto" and has_google_vision)
+    if uses_google_vision:
         instructions += """
 ## OCR (Google Vision Active)
 
@@ -257,12 +252,11 @@ Use `include_ocr=True` with `remarkable_read()` to extract handwritten content.
 """
     else:
         instructions += """
-## OCR (Tesseract Fallback)
+## OCR (Tesseract Active)
 
-Google Vision is not configured. Tesseract will be used for OCR but works poorly
-on handwriting. For better results, either:
-- Configure GOOGLE_VISION_API_KEY for Google Vision
-- Set REMARKABLE_OCR_BACKEND=sampling to use this client's AI for OCR
+Tesseract will be used for local OCR but works poorly on handwriting.
+For better handwriting recognition, configure GOOGLE_VISION_API_KEY and use
+REMARKABLE_OCR_BACKEND=auto (the default) or google.
 """
 
     return instructions

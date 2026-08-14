@@ -11,7 +11,7 @@ OpenWebUI, and other compatible tools.
 - Search names, tags, and extracted text.
 - Read typed text, PDF and EPUB text, highlights, and annotations.
 - Render notebooks and annotated PDFs as PNG or SVG.
-- Run handwriting OCR through MCP sampling, Google Vision, or Tesseract.
+- Run handwriting OCR through Google Vision or Tesseract.
 - Upload files and manage folders in supported transports.
 - Render Markdown as PDF and upload it to the tablet.
 - Open an interactive canvas in clients that support MCP Apps.
@@ -421,7 +421,7 @@ Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remark
 | `remarkable_search` | Search content across multiple documents (with tag filtering) |
 | `remarkable_recent` | Get recently modified documents |
 | `remarkable_status` | Check connection status and the per-transport capability matrix |
-| `remarkable_image` | Get PNG/SVG images of pages (supports OCR via sampling) |
+| `remarkable_image` | Get PNG/SVG images of pages with optional OCR |
 
 These six tools are read-only and return structured JSON with next-step hints.
 Supported transports also register write tools by default; pass `--read-only` to
@@ -436,7 +436,7 @@ disable them. See [Write Tools](#write-tools-by-transport). Clients that support
 - Empty notebook text can trigger OCR automatically.
 - Search can scan several matching documents.
 - Image tools return visual content that text extraction misses.
-- Sampling OCR uses the connected client's model when supported.
+- OCR uses Google Vision when configured and otherwise runs locally with Tesseract.
 - Browse and search accept tag filters.
 
 ### Example Usage
@@ -473,7 +473,7 @@ remarkable_image("UI Mockup", page=1)
 # Get SVG for editing in design tools
 remarkable_image("Wireframe", output_format="svg")
 
-# Get image with OCR text extraction (uses sampling if configured)
+# Get image with OCR text extraction
 remarkable_image("Handwritten Notes", include_ocr=True)
 
 # Composite an imported PDF page with its reMarkable annotations
@@ -512,11 +512,10 @@ Documents are automatically registered as MCP resources:
 
 ## OCR for Handwriting
 
-For handwritten content, remarkable-mcp offers several OCR backends. Choose based on your setup and requirements:
+For handwritten content, remarkable-mcp offers two OCR backends:
 
 | Backend | Setup | Offline | Notes |
 |---|---|---|---|
-| Sampling | No API key | Depends on the client | Uses the connected client's model |
 | Google Vision | API key | No | Good handwriting support |
 | Tesseract | System install | Yes | Better suited to printed text |
 
@@ -527,29 +526,12 @@ Set `REMARKABLE_OCR_BACKEND` in your MCP config:
 ```json
 {
   "env": {
-    "REMARKABLE_OCR_BACKEND": "sampling"
+    "REMARKABLE_OCR_BACKEND": "auto"
   }
 }
 ```
 
-**Options:** `sampling`, `google`, `tesseract`, `auto`
-
-<details>
-<summary>Sampling OCR</summary>
-
-Uses your MCP client's AI model for OCR. Works with clients that support MCP sampling (VS Code + Copilot, Claude Desktop, etc.).
-
-On modern `2026-07-28` connections, the server returns a multi-round input
-request and the client retries the tool with the sampled OCR result. On legacy
-connections, the same resolver uses the established server-to-client sampling
-request. This compatibility routing is handled by MCP SDK 2.x.
-
-- No additional API keys needed
-- Quality and data handling depend on your MCP client and model
-- Only available with sampling-capable clients
-- Falls back to Google Vision (if API key configured) or Tesseract if sampling unavailable
-
-</details>
+**Options:** `auto`, `google`, `tesseract`
 
 <details>
 <summary>Google Cloud Vision</summary>
