@@ -265,8 +265,10 @@ def _register_document(
     if doc_id in _registered_docs:
         return False
 
-    # Skip cloud-archived documents (not available on device)
-    if hasattr(doc, "is_cloud_archived") and doc.is_cloud_archived:
+    # Keep resource visibility aligned with tool/canvas document resolution.
+    from remarkable_mcp.tools import _is_cloud_archived
+
+    if _is_cloud_archived(doc):
         return False
 
     # Get the full path

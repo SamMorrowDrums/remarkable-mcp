@@ -670,9 +670,10 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
     from remarkable_mcp.responses import make_error
     from remarkable_mcp.tools import (
         _apply_root_filter,
+        _find_target_document,
         _get_root_path,
+        _is_cloud_archived,
         _is_within_root,
-        _resolve_root_path,
     )
 
     background = await run_blocking(get_background_color)
@@ -681,21 +682,8 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
     items_by_id = get_items_by_id(collection)
 
     root = _get_root_path()
-    actual_document = _resolve_root_path(document) if document.startswith("/") else document
-
-    documents = [item for item in collection if not item.is_folder]
-    target_doc = None
-    document_lower = actual_document.lower().strip("/")
-    for doc in documents:
-        doc_path = get_item_path(doc, items_by_id)
-        if not _is_within_root(doc_path, root):
-            continue
-        if doc.VissibleName.lower() == document_lower:
-            target_doc = doc
-            break
-        if doc_path.lower().strip("/") == document_lower:
-            target_doc = doc
-            break
+    documents = [item for item in collection if not item.is_folder and not _is_cloud_archived(item)]
+    target_doc = _find_target_document(collection, items_by_id, document)
 
     if not target_doc:
         filtered_docs = [

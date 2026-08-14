@@ -45,7 +45,7 @@ With this configuration:
 |-----------|------|---------|-------------|
 | `document` | string | *required* | Document name or full path |
 | `content_type` | string | `"text"` | What content to extract |
-| `page` | int | `1` | Page number for pagination |
+| `page` | int | `1` | Extracted-content page number for bounded text pagination |
 | `grep` | string | `None` | Search for keywords in content |
 | `include_ocr` | bool | `False` | Enable OCR for handwritten content |
 
@@ -61,7 +61,7 @@ With this configuration:
 # Read first page of a document
 remarkable_read("Meeting Notes")
 
-# Read a specific page
+# Read the third extracted-content chunk
 remarkable_read("Research Paper.pdf", page=3)
 
 # Search for keywords
@@ -88,10 +88,13 @@ remarkable_read("/Work/Projects/Q4 Planning")
   "content": "Extracted text content...",
   "page": 1,
   "total_pages": 5,
-  "total_chars": 2500,
+  "total_pages_known": true,
+  "content_pages": 2,
+  "total_chars": 12500,
   "more": true,
+  "next_page": 2,
   "modified": "2025-11-28T10:30:00Z",
-  "_hint": "Page 1/5. Next: remarkable_read('Meeting Notes', page=2)."
+  "_hint": "Content page 1/2; document has 5 physical pages. Next: remarkable_read('Meeting Notes', page=2)."
 }
 ```
 
@@ -103,8 +106,21 @@ remarkable_read("/Work/Projects/Q4 Planning")
 
 ### Pagination
 
-- **PDF/EPUB**: Pages are ~8000 character chunks of extracted text
-- **Notebooks**: Pages correspond to actual notebook pages (especially useful with OCR)
+- `total_pages` reports physical document pages, matching `remarkable_image`,
+  and `total_pages_known` says whether that count was available.
+- `content_pages` reports extracted-text pagination units. PDF/EPUB source text
+  uses ~8000-character chunks; notebook OCR may produce fewer content pages than
+  physical pages when blank pages have no text.
+- `page`, `more`, and `next_page` refer to those content pages. This preserves
+  bounded text responses without overloading the physical page count.
+- Raw PDF reads count pages from the same source bytes used for text extraction
+  and do not fetch the full document archive. A raw EPUB may need that archive
+  for its physical page count; if the archive is unavailable, the extracted
+  content still succeeds with `total_pages: null`, `total_pages_known: false`,
+  and a `page_count_note`.
+- On older USB firmware that returns a native PDF instead of an rmdoc archive,
+  `content_type="text"` returns source text without annotations, while
+  `content_type="annotations"` returns `annotations_not_available`.
 
 When `more: true`, use the `page` parameter to continue reading.
 
@@ -213,6 +229,7 @@ remarkable_search("project", tags=["work"])
       "modified": "2025-11-28T10:30:00Z",
       "content": "...context around matches...",
       "total_pages": 2,
+      "content_pages": 1,
       "grep_matches": 5,
       "truncated": true
     }
@@ -334,7 +351,7 @@ remarkable_status()
 | `output_format` | string | `"png"` | Output format: `"png"` or `"svg"` |
 | `include_ocr` | bool | `False` | Enable OCR on the image |
 | `compatibility` | bool | `False` | Return resource URI instead of embedded resource |
-| `render_merged` | bool | `False` | Composite an imported PDF page with its reMarkable annotations (PNG only) |
+| `render_merged` | bool \| null | `None` (auto) | PNG compositing mode: auto-merge PDF-backed pages, `True` to request merging explicitly, or `False` for annotations only |
 
 ### Background Colors
 
@@ -372,8 +389,11 @@ remarkable_image("Handwritten Notes", include_ocr=True)
 # Compatibility mode: return resource URI instead of embedded resource
 remarkable_image("Diagram", compatibility=True)
 
-# Composite a PDF page with annotations
-remarkable_image("Research Paper", page=3, render_merged=True)
+# PDF-backed PNG pages merge the source page and annotations automatically
+remarkable_image("Research Paper", page=3)
+
+# Return only the reMarkable annotation layer
+remarkable_image("Research Paper", page=3, render_merged=False)
 ```
 
 ### Response Format
@@ -386,9 +406,10 @@ When `compatibility=True`, returns a JSON object with the resource URI:
 
 ```json
 {
-  "resource_uri": "remarkableimg:///path/doc.page-1.png",
+  "resource_uri": "remarkableimg:///path/doc.page-1.merged.png",
   "page": 1,
   "total_pages": 5,
+  "merged": true,
   "_hint": "Page 1/5. Use resource URI to access the image."
 }
 ```
@@ -398,9 +419,16 @@ used when configured; otherwise OCR runs locally with Tesseract.
 
 ### Notes
 
-- Works best with notebooks and handwritten content
-- For PDFs/EPUBs, renders the annotation layer only (not the underlying document)
-- SVG format is useful for further editing in design tools
+- Native notebooks retain their existing stroke and blank-page rendering.
+- PDF-backed PNG pages merge the source page and annotations by default. Explicit
+  `render_merged=False` preserves annotation-only access, including user-added
+  PDF pages that have no underlay.
+- SVG remains annotation-only; explicit `render_merged=True` with SVG returns
+  SVG plus an explanatory note.
+- Compatibility responses preserve the same merge choice and expose `merged`.
+- If older USB firmware returns only a native PDF export, PNG still renders via
+  that export. SVG and explicit `render_merged=False` require the unavailable
+  rmdoc annotation layer and return clear errors.
 - RGBA colors (8-digit hex) allow transparency control
 
 ---
