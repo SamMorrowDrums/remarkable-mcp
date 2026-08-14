@@ -31,17 +31,16 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-def _warn_for_http_binding(host: str, port: int) -> None:
+def _warn_for_http_binding(host: str) -> None:
     """Warn prominently when unauthenticated HTTP is exposed off-host."""
     if not _is_loopback_host(host):
         print(
             "WARNING: remarkable-mcp Streamable HTTP has no authentication and "
             f"is binding to non-loopback address {host!r}. Any network client "
             "that can reach this port may invoke enabled tools, including writes. "
-            "Prefer 127.0.0.1 with a local OpenWebUI instance. An authenticated "
-            "reverse proxy must also rewrite Host to "
-            f"'127.0.0.1:{port}' and clear the Origin header to satisfy FastMCP's "
-            "DNS-rebinding protection; see the README example.",
+            f"Only Host and Origin values matching {host!r} are accepted. Prefer "
+            "127.0.0.1 with a local OpenWebUI instance or the authenticated reverse "
+            "proxy configuration in the README.",
             file=sys.stderr,
         )
 
@@ -187,8 +186,9 @@ Streamable HTTP Security:
         "--host",
         help=(
             "Streamable HTTP bind address (default: REMARKABLE_MCP_HOST or "
-            "127.0.0.1). Non-loopback addresses are unauthenticated and unsafe "
-            "unless protected by a correctly configured reverse proxy; see README."
+            "127.0.0.1). Use a concrete address; wildcard addresses are refused. "
+            "Non-loopback addresses are unauthenticated and unsafe unless protected "
+            "by a correctly configured reverse proxy; see README."
         ),
     )
     parser.add_argument(
@@ -254,7 +254,7 @@ Streamable HTTP Security:
         if args.no_cloud_fallback and (args.local_dir or args.usb or args.ssh):
             os.environ["REMARKABLE_DISABLE_CLOUD_FALLBACK"] = "1"
 
-        from remarkable_mcp.server import run
+        from remarkable_mcp.server import _transport_security_for_host, run
 
         if args.http:
             host = args.host or os.environ.get("REMARKABLE_MCP_HOST", "127.0.0.1")
@@ -268,7 +268,11 @@ Streamable HTTP Security:
                 parser.error("REMARKABLE_MCP_PORT must be an integer")
             if not 1 <= port <= 65535:
                 parser.error("REMARKABLE_MCP_PORT must be between 1 and 65535")
-            _warn_for_http_binding(host, port)
+            try:
+                _transport_security_for_host(host)
+            except ValueError as e:
+                parser.error(str(e))
+            _warn_for_http_binding(host)
             run(transport="streamable-http", host=host, port=port)
         else:
             run()

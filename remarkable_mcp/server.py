@@ -5,12 +5,16 @@ reMarkable MCP Server initialization.
 import logging
 import os
 from contextlib import asynccontextmanager
+from ipaddress import ip_address
 from typing import AsyncIterator
 from urllib.parse import quote, unquote
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 logger = logging.getLogger(__name__)
+
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 class RemarkableMCP(FastMCP):
@@ -341,6 +345,45 @@ from remarkable_mcp import app_canvas as _app_canvas  # noqa: E402
 _app_canvas.register_app_tools()
 
 
+def _transport_security_for_host(host: str) -> TransportSecuritySettings:
+    """Build a strict Host/Origin allowlist for the actual HTTP bind address."""
+    normalized = host.strip().strip("[]")
+    if normalized in _LOOPBACK_HOSTS:
+        return TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
+            allowed_origins=[
+                "http://127.0.0.1:*",
+                "http://localhost:*",
+                "http://[::1]:*",
+            ],
+        )
+
+    try:
+        address = ip_address(normalized)
+    except ValueError:
+        authority = normalized
+    else:
+        if address.is_unspecified:
+            raise ValueError(
+                "Wildcard HTTP bind addresses are not supported securely. "
+                "Use a concrete interface address or keep the loopback default "
+                "behind an authenticated reverse proxy."
+            )
+        authority = f"[{normalized}]" if address.version == 6 else normalized
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[authority, f"{authority}:*"],
+        allowed_origins=[
+            f"http://{authority}",
+            f"http://{authority}:*",
+            f"https://{authority}",
+            f"https://{authority}:*",
+        ],
+    )
+
+
 def run(
     transport: str = "stdio",
     host: str = "127.0.0.1",
@@ -350,4 +393,5 @@ def run(
     if transport == "streamable-http":
         mcp.settings.host = host
         mcp.settings.port = port
+        mcp.settings.transport_security = _transport_security_for_host(host)
     mcp.run(transport=transport)

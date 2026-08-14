@@ -1306,9 +1306,8 @@ def register_write_tools():
 
         import tempfile
 
-        filename = _upload_filename("document.pdf", document_name)
         with tempfile.TemporaryDirectory() as temp_dir:
-            pdf_path = os.path.join(temp_dir, filename)
+            pdf_path = os.path.join(temp_dir, "document.pdf")
             with open(pdf_path, "wb") as pdf_file:
                 pdf_file.write(pdf_bytes)
             return await remarkable_upload(

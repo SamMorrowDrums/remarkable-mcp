@@ -352,9 +352,12 @@ The bind address and port can also be set with `--host` / `--port` or
 > [!WARNING]
 > Streamable HTTP has **no built-in authentication**. It binds to
 > `127.0.0.1` by default and is intended for a local OpenWebUI instance. A
-> non-loopback bind such as `--host 0.0.0.0` exposes every enabled tool,
-> including write tools, to any client that can reach the port. The server
-> prints a prominent startup warning in that configuration.
+> concrete non-loopback bind such as `--host 192.168.1.10` exposes every
+> enabled tool, including write tools, to any client that can reach the port.
+> The server prints a prominent startup warning in that configuration and
+> accepts only matching `Host` and `Origin` values. Wildcard binds such as
+> `0.0.0.0` and `::` are refused because no safe request-host allowlist can be
+> inferred from them.
 
 ### Remote access through an authenticated reverse proxy
 

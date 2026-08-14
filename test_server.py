@@ -3098,6 +3098,52 @@ class TestMarkdownPDFWriteback:
         multipart_filename = post.call_args.kwargs["files"]["file"][0]
         assert multipart_filename == "Requested Name.pdf"
 
+    @pytest.mark.asyncio
+    async def test_markdown_title_is_not_used_as_local_temp_filename(self):
+        client = Mock()
+        client._documents = []
+        client._documents_by_id = {}
+        captured = {}
+
+        def capture_upload(local_path, document_name):
+            captured["local_name"] = os.path.basename(local_path)
+            captured["document_name"] = document_name
+            return {"status": 200, "ok": True}
+
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in (
+                "REMARKABLE_USE_SSH",
+                "REMARKABLE_USE_LOCAL_DIR",
+                "REMARKABLE_LOCAL_DIR",
+            )
+        }
+        env["REMARKABLE_USE_USB_WEB"] = "1"
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+            patch(
+                "remarkable_mcp.write_tools._upload_via_usb_web",
+                side_effect=capture_upload,
+            ),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_markdown_to_pdf",
+                {
+                    "markdown": "# Portable",
+                    "document_name": 'A/B: "portable"?',
+                },
+            )
+
+        data = json.loads(result[0][0].text)
+        assert data["uploaded"] is True
+        assert captured == {
+            "local_name": "document.pdf",
+            "document_name": 'A/B: "portable"?',
+        }
+
 
 class TestCloudWriteDispatch:
     """Cloud-mode write tools dispatch to the RemarkableClient methods."""
@@ -4469,7 +4515,7 @@ class TestCLIFlags:
             patch.object(
                 sys,
                 "argv",
-                ["remarkable-mcp", "--http", "--host", "0.0.0.0", "--port", "9000"],
+                ["remarkable-mcp", "--http", "--host", "192.0.2.10", "--port", "9000"],
             ),
             patch("remarkable_mcp.server.run") as mock_run,
         ):
@@ -4477,15 +4523,14 @@ class TestCLIFlags:
 
         mock_run.assert_called_once_with(
             transport="streamable-http",
-            host="0.0.0.0",
+            host="192.0.2.10",
             port=9000,
         )
         warning = capsys.readouterr().err
         assert "WARNING" in warning
         assert "no authentication" in warning
         assert "including writes" in warning
-        assert "rewrite Host to '127.0.0.1:9000'" in warning
-        assert "clear the Origin header" in warning
+        assert "matching '192.0.2.10'" in warning
 
     def test_default_transport_security_requires_proxy_header_rewrite(self):
         from mcp.server.transport_security import TransportSecurityMiddleware
@@ -4495,6 +4540,51 @@ class TestCLIFlags:
         assert middleware._validate_host("127.0.0.1:8000") is True
         assert middleware._validate_origin("https://openwebui.example.com") is False
         assert middleware._validate_origin(None) is True
+
+    def test_runtime_transport_security_matches_explicit_non_loopback_host(self):
+        from mcp.server.transport_security import TransportSecurityMiddleware
+
+        import remarkable_mcp.server as server
+
+        previous_host = mcp.settings.host
+        previous_port = mcp.settings.port
+        previous_security = mcp.settings.transport_security
+        try:
+            with patch.object(mcp, "run") as fastmcp_run:
+                server.run(
+                    transport="streamable-http",
+                    host="192.0.2.10",
+                    port=9000,
+                )
+            fastmcp_run.assert_called_once_with(transport="streamable-http")
+            middleware = TransportSecurityMiddleware(mcp.settings.transport_security)
+            assert middleware._validate_host("192.0.2.10:9000") is True
+            assert middleware._validate_origin("http://192.0.2.10:3000") is True
+            assert middleware._validate_host("mcp.example.com") is False
+            assert middleware._validate_origin("https://openwebui.example.com") is False
+        finally:
+            mcp.settings.host = previous_host
+            mcp.settings.port = previous_port
+            mcp.settings.transport_security = previous_security
+
+    @pytest.mark.parametrize("host", ["0.0.0.0", "::"])
+    def test_runtime_transport_security_rejects_wildcard_bind(self, host):
+        from remarkable_mcp.server import _transport_security_for_host
+
+        with pytest.raises(ValueError, match="Wildcard HTTP bind"):
+            _transport_security_for_host(host)
+
+    def test_cli_rejects_wildcard_http_bind(self):
+        from remarkable_mcp.cli import main
+
+        with patch.object(
+            sys,
+            "argv",
+            ["remarkable-mcp", "--http", "--host", "0.0.0.0"],
+        ):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
 
     def test_read_only_instructions_do_not_advertise_markdown_writeback(self):
         from remarkable_mcp.server import _build_instructions
