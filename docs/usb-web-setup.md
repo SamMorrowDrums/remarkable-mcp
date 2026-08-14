@@ -1,6 +1,8 @@
 # USB Web Interface Setup Guide
 
-The USB web interface provides read, render, and root-folder upload over USB.
+The USB web interface provides read, render, and upload over USB. Its upload
+endpoint preserves the filename but has no destination-folder parameter; the
+tablet web service chooses the folder.
 
 ## Overview
 

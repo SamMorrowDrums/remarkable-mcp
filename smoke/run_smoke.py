@@ -632,8 +632,9 @@ async def run_write_phase(session, mode, rec, registered):
 
     In managed modes (cloud/ssh) the upload is verified end-to-end: the fixture
     is read back and its known text confirmed, so upload PASS means the bytes are
-    actually retrievable. USB-web uploads land at the device root with the name
-    ignored, so they can't be reliably re-targeted and are not round-tripped.
+    actually retrievable. USB-web uploads preserve the multipart filename but
+    ignore parent_folder; the tablet web service chooses the destination folder.
+    They are cleaned up later by unique visible name when SSH is available.
     """
     is_ssh = MODES[mode]["transport"] == "ssh"
     managed = "remarkable_mkdir" in registered  # folder ops exposed -> cloud/ssh
@@ -642,8 +643,8 @@ async def run_write_phase(session, mode, rec, registered):
 
     created = []  # (kind, path) to clean up at the end, children before parents
 
-    # Unique per-run upload payload so the USB-web upload (which lands at root and
-    # ignores document_name) is identifiable for later SSH cleanup.
+    # The timestamped filename is preserved by USB web and is unique enough for
+    # later SSH cleanup regardless of which folder the tablet chooses.
     tmp_pdf = pathlib.Path(tempfile.gettempdir()) / f"{runid}-doc.pdf"
     shutil.copyfile(FIXTURE_PDF, tmp_pdf)
 
@@ -718,8 +719,8 @@ async def run_write_phase(session, mode, rec, registered):
             uploaded_path = f"{upload_parent.rstrip('/')}/{runid}-doc"
             if state == PASS and not managed:
                 note = (
-                    "uploaded to device root (USB web ignores name/folder); "
-                    "swept in the SSH phase if SSH is available this run"
+                    "uploaded with the fixture filename (USB web ignores "
+                    "parent_folder); swept by name in the SSH phase when available"
                 )
             elif state == PASS and managed:
                 # End-to-end check: read the just-uploaded fixture back and
@@ -738,7 +739,10 @@ async def run_write_phase(session, mode, rec, registered):
                 if managed:
                     created.append(("doc", uploaded_path))
                 else:
-                    rec.modes[mode].setdefault("usb_root_leftover", f"/{runid}-doc")
+                    rec.modes[mode].setdefault(
+                        "usb_upload_leftover",
+                        tmp_pdf.name,
+                    )
             elif managed and is_err is False and exc is None:
                 # Upload itself succeeded (only the read-back failed), so the doc
                 # still exists and must be cleaned up despite the FAIL verdict.
@@ -839,13 +843,14 @@ async def run_write_phase(session, mode, rec, registered):
 
         # --- delete (cleanup) -------------------------------------------
         if "remarkable_delete" in registered:
-            # Also sweep any USB-web leftover from an earlier usb phase this run.
+            # Also sweep any USB-web leftover from an earlier USB phase. The web
+            # service chooses its folder, so resolve the unique visible name.
             if is_ssh:
                 for data in rec.modes.values():
-                    leftover = data.get("usb_root_leftover")
+                    leftover = data.get("usb_upload_leftover")
                     if leftover:
                         created.append(("doc", leftover))
-                        data.pop("usb_root_leftover", None)
+                        data.pop("usb_upload_leftover", None)
 
             delete_states = []
             for _kind, path in created:

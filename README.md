@@ -63,7 +63,7 @@ Start with the first mode that fits your setup.
 
 | Order | Mode | Setup | Writes | Use when |
 |---:|---|---|---|---|
-| 1 | USB web | Connect the tablet and enable USB web | Upload to root | You want the shortest setup without a subscription or developer mode |
+| 1 | USB web | Connect the tablet and enable USB web | Upload; destination chosen by tablet | You want the shortest setup without a subscription or developer mode |
 | 2 | Local directory | Install and sign in to the desktop app | No | You want offline, device-free reads from the desktop cache |
 | 3 | Cloud | Register once; Connect subscription required | Full document and folder management | You need wireless or remote access |
 | 4 | SSH | Enable developer mode and configure SSH | Full management and native authoring | You need direct filesystem access or native ink writes |
@@ -272,7 +272,8 @@ AI assistants use the tools to read documents, search content, and more:
 ## Connection Modes
 
 All modes support reading and rendering. Cloud and SSH support full library
-management. USB web supports upload to the root folder. Local directory mode is
+management. USB web supports upload but does not accept a destination folder.
+Local directory mode is
 read-only.
 
 | Mode | Setup | Subscription | Offline | Tablet required | Raw source | Upload | Folder operations¹ |
@@ -594,7 +595,7 @@ Write tools let you upload, organize, and manage documents on your reMarkable. *
 
 | Feature | Local Directory | Cloud Mode | SSH Mode | USB Web Mode |
 |---------|:---------------:|:----------:|:--------:|:------------:|
-| Upload | ❌ | ✅ | ✅ | ✅ (to root) |
+| Upload | ❌ | ✅ | ✅ | ✅ (tablet-selected folder) |
 | Mkdir | ❌ | ✅ | ✅ | ❌ |
 | Move | ❌ | ✅ | ✅ | ❌ |
 | Rename | ❌ | ✅ | ✅ | ❌ |
@@ -642,7 +643,7 @@ Or set the environment variable:
 
 | Tool | Description |
 |------|-------------|
-| `remarkable_upload(file_path, parent_folder, document_name, defer_restart)` | Upload a PDF or EPUB file (cloud, SSH, and USB web; USB web uses the requested name but uploads to root) |
+| `remarkable_upload(file_path, parent_folder, document_name, defer_restart)` | Upload a PDF or EPUB file (cloud, SSH, and USB web; USB web preserves the name but ignores `parent_folder`) |
 | `remarkable_markdown_to_pdf(markdown, document_name, parent_folder, defer_restart)` | Render Markdown as a paginated PDF and upload it (cloud, SSH, and USB web) |
 | `remarkable_mkdir(folder_name, parent, defer_restart)` | Create a new folder (cloud and SSH) |
 | `remarkable_move(document, dest_folder, defer_restart)` | Move a document or folder (cloud and SSH) |
