@@ -84,6 +84,12 @@ The `io.modelcontextprotocol/ui` extension controls whether a client renders the
 `ui://remarkable/canvas` HTML resource; clients without it still receive the
 image.
 
+`remarkable_export` uses `ResourceLink` instead of `EmbeddedResource`, keeping
+potentially large PDF/Markdown bytes out of the tool result. The linked
+`remarkableexport:///` resource is supported unchanged by both modern and legacy
+SDK2 protocol modes. It is process-local, expires after 15 minutes, and is removed
+on LRU eviction or server shutdown.
+
 ## Authentication and process state
 
 MCP HTTP authorization headers are not used to select a reMarkable account or

@@ -80,10 +80,10 @@ def export_document_prompt(document_name: str) -> list:
         {
             "role": "user",
             "content": (
-                f"Please extract all the content from my reMarkable document "
-                f"'{document_name}' using remarkable_read('{document_name}'). "
-                "Then format it nicely as markdown, preserving the structure "
-                "and any important formatting."
+                f"Please export my reMarkable document '{document_name}' as Markdown "
+                f"using remarkable_export('{document_name}', "
+                "output_format='markdown'). Return the temporary resource link and "
+                "its expiry so I can save it."
             ),
         }
     ]

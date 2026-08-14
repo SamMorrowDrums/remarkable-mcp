@@ -89,6 +89,7 @@ ALL_TOOLS = [
     "remarkable_search",
     "remarkable_read",
     "remarkable_image",
+    "remarkable_export",
     "remarkable_canvas",
     "remarkable_upload",
     "remarkable_mkdir",
@@ -105,6 +106,7 @@ READ_TOOLS = {
     "remarkable_search",
     "remarkable_read",
     "remarkable_image",
+    "remarkable_export",
     "remarkable_canvas",
 }
 WRITE_TOOLS = {
@@ -162,6 +164,7 @@ MODES = {
 TIMEOUTS = {
     "remarkable_status": 60,
     "remarkable_image": 120,
+    "remarkable_export": 240,
     "remarkable_canvas": 120,
     "remarkable_author": 120,
     "remarkable_refresh": 120,
@@ -533,6 +536,9 @@ def _detail_for(tool, payload):
         return {k: payload.get(k) for k in keys if k in payload}
     if tool in ("remarkable_browse", "remarkable_recent", "remarkable_search"):
         return {"count": payload.get("count")}
+    if tool == "remarkable_export":
+        keys = ("status", "format", "pages", "size", "representation")
+        return {key: payload.get(key) for key in keys if key in payload}
     err = _error_type(payload)
     if err:
         return {"error_type": err}
@@ -565,7 +571,7 @@ async def verify_upload_roundtrip(session, doc_path):
 
 
 async def run_read_phase(session, mode, rec, registered):
-    """browse, recent, search, read, image, canvas -- expected OK where exposed."""
+    """Browse, read, render, and export without modifying tablet data."""
     # browse
     if "remarkable_browse" in registered:
         payload, is_err, exc = await call_tool(
@@ -622,6 +628,67 @@ async def run_read_phase(session, mode, rec, registered):
         if not note and target:
             note = f"target: {target}"
         rec.record(mode, tool, state, note, _detail_for(tool, payload))
+
+    # Export is a read-only tablet operation but returns a temporary ResourceLink.
+    # Fetch the linked Markdown to validate both the tool and resource lifecycle
+    # without uploading or mutating anything on the device.
+    if "remarkable_export" in registered:
+        if not target:
+            rec.record(
+                mode,
+                "remarkable_export",
+                SKIP,
+                "no document available to export in this mode",
+            )
+        else:
+            try:
+                result = await asyncio.wait_for(
+                    session.call_tool(
+                        "remarkable_export",
+                        {
+                            "document": target,
+                            "output_format": "markdown",
+                            "include_ocr": False,
+                        },
+                    ),
+                    timeout=TIMEOUTS["remarkable_export"],
+                )
+                payload = _parse_payload(result)
+                err_type = _error_type(payload)
+                links = [
+                    content
+                    for content in result.content
+                    if getattr(content, "type", None) == "resource_link"
+                ]
+                if err_type:
+                    state, note = FAIL, f"error: {err_type}"
+                elif getattr(result, "is_error", False):
+                    state, note = FAIL, "tool reported isError"
+                elif not links:
+                    state, note = FAIL, "tool returned no ResourceLink"
+                else:
+                    resource = await asyncio.wait_for(
+                        session.read_resource(links[0].uri),
+                        timeout=TIMEOUTS["remarkable_export"],
+                    )
+                    markdown = resource.contents[0].text
+                    if "remarkable_document_id:" in markdown and "## Source text" in markdown:
+                        state, note = PASS, f"resource round-trip OK; target: {target}"
+                    else:
+                        state, note = FAIL, "linked Markdown resource was incomplete"
+            except asyncio.TimeoutError:
+                state, note = FAIL, f"timed out after {TIMEOUTS['remarkable_export']}s"
+                payload = {}
+            except Exception as exc:  # noqa: BLE001 - include transport/client failure
+                state, note = FAIL, f"{type(exc).__name__}: {exc}"
+                payload = {}
+            rec.record(
+                mode,
+                "remarkable_export",
+                state,
+                note,
+                _detail_for("remarkable_export", payload),
+            )
 
 
 async def run_write_phase(session, mode, rec, registered):

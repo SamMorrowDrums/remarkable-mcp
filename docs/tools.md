@@ -13,8 +13,11 @@ This document describes the read and render tools. Write tools are listed in the
 | [`remarkable_recent`](#remarkable_recent) | Get recently modified documents |
 | [`remarkable_status`](#remarkable_status) | Check connection status |
 | [`remarkable_image`](#remarkable_image) | Get page images (PNG or SVG) |
+| [`remarkable_export`](#remarkable_export) | Export one document as PDF or Markdown |
 
-These tools are read-only and return structured JSON with next-step hints.
+These tools never modify tablet content and return structured next-step hints.
+`remarkable_export` additionally creates a bounded temporary file on the MCP server
+host, so its MCP annotation is `readOnlyHint=false` even under tablet read-only mode.
 
 ## Root Path Filtering
 
@@ -330,7 +333,7 @@ remarkable_status()
 | `connection` | Connection details |
 | `document_count` | Total documents in library (filtered by root if configured) |
 | `write_enabled` | Whether write tools are enabled (the default; `false` only with `--read-only`) |
-| `capabilities` | Effective capabilities for the active transport (read/render/upload/mkdir/move/rename/delete) |
+| `capabilities` | Effective capabilities for the active transport (read/render/export/upload/mkdir/move/rename/delete) |
 | `capabilities_by_transport` | The full per-transport capability matrix |
 | `root_path` | Configured root path filter (only present if set) |
 | `ocr_backend` | Which OCR backend is configured |
@@ -430,6 +433,105 @@ used when configured; otherwise OCR runs locally with Tesseract.
   that export. SVG and explicit `render_merged=False` require the unavailable
   rmdoc annotation layer and return clear errors.
 - RGBA colors (8-digit hex) allow transparency control
+
+---
+
+## remarkable_export
+
+**Export one document as a reusable PDF or Markdown resource.**
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `document` | string | *required* | Document name or full path |
+| `output_format` | `"pdf"` \| `"markdown"` | `"pdf"` | Export format |
+| `pdf_mode` | `"merged"` \| `"annotations"` | `"merged"` | PDF-only rendering mode |
+| `include_ocr` | bool | `False` | Run the existing OCR path for Markdown |
+
+### Delivery and lifecycle
+
+The tool returns a small JSON summary plus an MCP `ResourceLink`. It does not
+embed PDF/Markdown bytes in the tool response and does not accept or invent a host
+output path. The server writes the generated file beneath a private temporary
+directory:
+
+- links expire 15 minutes after creation;
+- at most eight exports are retained, with least-recently-used eviction;
+- expired and evicted links stop resolving;
+- all managed exports are removed at server shutdown.
+
+This local temporary write is why the tool declares `readOnlyHint=false`.
+The reMarkable tablet and library are never modified, and the tool remains
+available when the server runs with `--read-only`.
+
+### PDF behavior
+
+- Physical page order comes from reMarkable `.content` metadata.
+- `pdf_mode="merged"` combines mapped PDF underlays and annotations by default.
+- Native notebooks use complete full-page ink/blank renders.
+- `pdf_mode="annotations"` returns complete annotation layers only.
+- A flattened native PDF (older USB firmware) remains exportable in merged mode,
+  but cannot be separated into annotation-only layers.
+- A page render failure is represented by a labeled placeholder at the same page
+  ordinal and reported with `status: "partial"`; pages are never silently skipped.
+- EPUB source pages use a transport-native PDF when one is available. Otherwise
+  available annotation pages are exported with an explicit partial warning.
+
+### Markdown behavior
+
+Markdown starts with basic front matter containing the stable reMarkable document
+UUID, title, path, source type, physical page count, modified time, tags, and
+completeness. It then uses fixed sections:
+
+1. Source text
+2. Typed text
+3. Annotations
+4. Highlights
+5. OCR
+6. Export notes (only for partial exports)
+
+Extracted text is emitted verbatim. The exporter does not claim to detect headings,
+lists, paragraphs, links, or physical-page attribution that the existing extraction
+result cannot prove. OCR is opt-in and uses the same configured backend and cache as
+`remarkable_read`.
+
+### Examples
+
+```python
+# Complete PDF (source underlay + annotations where available)
+remarkable_export("Meeting Notes")
+
+# Full-page annotation layers only
+remarkable_export("Research Paper", pdf_mode="annotations")
+
+# Markdown with handwriting OCR
+remarkable_export("Journal", output_format="markdown", include_ocr=True)
+```
+
+### Response
+
+```json
+{
+  "document": "Meeting Notes",
+  "document_id": "11111111-2222-3333-4444-555555555555",
+  "path": "/Work/Meeting Notes",
+  "format": "pdf",
+  "filename": "Meeting Notes.pdf",
+  "size": 481203,
+  "pages": 7,
+  "status": "complete",
+  "failed_pages": [],
+  "warnings": [],
+  "resource_uri": "remarkableexport:///pdf/opaque-resource-id",
+  "expires_at": "2026-08-14T22:15:00+00:00",
+  "temporary_local_file": true,
+  "_hint": "Temporary PDF export ready as an MCP resource..."
+}
+```
+
+Fetch and save the accompanying `ResourceLink` before it expires when durable
+storage is required.
 
 ---
 

@@ -123,6 +123,7 @@ class TestMCPServerInitialization:
             "remarkable_search",
             "remarkable_status",
             "remarkable_image",
+            "remarkable_export",
             "remarkable_canvas",
         ]
 
@@ -131,13 +132,13 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Cloud default: 6 read tools + always-on canvas + 6 write tools.
+        """Cloud default: 7 read/export tools + always-on canvas + 6 write tools.
 
         ``remarkable_author`` is SSH-only and therefore hidden in cloud mode, so
-        the default (cloud) surface is 13 tools, not 14.
+        the default cloud surface is 14 tools.
         """
         tools = await _list_tools()
-        assert len(tools) == 13, f"Expected 13 tools, got {len(tools)}"
+        assert len(tools) == 14, f"Expected 14 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -323,10 +324,11 @@ class TestRemarkableStatus:
         matrix = data["capabilities_by_transport"]
         # All four transports are described.
         assert set(matrix) == {"cloud", "ssh", "usb-web", "local-dir"}
-        # Read/render are universal.
+        # Read/render/export are universal.
         for caps in matrix.values():
             assert caps["read"] is True
             assert caps["render"] is True
+            assert caps["export"] is True
         # Cloud and SSH have full write surface; USB web is upload-only.
         for mode in ("cloud", "ssh"):
             assert all(matrix[mode][op] for op in ("upload", "mkdir", "move", "rename", "delete"))
@@ -337,9 +339,10 @@ class TestRemarkableStatus:
             matrix["local-dir"][op] for op in ("upload", "mkdir", "move", "rename", "delete")
         )
 
-        # Effective capabilities for the active transport always cover read/render.
+        # Effective capabilities always cover read/render/export.
         assert data["capabilities"]["read"] is True
         assert data["capabilities"]["render"] is True
+        assert data["capabilities"]["export"] is True
 
     @pytest.mark.asyncio
     @patch("remarkable_mcp.tools.get_rmapi")
@@ -1582,7 +1585,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await _list_tools()
 
-        assert len(tools) == 13
+        assert len(tools) == 14
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:

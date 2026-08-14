@@ -10,6 +10,7 @@ Documents in your reMarkable library are automatically registered as MCP resourc
 | `remarkableraw:///` | Original PDF/EPUB text | All modes (USB web: PDF) |
 | `remarkableimg:///` | PNG page images (notebooks) | All modes |
 | `remarkablesvg:///` | SVG page images (notebooks) | All modes |
+| `remarkableexport:///` | Temporary generated PDF/Markdown exports | All modes |
 
 ## Text Resources (`remarkable:///`)
 
@@ -138,6 +139,30 @@ remarkablesvg:///Sketches/Logo.page-2.svg
 - For PDFs/EPUBs, the annotation layer would be rendered (not the underlying document)
 - Use the `remarkable_image` tool for more control (custom backgrounds, transparent output)
 
+## Export Resources (`remarkableexport:///`)
+
+`remarkable_export` creates one PDF or Markdown artifact and returns it as an MCP
+`ResourceLink`. Separate resource templates retain the correct content type:
+
+```
+remarkableexport:///pdf/{opaque-export-id}
+remarkableexport:///markdown/{opaque-export-id}
+```
+
+The tool response contains metadata, size, completeness, expiry, and the link, but
+not embedded/base64 file data. Reading the PDF resource returns binary PDF content;
+reading the Markdown resource returns UTF-8 `text/markdown`.
+
+Export resources are intentionally ephemeral:
+
+- stored under a server-managed private temporary directory;
+- readable for 15 minutes after creation;
+- limited to the eight most recently used exports;
+- removed on expiry/eviction and at server shutdown.
+
+They are generated from tablet data but never written back to the tablet. Fetch and
+save a resource if it needs to outlive the server-managed lifecycle.
+
 ## How Resources Are Registered
 
 On server startup, remarkable-mcp:
@@ -146,6 +171,7 @@ On server startup, remarkable-mcp:
 2. Fetches the document list
 3. Registers each document as an MCP resource
 4. Registers raw resources when source files are available
+5. Registers PDF/Markdown export templates (artifacts are created only on demand)
 
 Resources are registered once at startup. If you add new documents, restart the MCP server to pick them up.
 
@@ -171,6 +197,9 @@ content = await client.read_resource("remarkable:///Meeting%20Notes.txt")
 
 # Request raw PDF text (original document only, no annotations)
 pdf_text = await client.read_resource("remarkableraw:///Paper.pdf.txt")
+
+# After remarkable_export returns a ResourceLink:
+exported_file = await client.read_resource(export_link.uri)
 ```
 
 ## Path Encoding
@@ -217,3 +246,4 @@ With this configuration:
 - Text extraction happens on-demand when a resource is accessed
 - Results are cached per session
 - SSH mode is significantly faster than Cloud for resource access
+- Export resources are bounded by the 15-minute/eight-entry lifecycle described above
