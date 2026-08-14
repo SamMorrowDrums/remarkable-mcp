@@ -2804,8 +2804,8 @@ class TestWriteTools:
                 mcp._tool_manager._tools.pop(name, None)
 
     @pytest.mark.asyncio
-    async def test_delete_marks_document_deleted(self):
-        """Test that delete marks the document's metadata as deleted."""
+    async def test_delete_moves_document_to_trash(self):
+        """SSH delete mirrors current-firmware Trash metadata semantics."""
         from remarkable_mcp.write_tools import register_write_tools
 
         with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
@@ -2863,14 +2863,72 @@ class TestWriteTools:
                     data = json.loads(result[0][0].text)
                     assert data["deleted"] is True
                     assert data["name"] == "Test Doc"
-                    # Verify metadata was written with deleted=True
+                    # Current firmware represents Trash via parent="trash".
                     mock_write_meta.assert_called_once()
                     written_metadata = mock_write_meta.call_args[0][2]
-                    assert written_metadata["deleted"] is True
+                    assert written_metadata["parent"] == "trash"
+                    assert written_metadata["deleted"] is False
+                    assert written_metadata["version"] == 1
                 finally:
                     if "REMARKABLE_USE_SSH" in os.environ:
                         del os.environ["REMARKABLE_USE_SSH"]
                     importlib.reload(remarkable_mcp.api)
+        finally:
+            for name in [
+                "remarkable_upload",
+                "remarkable_mkdir",
+                "remarkable_move",
+                "remarkable_rename",
+                "remarkable_delete",
+            ]:
+                mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
+    async def test_permanent_delete_removes_resolved_ssh_entry(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+
+        try:
+            mock_doc = Mock()
+            mock_doc.VissibleName = "Disposable Test"
+            mock_doc.ID = "doc-123"
+            mock_doc.Parent = ""
+            mock_doc.is_folder = False
+
+            mock_client = Mock(
+                spec=[
+                    "get_meta_items",
+                    "_documents",
+                    "_documents_by_id",
+                    "host",
+                    "user",
+                    "port",
+                    "password",
+                ]
+            )
+            mock_client.get_meta_items.return_value = [mock_doc]
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=mock_client),
+                patch("remarkable_mcp.write_tools._permanently_delete_ssh_entry") as mock_purge,
+                patch("remarkable_mcp.write_tools._write_metadata") as mock_write_meta,
+                patch("remarkable_mcp.write_tools._restart_xochitl"),
+                patch.dict(
+                    os.environ,
+                    {"REMARKABLE_USE_SSH": "1", "REMARKABLE_SKIP_CONFIRM": "1"},
+                ),
+            ):
+                result = await mcp.call_tool(
+                    "remarkable_delete",
+                    {"document": "Disposable Test", "permanent": True},
+                )
+                data = json.loads(result[0][0].text)
+
+            assert data["deleted"] is True
+            assert data["permanent"] is True
+            mock_purge.assert_called_once_with(mock_client, "doc-123")
+            mock_write_meta.assert_not_called()
         finally:
             for name in [
                 "remarkable_upload",

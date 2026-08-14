@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import time
 import uuid
 from contextlib import nullcontext
@@ -165,6 +166,13 @@ def _write_content_file(ssh_client: SSHClient, doc_uuid: str, content_data: dict
     content = json.dumps(content_data, indent=2)
     remote_path = f"{XOCHITL_PATH}/{doc_uuid}.content"
     ssh_client._ssh_command(f"cat > '{remote_path}' << 'REMARKABLE_EOF'\n{content}\nREMARKABLE_EOF")
+
+
+def _permanently_delete_ssh_entry(ssh_client: SSHClient, doc_uuid: str) -> None:
+    """Remove one resolved UUID and all of its sidecar files from the tablet."""
+    entry = shlex.quote(f"{XOCHITL_PATH}/{doc_uuid}")
+    sidecar_prefix = shlex.quote(f"{XOCHITL_PATH}/{doc_uuid}.")
+    ssh_client._ssh_command(f"rm -rf {entry} {sidecar_prefix}*")
 
 
 def _upload_file_bytes(ssh_client: SSHClient, local_path: str, remote_path: str) -> None:
@@ -1607,14 +1615,16 @@ def register_write_tools():
         async def remarkable_delete(
             document: str,
             defer_restart: bool = False,
+            permanent: bool = False,
             ctx: Optional[Context] = None,
         ) -> str:
             """
             <usecase>Delete a document or folder on the reMarkable tablet.</usecase>
             <instructions>
-            DESTRUCTIVE operation. In cloud mode the item is moved to the trash
-            (recoverable from the device's Trash). In SSH mode it is marked deleted
-            in its metadata and disappears from the tablet UI after restart.
+            DESTRUCTIVE operation. By default the item is moved to the tablet's
+            Trash and remains recoverable. In SSH mode only, permanent=True removes
+            the resolved UUID and all sidecar files instead; use that only when the
+            user explicitly asked for permanent deletion.
 
             Works in cloud and SSH modes (default; --read-only disables). Not available over the
             USB web interface.
@@ -1629,6 +1639,8 @@ def register_write_tools():
             - defer_restart: SSH only. Skip the xochitl restart so a batch of
               deletes can refresh once via remarkable_refresh() instead of once
               per delete. Sets "refresh_pending": true. Ignored in cloud mode.
+            - permanent: SSH only. Permanently remove the resolved document/folder
+              files instead of moving the item to Trash (default: False).
             </parameters>
             <examples>
             - remarkable_delete("Old Notes")
@@ -1644,6 +1656,15 @@ def register_write_tools():
                 return abort
 
             if _is_cloud_mode():
+                if permanent:
+                    return make_error(
+                        error_type="permanent_delete_unsupported",
+                        message="Permanent deletion is not supported in cloud mode.",
+                        suggestion=(
+                            "Delete normally to move the item to Trash, then empty "
+                            "Trash from a reMarkable app or tablet."
+                        ),
+                    )
                 return await asyncio.to_thread(_cloud_delete, document)
 
             def _impl() -> str:
@@ -1667,15 +1688,22 @@ def register_write_tools():
 
                     doc_path = get_item_path(target, items_by_id)
 
-                    # Read existing metadata
-                    meta_content = ssh_client._scp_download(f"{XOCHITL_PATH}/{target.ID}.metadata")
-                    metadata = json.loads(meta_content.decode("utf-8"))
-
-                    # Mark as deleted
-                    metadata["deleted"] = True
-                    metadata["lastModified"] = str(int(time.time() * 1000))
-                    metadata["metadatamodified"] = True
-                    _write_metadata(ssh_client, target.ID, metadata)
+                    if permanent:
+                        _permanently_delete_ssh_entry(ssh_client, target.ID)
+                    else:
+                        meta_content = ssh_client._scp_download(
+                            f"{XOCHITL_PATH}/{target.ID}.metadata"
+                        )
+                        metadata = json.loads(meta_content.decode("utf-8"))
+                        metadata["parent"] = "trash"
+                        metadata["deleted"] = False
+                        metadata["lastModified"] = str(int(time.time() * 1000))
+                        metadata["metadatamodified"] = True
+                        try:
+                            metadata["version"] = int(metadata.get("version", 0)) + 1
+                        except (TypeError, ValueError):
+                            metadata["version"] = 1
+                        _write_metadata(ssh_client, target.ID, metadata)
 
                     # Restart xochitl (unless deferred for a batch)
                     restarted = _maybe_restart_xochitl(ssh_client, defer_restart)
@@ -1689,12 +1717,17 @@ def register_write_tools():
                             "name": target.VissibleName,
                             "path": doc_path,
                             "type": "folder" if target.is_folder else "document",
+                            "permanent": permanent,
                             "refresh_pending": not restarted,
                         },
                         _write_result_message(
                             restarted,
-                            "Document deleted.",
-                            "It will no longer appear on the tablet.",
+                            (
+                                "Document permanently deleted."
+                                if permanent
+                                else "Document moved to Trash."
+                            ),
+                            "It will no longer appear in the active library.",
                         ),
                     )
 

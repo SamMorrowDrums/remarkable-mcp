@@ -785,8 +785,16 @@ async def run_write_phase(session, mode, rec, registered):
 
             delete_states = []
             for _kind, path in created:
+                delete_args = {"document": path}
+                if is_ssh:
+                    # Smoke artifacts are disposable test data; do not fill the
+                    # tablet's Trash or let sync restore them after validation.
+                    delete_args["permanent"] = True
                 payload, is_err, exc = await call_tool(
-                    session, "remarkable_delete", {"document": path}, TIMEOUTS["remarkable_delete"]
+                    session,
+                    "remarkable_delete",
+                    delete_args,
+                    TIMEOUTS["remarkable_delete"],
                 )
                 st, _ = classify_ok(payload, is_err, exc)
                 delete_states.append((path, st))
