@@ -2372,6 +2372,7 @@ class TestUSBWebInterface:
         pdf_doc = next(d for d in docs if d.name == "Test Doc")
         assert pdf_doc.file_type == "pdf"
         assert client.get_file_type(pdf_doc) == "pdf"
+        assert {request.args[0] for request in mock_request.call_args_list} == {"GET"}
 
     @patch("requests.request")
     def test_usb_web_download(self, mock_request):
@@ -2556,12 +2557,21 @@ class TestUSBWebInterface:
         import asyncio
         import time
 
-        from remarkable_mcp.usb_web import USBWebClient
+        from remarkable_mcp.usb_web import Document, USBWebClient
 
         monkeypatch.setenv("REMARKABLE_USE_USB_WEB", "1")
         monkeypatch.delenv("REMARKABLE_USE_SSH", raising=False)
         monkeypatch.setenv("REMARKABLE_USB_MAX_CONCURRENCY", "1")
         client = USBWebClient()
+        cached = Document(
+            id="cached",
+            hash="cached",
+            name="Cached",
+            doc_type="DocumentType",
+        )
+        with client._metadata_lock:
+            client._publish_metadata_locked([cached], loaded_all=True)
+        initial_generation = client._metadata_generation
         active = 0
         max_active = 0
         lock = threading.Lock()
@@ -2601,6 +2611,11 @@ class TestUSBWebInterface:
                 )
             assert all(json.loads(result.content[0].text)["uploaded"] is True for result in results)
             assert max_active == 1
+            with client._metadata_lock:
+                assert client._documents == []
+                assert client._documents_by_id == {}
+                assert client._metadata_loaded_all is False
+                assert client._metadata_generation == initial_generation + len(files)
         finally:
             client.close()
 
