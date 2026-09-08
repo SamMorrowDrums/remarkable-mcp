@@ -198,8 +198,18 @@ def append_page_to_content(content_data: dict, new_page_id: str) -> dict:
     idx_value = next_page_idx([v for v in existing_idx if isinstance(v, str)])
     pages.append(_page_entry(new_page_id, idx_value))
 
-    total = len(pages)
-    content_data["pageCount"] = total
+    # Tombstoned (deleted) pages stay in cPages.pages, so the visible page
+    # count differs from the raw array length. Keep the firmware's top-level
+    # pageCount tracking visible pages, as the tablet itself does.
+    from remarkable_mcp.extract import _is_page_deleted
+
+    visible_total = len([p for p in pages if not _is_page_deleted(p)])
+    if visible_total != len(pages):
+        content_data["pageCount"] = visible_total
+        total = visible_total
+    else:
+        content_data["pageCount"] = len(pages)
+        total = len(pages)
     return {
         "content": content_data,
         "idx": idx_value,

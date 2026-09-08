@@ -1219,14 +1219,20 @@ def _get_ordered_rm_files(tmpdir_path: Path) -> List[Path]:
     Returns:
         List of .rm file paths in correct page order
     """
-    # Get page order from .content file
+    # Get page order from .content file. Deletion tombstones are excluded so
+    # page ordering and addressing match the tablet UI (see _is_page_deleted)
+    # — firmware leaves deleted pages in cPages.pages.
     page_order = []
     for content_file in tmpdir_path.glob("*.content"):
         try:
             data = json.loads(content_file.read_text())
             # New format: cPages.pages array
             if "cPages" in data and "pages" in data["cPages"]:
-                page_order = [p["id"] for p in data["cPages"]["pages"]]
+                page_order = [
+                    page_id
+                    for entry in _visible_cpages_entries(data["cPages"]["pages"])
+                    if (page_id := entry.get("id"))
+                ]
             # Fallback: pages array directly
             elif "pages" in data and isinstance(data["pages"], list):
                 page_order = data["pages"]
@@ -1264,12 +1270,23 @@ def _get_page_order(tmpdir_path: Path) -> List[str]:
     a flat ``pages`` list of ids. Returns an empty list if unavailable. This is
     the full page order (including pages that have no strokes), unlike
     ``_get_ordered_rm_files`` which is compacted to pages that do.
+
+    Deletion tombstones are excluded: the firmware leaves deleted pages in
+    ``cPages.pages`` with a ``deleted`` register set (see
+    ``_is_page_deleted``) while hiding them in the UI, so the returned list is
+    the document's visible page order — the authoritative basis for page
+    counts, page addressing, and export page ranges.
     """
     for content_file in tmpdir_path.glob("*.content"):
         try:
             data = json.loads(content_file.read_text())
             if "cPages" in data and "pages" in data["cPages"]:
-                return [p.get("id") for p in data["cPages"]["pages"] if p.get("id")]
+                entries = _visible_cpages_entries(data["cPages"]["pages"])
+                return [
+                    page_id
+                    for entry in entries
+                    if (page_id := entry.get("id"))
+                ]
             if isinstance(data.get("pages"), list):
                 return [p for p in data["pages"] if isinstance(p, str)]
         except Exception:
@@ -1458,11 +1475,18 @@ def document_zip_has_pdf_underlay(zip_path: Path) -> bool:
         return False
 
 
-def _read_cpages_entries(tmpdir_path: Path) -> List[Dict[str, Any]]:
+def _read_cpages_entries(
+    tmpdir_path: Path, include_deleted: bool = False
+) -> List[Dict[str, Any]]:
     """Read cPages.pages entries from the .content metadata file.
 
     Args:
         tmpdir_path: Path to the extracted document directory
+        include_deleted: When True, return the raw entry list including
+            firmware deletion tombstones (see ``_is_page_deleted``). Pages
+            tombstoned on the tablet stay in ``cPages.pages`` while the UI
+            hides them, so callers that count or address pages by position
+            should keep the default, which matches what the tablet shows.
 
     Returns:
         List of cPages page entries, or empty list if not found
@@ -1473,10 +1497,41 @@ def _read_cpages_entries(tmpdir_path: Path) -> List[Dict[str, Any]]:
     try:
         data = json.loads(content_file.read_text())
         if "cPages" in data and "pages" in data["cPages"]:
-            return data["cPages"]["pages"]
+            entries = data["cPages"]["pages"]
+            return entries if include_deleted else _visible_cpages_entries(entries)
     except Exception:
         pass
     return []
+
+
+def _is_page_deleted(entry: Dict[str, Any]) -> bool:
+    """Whether a cPages entry is a deletion tombstone (firmware-marked).
+
+    reMarkable firmware never removes entries from ``cPages.pages`` when a
+    page is deleted; it writes a last-writer-wins ``deleted`` register into
+    the entry (e.g. ``{"timestamp": "3:1", "value": 1}``) and hides it in the
+    UI. The entry — and its position in the array — persists indefinitely, so
+    raw array length overcounts documents whose pages were ever deleted.
+
+    Treats the register's ``value`` as truthy (deleted) or falsy (kept, e.g.
+    an undo writing ``value: 0``); a missing register means the page was
+    never deleted.
+    """
+    deleted = entry.get("deleted")
+    if deleted is None:
+        return False
+    if isinstance(deleted, dict):
+        return bool(deleted.get("value"))
+    return bool(deleted)
+
+
+def _visible_cpages_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filter deletion tombstones out of a cPages.pages entry list.
+
+    This is the authoritative definition of the document's visible pages:
+    the tablet UI shows exactly these entries, in this order.
+    """
+    return [e for e in entries if not _is_page_deleted(e)]
 
 
 def _pdf_page_index_for_cpages_entry(entry: Dict[str, Any]) -> Optional[int]:
@@ -1540,7 +1595,9 @@ def _resolve_pdf_page_index(tmpdir_path: Path, page: int) -> Optional[int]:
     v1->v2 migrated document may still carry — its stale, order-shifted indices
     could composite the wrong PDF page under a user-added page.
     """
-    # formatVersion 2 (cPages) — authoritative when present
+    # formatVersion 2 (cPages) — authoritative when present. Deleted pages
+    # are excluded so ``page`` addresses the visible page sequence, matching
+    # the tablet UI (see _read_cpages_entries).
     entries = _read_cpages_entries(tmpdir_path)
     if entries:
         if 1 <= page <= len(entries):
@@ -1917,12 +1974,15 @@ def get_document_page_count(zip_path: Path) -> int:
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(tmpdir_path)
 
-        # Try .content metadata first — it's the authoritative page list
+        # Try .content metadata first — it's the authoritative page list.
+        # Deletion tombstones are excluded: firmware leaves deleted pages in
+        # cPages.pages (with a "deleted" register set) while hiding them in
+        # the UI, so the raw array length overcounts (see _is_page_deleted).
         for content_file in tmpdir_path.glob("*.content"):
             try:
                 data = json.loads(content_file.read_text())
                 if "cPages" in data and "pages" in data["cPages"]:
-                    return len(data["cPages"]["pages"])
+                    return len(_visible_cpages_entries(data["cPages"]["pages"]))
                 if "pages" in data and isinstance(data["pages"], list):
                     return len(data["pages"])
             except Exception:
@@ -2054,14 +2114,20 @@ def extract_text_from_document_zip(
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(tmpdir_path)
 
-        # Get page order from .content file
+        # Get page order from .content file. Deletion tombstones are excluded
+        # so counts and page addressing match the tablet UI (see
+        # _is_page_deleted) — firmware leaves deleted pages in cPages.pages.
         page_order = []
         for content_file in tmpdir_path.glob("*.content"):
             try:
                 data = json.loads(content_file.read_text())
                 # New format: cPages.pages array
                 if "cPages" in data and "pages" in data["cPages"]:
-                    page_order = [p["id"] for p in data["cPages"]["pages"]]
+                    page_order = [
+                        page_id
+                        for entry in _visible_cpages_entries(data["cPages"]["pages"])
+                        if (page_id := entry.get("id"))
+                    ]
                 # Fallback: pages array directly
                 elif "pages" in data and isinstance(data["pages"], list):
                     page_order = data["pages"]
