@@ -687,10 +687,21 @@ def _page_ids_from_content(content_data: dict) -> list:
 
     Handles both the modern ``cPages.pages[].id`` schema (native notebooks) and
     the legacy flat ``pages`` UUID list (PDF/EPUB-backed documents).
+
+    Firmware deletion tombstones are excluded: deleted pages stay in
+    ``cPages.pages`` (with a ``deleted`` register set) while the tablet hides
+    them, so the returned ids are the visible page sequence — the same
+    addressing the read/image/export tools use.
     """
     cpages = content_data.get("cPages")
     if isinstance(cpages, dict) and isinstance(cpages.get("pages"), list):
-        ids = [p.get("id") for p in cpages["pages"] if isinstance(p, dict) and p.get("id")]
+        from remarkable_mcp.extract import _visible_cpages_entries
+
+        ids = [
+            p.get("id")
+            for p in _visible_cpages_entries(cpages["pages"])
+            if isinstance(p, dict) and p.get("id")
+        ]
         if ids:
             return ids
     pages = content_data.get("pages")
