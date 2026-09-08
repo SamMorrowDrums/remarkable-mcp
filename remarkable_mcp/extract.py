@@ -1511,6 +1511,9 @@ def _is_page_deleted(entry: Dict[str, Any]) -> bool:
     an undo writing ``value: 0``); a missing register means the page was
     never deleted.
     """
+    if not isinstance(entry, dict):
+        return False
+
     deleted = entry.get("deleted")
     if deleted is None:
         return False
