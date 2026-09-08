@@ -1282,11 +1282,7 @@ def _get_page_order(tmpdir_path: Path) -> List[str]:
             data = json.loads(content_file.read_text())
             if "cPages" in data and "pages" in data["cPages"]:
                 entries = _visible_cpages_entries(data["cPages"]["pages"])
-                return [
-                    page_id
-                    for entry in entries
-                    if (page_id := entry.get("id"))
-                ]
+                return [page_id for entry in entries if (page_id := entry.get("id"))]
             if isinstance(data.get("pages"), list):
                 return [p for p in data["pages"] if isinstance(p, str)]
         except Exception:
@@ -1475,9 +1471,7 @@ def document_zip_has_pdf_underlay(zip_path: Path) -> bool:
         return False
 
 
-def _read_cpages_entries(
-    tmpdir_path: Path, include_deleted: bool = False
-) -> List[Dict[str, Any]]:
+def _read_cpages_entries(tmpdir_path: Path, include_deleted: bool = False) -> List[Dict[str, Any]]:
     """Read cPages.pages entries from the .content metadata file.
 
     Args:

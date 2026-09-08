@@ -219,11 +219,7 @@ def test_page_ids_from_content_excludes_tombstones():
     """write_tools page addressing sees the visible sequence."""
     from remarkable_mcp.write_tools import _page_ids_from_content
 
-    content = {
-        "cPages": {
-            "pages": [_entry("p1"), _entry("d1", deleted=True), _entry("p2")]
-        }
-    }
+    content = {"cPages": {"pages": [_entry("p1"), _entry("d1", deleted=True), _entry("p2")]}}
     assert _page_ids_from_content(content) == ["p1", "p2"]
 
 
@@ -232,9 +228,7 @@ def test_append_page_reports_visible_count_with_tombstones():
     from remarkable_mcp.notebooks import append_page_to_content
 
     content = {
-        "cPages": {
-            "pages": [_entry("p1"), _entry("p2"), _entry("d1", deleted=True)]
-        },
+        "cPages": {"pages": [_entry("p1"), _entry("p2"), _entry("d1", deleted=True)]},
         "pageCount": 2,
     }
     updated = append_page_to_content(content, "new-id")
