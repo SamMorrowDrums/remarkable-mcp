@@ -203,7 +203,7 @@ def append_page_to_content(content_data: dict, new_page_id: str) -> dict:
     # pageCount tracking visible pages, as the tablet itself does.
     from remarkable_mcp.extract import _is_page_deleted
 
-    visible_total = len([p for p in pages if not _is_page_deleted(p)])
+    visible_total = sum(1 for p in pages if isinstance(p, dict) and not _is_page_deleted(p))
     if visible_total != len(pages):
         content_data["pageCount"] = visible_total
         total = visible_total
