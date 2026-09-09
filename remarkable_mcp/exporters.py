@@ -110,6 +110,11 @@ def parse_page_selection(spec: str | int) -> tuple[int, ...]:
             if page < 1:
                 raise ValueError(f"Page numbers must be 1-based, got {token!r}.")
             selected.add(page)
+            if len(selected) > _MAX_PAGE_SELECTIONS:
+                raise ValueError(
+                    f"Page selection refers to more than {_MAX_PAGE_SELECTIONS} pages; "
+                    f"the maximum is {_MAX_PAGE_SELECTIONS}."
+                )
             continue
         range_match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", token)
         if range_match:
@@ -118,7 +123,20 @@ def parse_page_selection(spec: str | int) -> tuple[int, ...]:
                 raise ValueError(f"Page numbers must be 1-based, got {token!r}.")
             if start > end:
                 raise ValueError(f"Page range must be ascending, got {token!r}.")
+            range_length = end - start + 1
+            if range_length > _MAX_PAGE_SELECTIONS:
+                # Range elements are distinct, so the selection union can never
+                # be smaller than the range itself. Reject without expanding.
+                raise ValueError(
+                    f"Page range {token!r} refers to {range_length} pages; "
+                    f"the maximum is {_MAX_PAGE_SELECTIONS}."
+                )
             selected.update(range(start, end + 1))
+            if len(selected) > _MAX_PAGE_SELECTIONS:
+                raise ValueError(
+                    f"Page selection refers to more than {_MAX_PAGE_SELECTIONS} pages; "
+                    f"the maximum is {_MAX_PAGE_SELECTIONS}."
+                )
             continue
         raise ValueError(
             f"Invalid page selection item {token!r}; use a page number such as '5' "
@@ -227,7 +245,8 @@ def write_rendered_pdf_export(
     expected_page = 1
     previous_size = (445.0, 594.0)
     partial = False
-    page_subset = False
+    seen_physical: list[int] = []
+    has_physical_markers = False
 
     try:
         for rendered in pages:
@@ -241,8 +260,10 @@ def write_rendered_pdf_export(
             physical_page = (
                 rendered.physical_page if rendered.physical_page is not None else rendered.page
             )
+            if rendered.physical_page is not None:
+                has_physical_markers = True
+            seen_physical.append(physical_page)
             if physical_page != rendered.page:
-                page_subset = True
                 location = f"physical page {physical_page}, export page {rendered.page}"
             else:
                 location = f"Page {physical_page}"
@@ -309,15 +330,19 @@ def write_rendered_pdf_export(
         page_count = len(output)
         if page_count == 0:
             raise ValueError("Document has no physical pages to export")
-        if (
-            not page_subset
-            and metadata.page_count is not None
-            and page_count != metadata.page_count
-        ):
-            raise ValueError(
-                f"Export produced {page_count} pages but metadata declares "
-                f"{metadata.page_count} physical pages"
-            )
+        if metadata.page_count is not None and page_count != metadata.page_count:
+            # A page-subset export legitimately differs from the declared page
+            # count. Subsets are identified structurally: a marked stream whose
+            # physical pages do not cover the full 1..N range. Marker-less
+            # streams keep the strict invariant so dropped pages cannot pass
+            # unnoticed.
+            covers_full_range = seen_physical == list(range(1, metadata.page_count + 1))
+            is_page_subset = has_physical_markers and not covers_full_range
+            if not is_page_subset:
+                raise ValueError(
+                    f"Export produced {page_count} pages but metadata declares "
+                    f"{metadata.page_count} physical pages"
+                )
 
         output.set_metadata(_pdf_metadata({}, metadata))
         output.save(str(destination), garbage=3, deflate=True)

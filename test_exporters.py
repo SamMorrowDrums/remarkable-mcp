@@ -22,6 +22,7 @@ from remarkable_mcp.exporters import (
     parse_page_selection,
     render_archive_pages,
     selection_label,
+    write_archive_pdf_export,
     write_markdown_export,
     write_native_pdf_export,
     write_rendered_pdf_export,
@@ -188,6 +189,57 @@ class TestPdfExporters:
 
         assert result.status == "complete"
         assert result.pages == 1
+
+    def test_leading_page_subset_skips_page_count_invariant(self, tmp_path):
+        # Regression: a subset starting at physical page 1 renumbers its export
+        # ordinals identically, so subset detection cannot rely on ordinal
+        # differences alone.
+        destination = tmp_path / "leading.pdf"
+        result = write_rendered_pdf_export(
+            destination,
+            _metadata(pages=3),
+            [RenderedPage(page=1, image=_png("white"), physical_page=1)],
+        )
+
+        assert result.status == "complete"
+        assert result.pages == 1
+
+    def test_leading_range_subset_skips_page_count_invariant(self, tmp_path):
+        destination = tmp_path / "leading-range.pdf"
+        result = write_rendered_pdf_export(
+            destination,
+            _metadata(pages=5),
+            [
+                RenderedPage(page=1, image=_png("white"), physical_page=1),
+                RenderedPage(page=2, image=_png("white"), physical_page=2),
+            ],
+        )
+
+        assert result.status == "complete"
+        assert result.pages == 2
+
+    def test_archive_selection_covering_all_pages_passes_invariant(self, tmp_path):
+        archive_path = _archive(
+            tmp_path / "notebook.zip",
+            {"fileType": "notebook", "pages": ["p1", "p2", "p3"]},
+        )
+
+        def render(root, page, background_color):
+            return _png("white"), (1404.0, 1872.0)
+
+        with patch(
+            "remarkable_mcp.exporters.render_page_full_page_from_extracted_document",
+            side_effect=render,
+        ):
+            result = write_archive_pdf_export(
+                archive_path,
+                tmp_path / "full.pdf",
+                _metadata(pages=3),
+                pages=(1, 2, 3),
+            )
+
+        assert result.status == "complete"
+        assert result.pages == 3
 
     def test_complete_export_still_enforces_page_count_invariant(self, tmp_path):
         with pytest.raises(ValueError, match="metadata declares"):
@@ -392,6 +444,23 @@ class TestPageSelectionParsing:
     def test_huge_range_is_rejected(self):
         with pytest.raises(ValueError, match="maximum"):
             parse_page_selection("1-1000000")
+
+    def test_huge_range_is_rejected_before_expansion(self):
+        # A billion-page range must be rejected by the cap check on the range
+        # bounds, not by materializing the selection first.
+        with pytest.raises(ValueError, match="the maximum is 64"):
+            parse_page_selection("1-1000000000")
+
+    def test_cap_applies_across_accumulated_tokens(self):
+        with pytest.raises(ValueError, match="the maximum is 64"):
+            parse_page_selection("1-32,33-64,65")
+
+    def test_cap_applies_to_single_range_beyond_limit(self):
+        with pytest.raises(ValueError, match="the maximum is 64"):
+            parse_page_selection("1,2,70-200")
+
+    def test_selection_at_exact_cap_is_accepted(self):
+        assert len(parse_page_selection("1-64")) == 64
 
     def test_bool_is_rejected(self):
         with pytest.raises(ValueError):
