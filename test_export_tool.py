@@ -395,3 +395,175 @@ class TestExportTransportFixtures:
         assert data["representation"] == "document_archive"
         resource = await mcp.read_resource(link.uri)
         assert "Cloud typed text" in resource[0].content
+
+
+class TestExportPageSelection:
+    @pytest.mark.asyncio
+    async def test_tool_schema_declares_optional_page_parameter(self):
+        tools = await mcp.list_tools()
+        tool = next(item for item in tools if item.name == "remarkable_export")
+        assert "page" in tool.input_schema["properties"]
+
+    @pytest.mark.asyncio
+    async def test_single_page_export_from_native_pdf(self):
+        import remarkable_mcp.tools as tool_module
+
+        document = _document("Contract", "pages-single-id")
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        client.download.return_value = _pdf_bytes(3)
+
+        with (
+            patch.object(tool_module, "get_rmapi", return_value=client),
+            patch.object(tool_module, "get_file_type", return_value="pdf"),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_export",
+                {"document": document.VissibleName, "output_format": "pdf", "page": 2},
+            )
+
+        data = _json_result(result)
+        assert "_error" not in data, data
+        link = _resource_link(result)
+        assert data["pages"] == 1
+        assert data["selected_pages"] == [2]
+        assert data["filename"] == "Contract pages 2.pdf"
+        assert "Selected page 2 of the source document." in data["_hint"]
+
+        resource = await mcp.read_resource(link.uri)
+        with fitz.open(stream=resource[0].content, filetype="pdf") as exported:
+            assert [page.get_text().strip() for page in exported] == ["source page 2"]
+
+    @pytest.mark.asyncio
+    async def test_page_list_exports_pages_in_device_order(self):
+        import remarkable_mcp.tools as tool_module
+
+        document = _document("Contract", "pages-list-id")
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        client.download.return_value = _pdf_bytes(3)
+
+        with (
+            patch.object(tool_module, "get_rmapi", return_value=client),
+            patch.object(tool_module, "get_file_type", return_value="pdf"),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_export",
+                {"document": document.VissibleName, "output_format": "pdf", "page": "1,3"},
+            )
+
+        data = _json_result(result)
+        assert "_error" not in data, data
+        assert data["pages"] == 2
+        assert data["selected_pages"] == [1, 3]
+        assert data["filename"] == "Contract pages 1_3.pdf"
+        assert "Selected pages 1, 3 of the source document." in data["_hint"]
+
+        resource = await mcp.read_resource(_resource_link(result).uri)
+        with fitz.open(stream=resource[0].content, filetype="pdf") as exported:
+            assert [page.get_text().strip() for page in exported] == [
+                "source page 1",
+                "source page 3",
+            ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("pdf_mode", ["merged", "annotations"])
+    async def test_single_page_export_from_document_archive(self, pdf_mode):
+        import remarkable_mcp.tools as tool_module
+        from remarkable_mcp import notebooks
+
+        document = _document("Archive Notebook", "pages-archive-id")
+        page_ids = [f"page-{number}" for number in range(1, 4)]
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            archive.writestr(
+                f"{document.ID}.content",
+                json.dumps(
+                    {
+                        "fileType": "notebook",
+                        "cPages": {"pages": [{"id": page_id} for page_id in page_ids]},
+                    }
+                ),
+            )
+            for number, page_id in enumerate(page_ids, start=1):
+                archive.writestr(f"{page_id}.rm", notebooks.page_rm_bytes(f"ink page {number}"))
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        client.download.return_value = output.getvalue()
+
+        with (
+            patch.object(tool_module, "get_rmapi", return_value=client),
+            patch.object(tool_module, "get_file_type", return_value="notebook"),
+            patch.object(tool_module, "download_raw_file", return_value=None),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_export",
+                {
+                    "document": document.VissibleName,
+                    "output_format": "pdf",
+                    "pdf_mode": pdf_mode,
+                    "page": "3",
+                },
+            )
+
+        data = _json_result(result)
+        assert "_error" not in data, data
+        assert data["pages"] == 1
+        assert data["selected_pages"] == [3]
+        assert data["representation"] == "document_archive"
+
+        resource = await mcp.read_resource(_resource_link(result).uri)
+        with fitz.open(stream=resource[0].content, filetype="pdf") as exported:
+            assert len(exported) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"page": "5-2"},
+            {"page": "0"},
+            {"page": "abc"},
+            {"page": ""},
+        ],
+    )
+    async def test_malformed_page_selection_is_rejected(self, arguments):
+        result = await mcp.call_tool(
+            "remarkable_export",
+            {"document": "Anything", "output_format": "pdf", **arguments},
+        )
+        data = _json_result(result)
+        assert data["_error"]["type"] == "invalid_page_selection"
+        assert "1-based" in data["_error"]["suggestion"]
+
+    @pytest.mark.asyncio
+    async def test_out_of_range_page_selection_is_rejected(self):
+        import remarkable_mcp.tools as tool_module
+
+        document = _document("Short Document")
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        client.download.return_value = _pdf_bytes(2)
+
+        with (
+            patch.object(tool_module, "get_rmapi", return_value=client),
+            patch.object(tool_module, "get_file_type", return_value="pdf"),
+        ):
+            result = await mcp.call_tool(
+                "remarkable_export",
+                {"document": document.VissibleName, "output_format": "pdf", "page": "9"},
+            )
+
+        data = _json_result(result)
+        assert data["_error"]["type"] == "page_out_of_range"
+        assert "2 physical pages" in data["_error"]["message"]
+        assert not any(isinstance(content, types.ResourceLink) for content in result.content)
+
+    @pytest.mark.asyncio
+    async def test_page_selection_is_rejected_for_markdown(self):
+        result = await mcp.call_tool(
+            "remarkable_export",
+            {"document": "Anything", "output_format": "markdown", "page": "1"},
+        )
+        data = _json_result(result)
+        assert data["_error"]["type"] == "invalid_export_options"
+        assert "PDF" in data["_error"]["message"]

@@ -448,6 +448,7 @@ used when configured; otherwise OCR runs locally with Tesseract.
 | `output_format` | `"pdf"` \| `"markdown"` | `"pdf"` | Export format |
 | `pdf_mode` | `"merged"` \| `"annotations"` | `"merged"` | PDF-only rendering mode |
 | `include_ocr` | bool | `False` | Run the existing OCR path for Markdown |
+| `page` | int \| string | `null` | PDF-only page selection: one 1-based page (e.g. `5`) or a comma-separated list of pages and ascending ranges (e.g. `"5-9,10-14"`, max 64 page references) |
 
 ### Delivery and lifecycle
 
@@ -477,6 +478,10 @@ available when the server runs with `--read-only`.
   ordinal and reported with `status: "partial"`; pages are never silently skipped.
 - EPUB source pages use a transport-native PDF when one is available. Otherwise
   available annotation pages are exported with an explicit partial warning.
+- `page` restricts a PDF export to the selected physical pages. Selected pages
+  are renumbered from 1 in the exported file and remain in ascending device
+  order. Out-of-range or malformed selections return structured errors
+  (`page_out_of_range`, `invalid_page_selection`) instead of an export.
 
 ### Markdown behavior
 
@@ -507,6 +512,12 @@ remarkable_export("Research Paper", pdf_mode="annotations")
 
 # Markdown with handwriting OCR
 remarkable_export("Journal", output_format="markdown", include_ocr=True)
+
+# Single page
+remarkable_export("Contract", page=5)
+
+# Comma-separated pages and ranges
+remarkable_export("Lecture Notes", page="5-9,10-14")
 ```
 
 ### Response
@@ -529,6 +540,11 @@ remarkable_export("Journal", output_format="markdown", include_ocr=True)
   "_hint": "Temporary PDF export ready as an MCP resource..."
 }
 ```
+
+With a `page` selection, the response additionally reports the selected
+physical pages (e.g. `"selected_pages": [5, 6, 7]`), the filename carries a
+`pages <selection>` suffix (e.g. `Meeting Notes pages 5_7.pdf`), and `_hint`
+states which pages were selected.
 
 Fetch and save the accompanying `ResourceLink` before it expires when durable
 storage is required.
