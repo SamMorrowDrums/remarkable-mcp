@@ -666,7 +666,7 @@ Or set the environment variable:
 
 | Tool | Description |
 |------|-------------|
-| `remarkable_upload(file_path, parent_folder, document_name, defer_restart)` | Upload a PDF or EPUB file (cloud, SSH, and USB web; USB web preserves the name but ignores `parent_folder`) |
+| `remarkable_upload(file_path, parent_folder, document_name, defer_restart, orientation)` | Upload a PDF or EPUB file (cloud, SSH, and USB web; USB web preserves the name but ignores `parent_folder` and `orientation`). `orientation="landscape"` makes the tablet open wide pages in landscape |
 | `remarkable_markdown_to_pdf(markdown, document_name, parent_folder, defer_restart)` | Render Markdown as a paginated PDF and upload it (cloud, SSH, and USB web) |
 | `remarkable_mkdir(folder_name, parent, defer_restart)` | Create a new folder (cloud and SSH) |
 | `remarkable_move(document, dest_folder, defer_restart)` | Move a document or folder (cloud and SSH) |
@@ -693,6 +693,9 @@ Or set the environment variable:
 ```python
 # Upload a PDF
 remarkable_upload("paper.pdf", parent_folder="/Research")
+
+# Upload a wide PDF so the tablet opens it in landscape
+remarkable_upload("slides.pdf", orientation="landscape")
 
 # Render Markdown and upload the PDF without creating a local file
 remarkable_markdown_to_pdf(
