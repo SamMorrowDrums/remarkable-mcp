@@ -3393,6 +3393,164 @@ class TestWriteTools:
                     mcp._tool_manager._tools.pop(name, None)
 
     @pytest.mark.asyncio
+    async def test_upload_passes_orientation_to_cloud(self):
+        """orientation reaches upload_document; when omitted it stays portrait."""
+        import tempfile
+
+        from remarkable_mcp.write_tools import register_write_tools
+
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env.pop("REMARKABLE_USE_USB_WEB", None)
+        env.pop("REMARKABLE_READ_ONLY", None)
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(b"%PDF-1.4 test")
+                pdf_path = tmp.name
+            try:
+                mock_client = Mock(spec=["get_meta_items", "upload_document"])
+                mock_client.get_meta_items.return_value = []
+                mock_client.upload_document.return_value = Mock(id="new-doc-id")
+
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=mock_client):
+                    await _call_tool(
+                        "remarkable_upload", {"file_path": pdf_path, "orientation": "landscape"}
+                    )
+                    await _call_tool("remarkable_upload", {"file_path": pdf_path})
+                orientations = [
+                    c.kwargs.get("orientation") for c in mock_client.upload_document.call_args_list
+                ]
+                assert orientations == ["landscape", "portrait"]
+            finally:
+                os.unlink(pdf_path)
+                for name in [
+                    "remarkable_upload",
+                    "remarkable_mkdir",
+                    "remarkable_move",
+                    "remarkable_rename",
+                    "remarkable_delete",
+                ]:
+                    mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_unknown_orientation(self):
+        """An unsupported orientation is refused before anything is uploaded."""
+        import tempfile
+
+        from remarkable_mcp.write_tools import register_write_tools
+
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env.pop("REMARKABLE_USE_USB_WEB", None)
+        env.pop("REMARKABLE_READ_ONLY", None)
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(b"%PDF-1.4 test")
+                pdf_path = tmp.name
+            try:
+                mock_client = Mock(spec=["get_meta_items", "upload_document"])
+                mock_client.get_meta_items.return_value = []
+
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=mock_client):
+                    result = await _call_tool(
+                        "remarkable_upload", {"file_path": pdf_path, "orientation": "sideways"}
+                    )
+                data = json.loads(result.content[0].text)
+                assert data["_error"]["type"] == "invalid_orientation"
+                mock_client.upload_document.assert_not_called()
+            finally:
+                os.unlink(pdf_path)
+                for name in [
+                    "remarkable_upload",
+                    "remarkable_mkdir",
+                    "remarkable_move",
+                    "remarkable_rename",
+                    "remarkable_delete",
+                ]:
+                    mcp._tool_manager._tools.pop(name, None)
+
+    def test_cloud_upload_document_writes_orientation(self):
+        """The .content blob carries the requested orientation, portrait by default."""
+        from remarkable_mcp.sync import CloudWriteError, RemarkableClient
+
+        def content_json(**kwargs):
+            client = RemarkableClient(user_token="user-token")
+            blobs = {}
+
+            def capture(data, filename):
+                blobs[filename] = data
+                return {"filename": filename}
+
+            with (
+                patch.object(client, "_page_layout", return_value=(1, ["page-1"])),
+                patch.object(client, "_upload_file_blob", side_effect=capture),
+                patch.object(client, "_upload_doc_index", return_value={"hash": "doc-hash"}),
+                patch.object(client, "_sync_root"),
+            ):
+                client.upload_document(b"%PDF-1.4 test", "Sheet", "pdf", **kwargs)
+            return next(json.loads(v) for k, v in blobs.items() if k.endswith(".content"))
+
+        assert content_json()["orientation"] == "portrait"
+        assert content_json(orientation="landscape")["orientation"] == "landscape"
+        with pytest.raises(CloudWriteError):
+            RemarkableClient(user_token="user-token").upload_document(
+                b"%PDF-1.4 test", "Sheet", "pdf", orientation="sideways"
+            )
+
+    @pytest.mark.asyncio
+    async def test_upload_writes_orientation_to_ssh_content_file(self, tmp_path):
+        """SSH uploads add orientation to .content only when one is requested."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
+            register_write_tools()
+
+        pdf_path = tmp_path / "sheet.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4 test")
+        try:
+            mock_client = Mock(
+                spec=[
+                    "get_meta_items",
+                    "_ssh_command",
+                    "mark_operation_dirty",
+                    "_documents",
+                    "_documents_by_id",
+                    "host",
+                    "user",
+                    "port",
+                    "password",
+                ]
+            )
+            mock_client.get_meta_items.return_value = []
+            with (
+                patch("remarkable_mcp.write_tools.get_rmapi", return_value=mock_client),
+                patch("remarkable_mcp.write_tools._upload_file_bytes"),
+                patch("remarkable_mcp.write_tools._write_metadata"),
+                patch("remarkable_mcp.write_tools._write_content_file") as mock_content,
+                patch("remarkable_mcp.write_tools._maybe_restart_xochitl", return_value=True),
+                patch("remarkable_mcp.write_tools._update_deferred_ssh_cache"),
+                patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            ):
+                landscape = await _call_tool(
+                    "remarkable_upload", {"file_path": str(pdf_path), "orientation": "landscape"}
+                )
+                default = await _call_tool("remarkable_upload", {"file_path": str(pdf_path)})
+
+            assert json.loads(landscape.content[0].text)["uploaded"] is True
+            assert json.loads(default.content[0].text)["uploaded"] is True
+            written = [c.args[2] for c in mock_content.call_args_list]
+            assert written == [{"fileType": "pdf", "orientation": "landscape"}, {"fileType": "pdf"}]
+        finally:
+            for name in [
+                "remarkable_upload",
+                "remarkable_mkdir",
+                "remarkable_move",
+                "remarkable_rename",
+                "remarkable_delete",
+            ]:
+                mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
     async def test_mkdir_not_registered_in_usb_web_mode(self):
         """SSH-only write tools must not be exposed in USB web mode (upload-only)."""
         from remarkable_mcp.write_tools import register_write_tools

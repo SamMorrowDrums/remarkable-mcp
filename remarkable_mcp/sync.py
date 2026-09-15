@@ -1020,6 +1020,7 @@ class RemarkableClient:
         name: str,
         file_type: str,
         parent_id: str = "",
+        orientation: str = "portrait",
     ) -> Document:
         """Upload a PDF or EPUB document to the cloud and return it.
 
@@ -1030,6 +1031,10 @@ class RemarkableClient:
         ext = file_type.lower().lstrip(".")
         if ext not in ("pdf", "epub"):
             raise CloudWriteError(f"Unsupported upload type '{ext}'; use pdf or epub.")
+        if orientation not in ("portrait", "landscape"):
+            raise CloudWriteError(
+                f"Unsupported orientation '{orientation}'; use portrait or landscape."
+            )
 
         doc_id = str(uuid.uuid4())
         now = self._now_ms()
@@ -1045,7 +1050,7 @@ class RemarkableClient:
             "formatVersion": 1,
             "lineHeight": -1,
             "margins": 100,
-            "orientation": "portrait",
+            "orientation": orientation,
             "pageCount": page_count,
             "pageTags": [],
             "pages": page_uuids,
