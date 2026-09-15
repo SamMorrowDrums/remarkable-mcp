@@ -1572,6 +1572,7 @@ def register_write_tools():
         parent_folder: str = "/",
         document_name: Optional[str] = None,
         defer_restart: bool = False,
+        orientation: Optional[str] = None,
     ) -> str:
         """
         <usecase>Upload a PDF or EPUB file to the reMarkable tablet.</usecase>
@@ -1599,11 +1600,15 @@ def register_write_tools():
           link, so deferring turns N restarts (and N races) into one. The
           response sets "refresh_pending": true while a refresh is owed. Ignored
           in cloud/USB modes (no xochitl).
+        - orientation: "portrait" (default) or "landscape" — how the tablet opens
+          the document, e.g. landscape for a wide PDF page. Honored in cloud and
+          SSH modes; the USB web interface cannot set it.
         </parameters>
         <examples>
         - remarkable_upload("/tmp/paper.pdf")
         - remarkable_upload("/tmp/book.epub", parent_folder="/Books")
         - remarkable_upload("/tmp/report.pdf", document_name="Q4 Report")
+        - remarkable_upload("/tmp/slides.pdf", orientation="landscape")
         - # batch import: defer every upload, refresh once at the end
           remarkable_upload("/tmp/a.pdf", defer_restart=True)
           remarkable_upload("/tmp/b.pdf", defer_restart=True)
@@ -1633,6 +1638,13 @@ def register_write_tools():
                         suggestion="Only PDF and EPUB files can be uploaded to reMarkable.",
                     )
 
+                if orientation not in (None, "portrait", "landscape"):
+                    return make_error(
+                        error_type="invalid_orientation",
+                        message=f"Unsupported orientation: '{orientation}'",
+                        suggestion="Use 'portrait' or 'landscape'.",
+                    )
+
                 # Cloud mode: upload via the sync v3/v4 blob protocol
                 if _is_cloud_mode():
                     client = get_rmapi()
@@ -1651,7 +1663,9 @@ def register_write_tools():
                     name = document_name or os.path.splitext(os.path.basename(file_path))[0]
                     with open(file_path, "rb") as f:
                         data = f.read()
-                    doc = client.upload_document(data, name, ext, parent_id)
+                    doc = client.upload_document(
+                        data, name, ext, parent_id, orientation=orientation or "portrait"
+                    )
                     return make_response(
                         {
                             "uploaded": True,
@@ -1686,6 +1700,11 @@ def register_write_tools():
                             "USB web ignores parent_folder. The tablet web "
                             "service chooses the destination folder. Use SSH or "
                             "cloud mode for explicit folder placement."
+                        )
+                    if orientation:
+                        result["orientation_note"] = (
+                            "USB web cannot set orientation; the tablet opens the "
+                            "document in its default orientation."
                         )
                     return make_response(
                         result,
@@ -1737,6 +1756,8 @@ def register_write_tools():
                 content_data = {
                     "fileType": ext,
                 }
+                if orientation:
+                    content_data["orientation"] = orientation
                 _write_content_file(ssh_client, doc_uuid, content_data)
 
                 # Create the document directory (required by xochitl)
