@@ -245,6 +245,21 @@ class TestHelperFunctions:
         path = get_item_path(child_doc, items_by_id)
         assert path == "/Test Folder/Child Doc"
 
+    def test_get_item_path_trashed_document(self):
+        """A trashed document must not look like a root-level document."""
+        doc = Mock(VissibleName="Morning Pages", ID="doc-trash", Parent="trash", is_folder=False)
+
+        path = get_item_path(doc, {doc.ID: doc})
+        assert path == "/trash/Morning Pages"
+
+    def test_get_item_path_inside_trashed_folder(self):
+        """Items nested in a trashed folder are reported under /trash."""
+        folder = Mock(VissibleName="Old Work", ID="folder-trash", Parent="trash", is_folder=True)
+        doc = Mock(VissibleName="Notes", ID="doc-nested", Parent=folder.ID, is_folder=False)
+
+        path = get_item_path(doc, {folder.ID: folder, doc.ID: doc})
+        assert path == "/trash/Old Work/Notes"
+
 
 # =============================================================================
 # Test Text Extraction
