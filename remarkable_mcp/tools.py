@@ -1591,10 +1591,10 @@ async def remarkable_status() -> str:
 
         root = _get_root_path()
 
-        # Count documents (not folders, filtered by root)
+        # Count documents (not folders or trashed, filtered by root)
         doc_count = 0
         for item in collection:
-            if item.is_folder:
+            if item.is_folder or _is_cloud_archived(item, items_by_id):
                 continue
             item_path = get_item_path(item, items_by_id)
             if _is_within_root(item_path, root):

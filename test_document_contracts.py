@@ -191,6 +191,26 @@ class TestTrashedAncestorFolders:
         assert names == ["Live Notes"]
 
 
+class TestStatusDocumentCount:
+    @pytest.mark.asyncio
+    async def test_status_count_excludes_trashed_documents(self):
+        import remarkable_mcp.tools as tools
+
+        collection = [
+            _document("Trashed", "trashed", parent="trash"),
+            _folder("Old Work", "old-work", parent="trash"),
+            _document("Nested", "nested", parent="old-work"),
+            _document("Live", "live"),
+        ]
+        client = Mock()
+        client.get_meta_items.return_value = collection
+
+        with patch.object(tools, "get_rmapi", return_value=client):
+            result = await _call_tool("remarkable_status", {})
+
+        assert _response_json(result)["document_count"] == 1
+
+
 class TestLiveDocumentLookup:
     def test_live_namesake_wins_and_trash_only_is_hidden(self):
         from remarkable_mcp.api import get_items_by_id
