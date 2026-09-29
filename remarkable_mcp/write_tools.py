@@ -788,11 +788,14 @@ def _resolve_parent_id(parent_path: str, items_by_id: dict, collection: list) ->
     if not parent_path or parent_path == "/":
         return ""
 
+    from remarkable_mcp.tools import _is_cloud_archived
+
     # Normalize
     parent_path = parent_path.strip("/")
 
     for item in collection:
-        if not item.is_folder:
+        # Never write into a trashed folder.
+        if not item.is_folder or _is_cloud_archived(item, items_by_id):
             continue
         item_path = get_item_path(item, items_by_id).strip("/")
         if item_path.lower() == parent_path.lower():
@@ -812,13 +815,23 @@ def _resolve_document(
         items_by_id: Dict mapping item IDs to items
         folders_only: If True, only match folders
 
+    Live items win. A trashed item is only matched by its explicit
+    ``/trash/...`` path (e.g. to permanently delete it over SSH), never by a
+    bare name that a live item could also carry.
+
     Returns:
         The matching item, or None
     """
+    from remarkable_mcp.tools import _is_cloud_archived
+
     target = name_or_path.lower().strip("/")
 
+    trashed = []
     for item in collection:
         if folders_only and not item.is_folder:
+            continue
+        if _is_cloud_archived(item, items_by_id):
+            trashed.append(item)
             continue
         # Match by name
         if item.VissibleName.lower() == target:
@@ -826,6 +839,10 @@ def _resolve_document(
         # Match by path
         item_path = get_item_path(item, items_by_id).strip("/")
         if item_path.lower() == target:
+            return item
+
+    for item in trashed:
+        if get_item_path(item, items_by_id).strip("/").lower() == target:
             return item
 
     return None
