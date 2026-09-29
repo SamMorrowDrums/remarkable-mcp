@@ -3524,6 +3524,12 @@ class TestWriteTargetResolutionSkipsTrash:
         target = _resolve_document("/trash/Morning Pages", [trashed], {trashed.ID: trashed})
         assert target is trashed
 
+    def test_relative_trash_path_does_not_reach_trashed_item(self):
+        from remarkable_mcp.write_tools import _resolve_document
+
+        trashed = self._item("Morning Pages", "trashed", parent="trash")
+        assert _resolve_document("trash/Morning Pages", [trashed], {trashed.ID: trashed}) is None
+
     def test_user_folder_named_trash_wins_over_trashed_item(self):
         from remarkable_mcp.write_tools import _resolve_document
 

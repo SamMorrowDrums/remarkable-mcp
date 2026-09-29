@@ -841,6 +841,9 @@ def _resolve_document(
         if item_path.lower() == target:
             return item
 
+    # Trashed items need the explicit absolute path, not "trash/...".
+    if not name_or_path.lower().startswith("/trash/"):
+        return None
     for item in trashed:
         if get_item_path(item, items_by_id).strip("/").lower() == target:
             return item
