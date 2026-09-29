@@ -132,7 +132,7 @@ def _find_target_document(collection, items_by_id: dict, document: str):
     actual_document = _resolve_root_path(document) if document.startswith("/") else document
     document_lower = actual_document.lower().strip("/")
     for item in collection:
-        if item.is_folder or _is_cloud_archived(item):
+        if item.is_folder or _is_cloud_archived(item, items_by_id):
             continue
         item_path = get_item_path(item, items_by_id)
         if not _is_within_root(item_path, root):
@@ -195,8 +195,8 @@ EXPORT_ANNOTATIONS = ToolAnnotations(
 DEFAULT_PAGE_SIZE = 8000
 
 
-def _is_cloud_archived(item) -> bool:
-    """Check if an item is cloud-archived (not available on device)."""
+def _is_directly_archived(item) -> bool:
+    """Check the item's own metadata, ignoring its ancestors."""
     # SSH/local-dir/USB expose an explicit property. Require a real bool so
     # permissive proxy objects do not accidentally hide otherwise valid items.
     archived = getattr(item, "is_cloud_archived", None)
@@ -205,6 +205,27 @@ def _is_cloud_archived(item) -> bool:
     # Cloud mode: check parent == "trash"
     parent = item.Parent if hasattr(item, "Parent") else getattr(item, "parent", "")
     return parent == "trash"
+
+
+def _is_cloud_archived(item, items_by_id: Optional[dict] = None) -> bool:
+    """Check if an item is cloud-archived (not available on device).
+
+    Trashing a folder only re-parents the folder itself, so with
+    ``items_by_id`` the ancestors are checked too.
+    """
+    if _is_directly_archived(item):
+        return True
+    if not items_by_id:
+        return False
+    seen = {item.ID}
+    parent_id = getattr(item, "Parent", "")
+    while parent_id in items_by_id and parent_id not in seen:
+        seen.add(parent_id)
+        parent = items_by_id[parent_id]
+        if _is_directly_archived(parent):
+            return True
+        parent_id = getattr(parent, "Parent", "")
+    return False
 
 
 def _modified_sort_key(item) -> float:
@@ -393,7 +414,9 @@ async def remarkable_read(
 
         root = _get_root_path()
         documents = [
-            item for item in collection if not item.is_folder and not _is_cloud_archived(item)
+            item
+            for item in collection
+            if not item.is_folder and not _is_cloud_archived(item, items_by_id)
         ]
         target_doc = _find_target_document(collection, items_by_id, document)
 
@@ -997,7 +1020,7 @@ async def remarkable_browse(
 
             for item in collection:
                 # Skip cloud-archived items
-                if _is_cloud_archived(item):
+                if _is_cloud_archived(item, items_by_id):
                     continue
                 item_path = get_item_path(item, items_by_id)
                 # Filter by root path
@@ -1143,7 +1166,7 @@ async def remarkable_browse(
 
         for item in sorted(items, key=lambda x: x.VissibleName.lower()):
             # Skip cloud-archived items
-            if _is_cloud_archived(item):
+            if _is_cloud_archived(item, items_by_id):
                 continue
             # Filter by tags if provided
             if tags and not item.is_folder:
@@ -1225,7 +1248,7 @@ async def remarkable_recent(limit: int = 10, include_preview: bool = False) -> s
         # Get documents sorted by modified date (excluding archived, filtered by root)
         documents = []
         for item in collection:
-            if item.is_folder or _is_cloud_archived(item):
+            if item.is_folder or _is_cloud_archived(item, items_by_id):
                 continue
             item_path = get_item_path(item, items_by_id)
             if not _is_within_root(item_path, root):
@@ -1830,7 +1853,9 @@ async def remarkable_image(
 
         root = _get_root_path()
         documents = [
-            item for item in collection if not item.is_folder and not _is_cloud_archived(item)
+            item
+            for item in collection
+            if not item.is_folder and not _is_cloud_archived(item, items_by_id)
         ]
         target_doc = _find_target_document(collection, items_by_id, document)
 
@@ -2439,7 +2464,7 @@ async def remarkable_export(
                 item
                 for item in collection
                 if not item.is_folder
-                and not _is_cloud_archived(item)
+                and not _is_cloud_archived(item, items_by_id)
                 and _is_within_root(get_item_path(item, items_by_id), root)
             ]
             similar = find_similar_documents(document, candidates)

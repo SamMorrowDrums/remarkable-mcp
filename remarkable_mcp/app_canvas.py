@@ -682,7 +682,11 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
     items_by_id = get_items_by_id(collection)
 
     root = _get_root_path()
-    documents = [item for item in collection if not item.is_folder and not _is_cloud_archived(item)]
+    documents = [
+        item
+        for item in collection
+        if not item.is_folder and not _is_cloud_archived(item, items_by_id)
+    ]
     target_doc = _find_target_document(collection, items_by_id, document)
 
     if not target_doc:
