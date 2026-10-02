@@ -6337,7 +6337,7 @@ class TestRenderCanvasPage:
         monkeypatch.setattr(
             extract,
             "render_page_full_page_from_document_zip",
-            lambda p, pg, **k: ((png, (820.0, 1458.0)) if png is not None else None),
+            lambda p, pg, **k: (png, (820.0, 1458.0)) if png is not None else None,
         )
         monkeypatch.setattr(extract, "find_similar_documents", lambda q, docs: [])
         monkeypatch.setattr(tools, "_get_root_path", lambda: "/")
