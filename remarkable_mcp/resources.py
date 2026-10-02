@@ -268,7 +268,7 @@ def _register_document(
     # Keep resource visibility aligned with tool/canvas document resolution.
     from remarkable_mcp.tools import _is_cloud_archived
 
-    if _is_cloud_archived(doc):
+    if _is_cloud_archived(doc, items_by_id):
         return False
 
     # Get the full path
