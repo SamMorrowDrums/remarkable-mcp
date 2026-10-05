@@ -10,7 +10,7 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Iterator, Literal, Optional
+from typing import Iterable, Iterator, Literal, Optional, Sequence
 
 import fitz
 from PIL import Image
@@ -23,6 +23,10 @@ from remarkable_mcp.extract import (
 
 PdfMode = Literal["merged", "annotations"]
 ExportStatus = Literal["complete", "partial"]
+
+# Upper bound on page references in one selection; guards temporary-file size
+# and render time for page-subset exports.
+_MAX_PAGE_SELECTIONS = 64
 
 
 @dataclass(frozen=True)
@@ -40,13 +44,19 @@ class ExportMetadata:
 
 @dataclass(frozen=True)
 class RenderedPage:
-    """One physical page in export order."""
+    """One physical page in export order.
+
+    ``page`` is the 1-based ordinal within this export; ``physical_page`` is the
+    1-based ordinal in the source document when the export covers a subset of
+    pages. They are equal for complete-document exports.
+    """
 
     page: int
     image: bytes | None
     warning: str | None = None
     error: str | None = None
     partial: bool = False
+    physical_page: int | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +79,91 @@ def _unique_strings(values: Iterable[str]) -> tuple[str, ...]:
             seen.add(normalized)
             result.append(normalized)
     return tuple(result)
+
+
+def parse_page_selection(spec: str | int) -> tuple[int, ...]:
+    """Parse a 1-based page selection such as ``5`` or ``"5-9,10-14"``.
+
+    Returns the selected physical pages in ascending order without duplicates.
+    Raises ``ValueError`` for empty or malformed tokens, reversed or
+    non-positive ranges, or selections larger than 64 page references.
+    """
+    if isinstance(spec, bool) or not isinstance(spec, (int, str)):
+        raise ValueError("Page selection must be an integer or a range string.")
+
+    if isinstance(spec, int):
+        if spec < 1:
+            raise ValueError("Page numbers must be 1-based (page 1 is the first page).")
+        return (spec,)
+
+    text = str(spec).strip()
+    if not text:
+        raise ValueError("Page selection must not be empty.")
+
+    selected: set[int] = set()
+    for raw_token in text.split(","):
+        token = raw_token.strip()
+        if not token:
+            raise ValueError(f"Empty item in page selection: {text!r}")
+        if re.fullmatch(r"\d+", token):
+            page = int(token)
+            if page < 1:
+                raise ValueError(f"Page numbers must be 1-based, got {token!r}.")
+            selected.add(page)
+            if len(selected) > _MAX_PAGE_SELECTIONS:
+                raise ValueError(
+                    f"Page selection refers to more than {_MAX_PAGE_SELECTIONS} pages; "
+                    f"the maximum is {_MAX_PAGE_SELECTIONS}."
+                )
+            continue
+        range_match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", token)
+        if range_match:
+            start, end = (int(value) for value in range_match.groups())
+            if start < 1 or end < 1:
+                raise ValueError(f"Page numbers must be 1-based, got {token!r}.")
+            if start > end:
+                raise ValueError(f"Page range must be ascending, got {token!r}.")
+            range_length = end - start + 1
+            if range_length > _MAX_PAGE_SELECTIONS:
+                # Range elements are distinct, so the selection union can never
+                # be smaller than the range itself. Reject without expanding.
+                raise ValueError(
+                    f"Page range {token!r} refers to {range_length} pages; "
+                    f"the maximum is {_MAX_PAGE_SELECTIONS}."
+                )
+            selected.update(range(start, end + 1))
+            if len(selected) > _MAX_PAGE_SELECTIONS:
+                raise ValueError(
+                    f"Page selection refers to more than {_MAX_PAGE_SELECTIONS} pages; "
+                    f"the maximum is {_MAX_PAGE_SELECTIONS}."
+                )
+            continue
+        raise ValueError(
+            f"Invalid page selection item {token!r}; use a page number such as '5' "
+            "or an ascending range such as '5-9'."
+        )
+
+    if len(selected) > _MAX_PAGE_SELECTIONS:
+        raise ValueError(
+            f"Page selection refers to {len(selected)} pages; the maximum is "
+            f"{_MAX_PAGE_SELECTIONS}."
+        )
+    return tuple(sorted(selected))
+
+
+def selection_label(pages: Sequence[int]) -> str:
+    """Render ``[1, 2, 5]`` as ``"1-2, 5"`` for human-facing messages."""
+    labels: list[str] = []
+    run_start = pages[0]
+    previous = pages[0]
+    for page in pages[1:]:
+        if page == previous + 1:
+            previous = page
+            continue
+        labels.append(f"{run_start}-{previous}" if previous > run_start else str(run_start))
+        run_start = previous = page
+    labels.append(f"{run_start}-{previous}" if previous > run_start else str(run_start))
+    return ", ".join(labels)
 
 
 def _modified_text(modified: datetime | str | None) -> str | None:
@@ -104,8 +199,14 @@ def write_native_pdf_export(
     pdf_bytes: bytes,
     destination: Path,
     metadata: ExportMetadata,
+    *,
+    pages: Sequence[int] | None = None,
 ) -> ExportBuildResult:
-    """Preserve an existing complete PDF while adding stable source metadata."""
+    """Preserve an existing complete PDF while adding stable source metadata.
+
+    ``pages`` optionally selects a 1-based ascending subset of physical pages;
+    the written PDF then contains only those pages.
+    """
     if not pdf_bytes.lstrip().startswith(b"%PDF"):
         raise ValueError("Native PDF export did not contain PDF data")
 
@@ -113,10 +214,13 @@ def write_native_pdf_export(
         page_count = len(document)
         if page_count == 0:
             raise ValueError("Native PDF export has no pages")
+        if pages is not None:
+            # PyMuPDF selects with 0-based indices; page selections are 1-based.
+            document.select([page - 1 for page in pages])
         document.set_metadata(_pdf_metadata(document.metadata, metadata))
         document.save(str(destination), garbage=3, deflate=True)
 
-    return ExportBuildResult(status="complete", pages=page_count)
+    return ExportBuildResult(status="complete", pages=len(pages) if pages else page_count)
 
 
 def _page_size(image_bytes: bytes) -> tuple[float, float]:
@@ -141,6 +245,8 @@ def write_rendered_pdf_export(
     expected_page = 1
     previous_size = (445.0, 594.0)
     partial = False
+    seen_physical: list[int] = []
+    has_physical_markers = False
 
     try:
         for rendered in pages:
@@ -151,8 +257,19 @@ def write_rendered_pdf_export(
                 )
             expected_page += 1
 
+            physical_page = (
+                rendered.physical_page if rendered.physical_page is not None else rendered.page
+            )
+            if rendered.physical_page is not None:
+                has_physical_markers = True
+            seen_physical.append(physical_page)
+            if physical_page != rendered.page:
+                location = f"physical page {physical_page}, export page {rendered.page}"
+            else:
+                location = f"Page {physical_page}"
+
             if rendered.warning:
-                warnings.append(f"Page {rendered.page}: {rendered.warning}")
+                warnings.append(f"{location}: {rendered.warning}")
             partial = partial or rendered.partial
 
             image_bytes = rendered.image
@@ -171,17 +288,24 @@ def write_rendered_pdf_export(
                         image=None,
                         error=f"Rendered image could not be added to PDF: {exc}",
                         partial=True,
+                        physical_page=rendered.physical_page,
                     )
 
             partial = True
             failed_pages.append(rendered.page)
             reason = rendered.error or "Page could not be rendered"
-            warnings.append(f"Page {rendered.page}: {reason}")
+            warnings.append(f"{location}: {reason}")
             page = output.new_page(width=previous_size[0], height=previous_size[1])
             message = (
                 f"reMarkable export placeholder\n\n"
-                f"Physical page {rendered.page} could not be rendered.\n\n{reason}"
+                f"Physical page {physical_page} could not be rendered.\n\n{reason}"
             )
+            if physical_page != rendered.page:
+                message = (
+                    f"reMarkable export placeholder\n\n"
+                    f"Physical page {physical_page} could not be rendered.\n"
+                    f"It is page {rendered.page} of this export.\n\n{reason}"
+                )
             margin = max(6.0, min(36.0, previous_size[0] * 0.08, previous_size[1] * 0.08))
             font_size = max(6.0, min(12.0, previous_size[0] / 30))
             remaining = page.insert_textbox(
@@ -207,10 +331,18 @@ def write_rendered_pdf_export(
         if page_count == 0:
             raise ValueError("Document has no physical pages to export")
         if metadata.page_count is not None and page_count != metadata.page_count:
-            raise ValueError(
-                f"Export produced {page_count} pages but metadata declares "
-                f"{metadata.page_count} physical pages"
-            )
+            # A page-subset export legitimately differs from the declared page
+            # count. Subsets are identified structurally: a marked stream whose
+            # physical pages do not cover the full 1..N range. Marker-less
+            # streams keep the strict invariant so dropped pages cannot pass
+            # unnoticed.
+            covers_full_range = seen_physical == list(range(1, metadata.page_count + 1))
+            is_page_subset = has_physical_markers and not covers_full_range
+            if not is_page_subset:
+                raise ValueError(
+                    f"Export produced {page_count} pages but metadata declares "
+                    f"{metadata.page_count} physical pages"
+                )
 
         output.set_metadata(_pdf_metadata({}, metadata))
         output.save(str(destination), garbage=3, deflate=True)
@@ -232,10 +364,18 @@ def render_archive_pages(
     *,
     pdf_mode: PdfMode = "merged",
     background_color: str | None = None,
+    pages: Sequence[int] | None = None,
 ) -> Iterator[RenderedPage]:
-    """Render every physical page from one archive extraction in device order."""
+    """Render physical pages from one archive extraction in device order.
+
+    ``pages`` optionally selects a 1-based ascending subset of physical pages.
+    Yield ordinals renumber from 1 within the selection while each entry keeps
+    its source ``physical_page`` so diagnostics can reference the document.
+    """
     if metadata.page_count is None or metadata.page_count <= 0:
         raise ValueError("Physical page count is unavailable")
+
+    selected = list(pages) if pages is not None else list(range(1, metadata.page_count + 1))
 
     with tempfile.TemporaryDirectory(prefix="remarkable-export-archive-") as tmpdir:
         extracted = Path(tmpdir)
@@ -243,7 +383,7 @@ def render_archive_pages(
             archive.extractall(extracted)
 
         has_source_pdf = any(extracted.glob("**/*.pdf"))
-        for page_number in range(1, metadata.page_count + 1):
+        for export_ordinal, page_number in enumerate(selected, start=1):
             try:
                 if pdf_mode == "merged" and metadata.source_type == "pdf" and has_source_pdf:
                     has_mapped_underlay = (
@@ -256,11 +396,12 @@ def render_archive_pages(
                     )
                     partial = image is None or bool(note and has_mapped_underlay)
                     yield RenderedPage(
-                        page=page_number,
+                        page=export_ordinal,
                         image=image,
                         warning=note if partial else None,
                         error=None if image is not None else note,
                         partial=partial,
+                        physical_page=page_number,
                     )
                     continue
 
@@ -278,18 +419,20 @@ def render_archive_pages(
                     )
                     partial = True
                 yield RenderedPage(
-                    page=page_number,
+                    page=export_ordinal,
                     image=full_page[0] if full_page is not None else None,
                     warning=warning,
                     error=None if full_page is not None else "Full-page annotation render failed",
                     partial=partial,
+                    physical_page=page_number,
                 )
             except Exception as exc:
                 yield RenderedPage(
-                    page=page_number,
+                    page=export_ordinal,
                     image=None,
                     error=f"Page render raised {type(exc).__name__}: {exc}",
                     partial=True,
+                    physical_page=page_number,
                 )
 
 
@@ -300,8 +443,12 @@ def write_archive_pdf_export(
     *,
     pdf_mode: PdfMode = "merged",
     background_color: str | None = None,
+    pages: Sequence[int] | None = None,
 ) -> ExportBuildResult:
-    """Render and assemble a PDF from a reMarkable document archive."""
+    """Render and assemble a PDF from a reMarkable document archive.
+
+    ``pages`` optionally selects a 1-based ascending subset of physical pages.
+    """
     return write_rendered_pdf_export(
         destination,
         metadata,
@@ -310,6 +457,7 @@ def write_archive_pdf_export(
             metadata,
             pdf_mode=pdf_mode,
             background_color=background_color,
+            pages=pages,
         ),
     )
 
