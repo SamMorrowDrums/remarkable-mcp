@@ -244,6 +244,7 @@ class SSHClient:
             try:
                 result = subprocess.run(
                     args,
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -533,9 +534,14 @@ class SSHClient:
             if attempt > 1 and stdin is not None and hasattr(stdin, "seek"):
                 stdin.seek(0)
             try:
+                # Default stdin to DEVNULL: ssh must never inherit the server's
+                # stdin. Under an MCP stdio client that handle is the JSON-RPC
+                # pipe (on Windows an overlapped named pipe), and ssh adding it
+                # to its event loop wedges the session after the remote command
+                # completes — every call then dies by timeout instead.
                 process = subprocess.Popen(
                     args,
-                    stdin=stdin,
+                    stdin=subprocess.DEVNULL if stdin is None else stdin,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )

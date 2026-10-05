@@ -5776,6 +5776,37 @@ class TestSSHKeyAuth:
         assert "IdentitiesOnly=yes" not in argv
         assert "sshpass" not in argv
 
+    def test_run_process_detaches_stdin_by_default(self, monkeypatch):
+        # ssh must not inherit the server's stdin: under an MCP stdio client
+        # that handle is the JSON-RPC pipe (on Windows an overlapped named
+        # pipe), and ssh adding it to its event loop wedges the session after
+        # the remote command completes — every call then dies by timeout.
+        import remarkable_mcp.ssh as ssh_mod
+        from remarkable_mcp.ssh import SSHClient
+
+        captured = {}
+
+        class Process:
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return b"ok", b""
+
+            def poll(self):
+                return self.returncode
+
+        def popen(args, **kwargs):
+            captured["kwargs"] = kwargs
+            return Process()
+
+        monkeypatch.setattr(ssh_mod.subprocess, "Popen", popen)
+        client = SSHClient()
+        try:
+            client._ssh_command("echo ok")
+        finally:
+            client.close()
+        assert captured["kwargs"]["stdin"] == ssh_mod.subprocess.DEVNULL
+
     def test_fresh_probe_disables_ssh_multiplexing(self, monkeypatch):
         from remarkable_mcp.ssh import SSHClient
 
