@@ -122,6 +122,95 @@ class TestArchivedMetadataShapes:
         assert _is_cloud_archived(usb_parent_named_trash) is False
 
 
+def _folder(name: str, folder_id: str, parent: str = "") -> SimpleNamespace:
+    folder = _document(name, folder_id, parent=parent)
+    folder.is_folder = True
+    return folder
+
+
+class TestTrashedAncestorFolders:
+    """Trashing a folder leaves its children's Parent pointing at the folder."""
+
+    def _collection(self):
+        trashed_folder = _folder("Old Work", "old-work", parent="trash")
+        nested = _document("Nested Notes", "nested", parent="old-work")
+        live = _document("Live Notes", "live")
+        return trashed_folder, nested, live
+
+    def test_archive_predicate_follows_ancestors(self):
+        from remarkable_mcp.api import get_items_by_id
+        from remarkable_mcp.tools import _is_cloud_archived
+        from remarkable_mcp.usb_web import Document as USBDocument
+
+        trashed_folder, nested, live = self._collection()
+        items_by_id = get_items_by_id([trashed_folder, nested, live])
+
+        assert _is_cloud_archived(nested, items_by_id) is True
+        assert _is_cloud_archived(live, items_by_id) is False
+        # Without the lookup only the item's own parent can be checked.
+        assert _is_cloud_archived(nested) is False
+
+        # USB never exposes trash, even under a folder whose parent id is "trash".
+        usb_folder = USBDocument("usb-folder", "", "Folder", "CollectionType", parent="trash")
+        usb_child = USBDocument("usb-child", "", "Child", "DocumentType", parent="usb-folder")
+        usb_by_id = get_items_by_id([usb_folder, usb_child])
+        assert _is_cloud_archived(usb_child, usb_by_id) is False
+
+    def test_lookup_ignores_documents_in_trashed_folders(self):
+        from remarkable_mcp.api import get_items_by_id
+        from remarkable_mcp.tools import _find_target_document
+
+        collection = list(self._collection())
+        items_by_id = get_items_by_id(collection)
+
+        assert _find_target_document(collection, items_by_id, "Nested Notes") is None
+        assert (
+            _find_target_document(collection, items_by_id, "/trash/Old Work/Nested Notes") is None
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments", "key"),
+        [
+            ("remarkable_browse", {"query": "Notes"}, "results"),
+            ("remarkable_recent", {}, "documents"),
+        ],
+    )
+    async def test_search_and_recent_hide_documents_in_trashed_folders(
+        self, tool_name, arguments, key
+    ):
+        import remarkable_mcp.tools as tools
+
+        client = Mock()
+        client.get_meta_items.return_value = list(self._collection())
+
+        with patch.object(tools, "get_rmapi", return_value=client):
+            result = await _call_tool(tool_name, arguments)
+
+        names = [entry["name"] for entry in _response_json(result)[key]]
+        assert names == ["Live Notes"]
+
+
+class TestStatusDocumentCount:
+    @pytest.mark.asyncio
+    async def test_status_count_excludes_trashed_documents(self):
+        import remarkable_mcp.tools as tools
+
+        collection = [
+            _document("Trashed", "trashed", parent="trash"),
+            _folder("Old Work", "old-work", parent="trash"),
+            _document("Nested", "nested", parent="old-work"),
+            _document("Live", "live"),
+        ]
+        client = Mock()
+        client.get_meta_items.return_value = collection
+
+        with patch.object(tools, "get_rmapi", return_value=client):
+            result = await _call_tool("remarkable_status", {})
+
+        assert _response_json(result)["document_count"] == 1
+
+
 class TestLiveDocumentLookup:
     def test_live_namesake_wins_and_trash_only_is_hidden(self):
         from remarkable_mcp.api import get_items_by_id

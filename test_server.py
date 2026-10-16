@@ -245,6 +245,21 @@ class TestHelperFunctions:
         path = get_item_path(child_doc, items_by_id)
         assert path == "/Test Folder/Child Doc"
 
+    def test_get_item_path_trashed_document(self):
+        """A trashed document must not look like a root-level document."""
+        doc = Mock(VissibleName="Morning Pages", ID="doc-trash", Parent="trash", is_folder=False)
+
+        path = get_item_path(doc, {doc.ID: doc})
+        assert path == "/trash/Morning Pages"
+
+    def test_get_item_path_inside_trashed_folder(self):
+        """Items nested in a trashed folder are reported under /trash."""
+        folder = Mock(VissibleName="Old Work", ID="folder-trash", Parent="trash", is_folder=True)
+        doc = Mock(VissibleName="Notes", ID="doc-nested", Parent=folder.ID, is_folder=False)
+
+        path = get_item_path(doc, {folder.ID: folder, doc.ID: doc})
+        assert path == "/trash/Old Work/Notes"
+
 
 # =============================================================================
 # Test Text Extraction
@@ -3467,6 +3482,72 @@ class TestWriteTools:
                 assert "remarkable_author" not in names
             finally:
                 mcp._tool_manager._tools.pop("remarkable_author", None)
+
+
+class TestWriteTargetResolutionSkipsTrash:
+    """Write tools must not silently act on trashed namesakes."""
+
+    @staticmethod
+    def _item(name, item_id, parent="", is_folder=False):
+        return Mock(VissibleName=name, ID=item_id, Parent=parent, is_folder=is_folder)
+
+    def _collection(self):
+        trashed = self._item("Notes", "trashed-notes", parent="trash")
+        live = self._item("Notes", "live-notes")
+        trashed_folder = self._item("Archive", "trashed-archive", parent="trash", is_folder=True)
+        live_folder = self._item("Archive", "live-archive", is_folder=True)
+        # A real, user-created folder that happens to be named "trash".
+        user_trash = self._item("trash", "user-trash", is_folder=True)
+        user_trash_notes = self._item("Notes", "user-trash-notes", parent="user-trash")
+        return [trashed, trashed_folder, user_trash_notes, live, live_folder, user_trash]
+
+    def test_name_lookup_prefers_live_item(self):
+        from remarkable_mcp.write_tools import _resolve_document
+
+        trashed = self._item("Notes", "trashed-notes", parent="trash")
+        live = self._item("Notes", "live-notes")
+        collection = [trashed, live]
+        target = _resolve_document("Notes", collection, get_items_by_id(collection))
+        assert target.ID == "live-notes"
+
+    def test_name_lookup_ignores_trash_only_match(self):
+        from remarkable_mcp.write_tools import _resolve_document
+
+        trashed = self._item("Morning Pages", "trashed", parent="trash")
+        assert _resolve_document("Morning Pages", [trashed], {trashed.ID: trashed}) is None
+
+    def test_explicit_trash_path_still_reaches_trashed_item(self):
+        """SSH permanent delete needs to address items already in the trash."""
+        from remarkable_mcp.write_tools import _resolve_document
+
+        trashed = self._item("Morning Pages", "trashed", parent="trash")
+        target = _resolve_document("/trash/Morning Pages", [trashed], {trashed.ID: trashed})
+        assert target is trashed
+
+    def test_relative_trash_path_does_not_reach_trashed_item(self):
+        from remarkable_mcp.write_tools import _resolve_document
+
+        trashed = self._item("Morning Pages", "trashed", parent="trash")
+        assert _resolve_document("trash/Morning Pages", [trashed], {trashed.ID: trashed}) is None
+
+    def test_user_folder_named_trash_wins_over_trashed_item(self):
+        from remarkable_mcp.write_tools import _resolve_document
+
+        collection = self._collection()
+        target = _resolve_document("/trash/Notes", collection, get_items_by_id(collection))
+        assert target.ID == "user-trash-notes"
+
+    def test_parent_resolution_never_picks_trashed_folder(self):
+        from remarkable_mcp.write_tools import _resolve_parent_id
+
+        collection = self._collection()
+        items_by_id = get_items_by_id(collection)
+        assert _resolve_parent_id("/Archive", items_by_id, collection) == "live-archive"
+
+        trashed_folder = self._item("Old", "trashed-old", parent="trash", is_folder=True)
+        only_trashed = [trashed_folder]
+        by_id = get_items_by_id(only_trashed)
+        assert _resolve_parent_id("/trash/Old", by_id, only_trashed) is None
 
 
 class TestMarkdownPDFWriteback:
