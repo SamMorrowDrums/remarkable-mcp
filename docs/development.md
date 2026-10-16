@@ -65,6 +65,28 @@ uv run pytest -v --cov=remarkable_mcp
 
 Tests use `pytest-asyncio` for async testing. All async tests use the `@pytest.mark.asyncio` decorator.
 
+## Dependency Updates
+
+Dependabot checks the `uv` and `github-actions` ecosystems weekly. Keep dependency
+bounds in `pyproject.toml` and the resolved versions in `uv.lock` in sync, retaining
+Python 3.10 support and the MCP SDK's `<3` compatibility boundary.
+
+```bash
+uv lock --upgrade
+uv sync --all-extras --frozen
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest -v
+uv build
+
+# Audit the locked runtime, optional OCR, and development dependencies.
+uv export --all-extras --frozen --no-emit-project -o /tmp/remarkable-mcp-audit.txt
+uv tool run pip-audit -r /tmp/remarkable-mcp-audit.txt --no-deps --disable-pip
+rm /tmp/remarkable-mcp-audit.txt
+```
+
+Review major upgrades individually, and document any deferred upgrades in the PR.
+
 ## Code Quality
 
 Before committing, always run:
@@ -124,6 +146,7 @@ EXAMPLE_ANNOTATIONS = ToolAnnotations(
     destructive_hint=False,
     idempotent_hint=True,
 )
+
 
 @mcp.tool(annotations=EXAMPLE_ANNOTATIONS)
 def remarkable_example(param: str) -> str:

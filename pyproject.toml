@@ -20,33 +20,33 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp>=2.0.0,<3.0.0",
+    "mcp>=2.2.0,<3.0.0",
     "rmscene>=0.8.0",
-    "pytesseract>=0.3.10",
-    "Pillow>=10.0.0",
-    "requests>=2.28.0",
-    "pymupdf>=1.26.7",
-    "ebooklib>=0.18",
-    "beautifulsoup4>=4.12.0",
-    "markdown-it-py>=4.0.0",
+    "pytesseract>=0.3.13",
+    "Pillow>=12.3.0",
+    "requests>=2.34.2",
+    "pymupdf>=1.28.2",
+    "ebooklib>=0.20",
+    "beautifulsoup4>=4.15.0",
+    "markdown-it-py>=4.2.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=1.0.0",
-    "black>=23.0.0",
-    "ruff>=0.1.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "black>=26.5.1",
+    "ruff>=0.16.10",
 ]
 ocr = [
-    "google-cloud-vision>=3.0.0",
+    "google-cloud-vision>=3.16.0",
 ]
 
 [project.scripts]
 remarkable-mcp = "remarkable_mcp.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.32.4"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -67,6 +67,6 @@ asyncio_default_fixture_loop_scope = "function"
 
 [dependency-groups]
 dev = [
-    "pytest-asyncio>=1.3.0",
-    "ruff>=0.14.6",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.10",
 ]

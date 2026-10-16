@@ -185,8 +185,9 @@ class SSHDispatcher(OperationDispatcher):
         super().__init__(
             name="SSH",
             max_concurrency=1,
-            trace_enabled=lambda: os.environ.get("REMARKABLE_SSH_TRACE", "").lower()
-            in _TRUE_VALUES,
+            trace_enabled=lambda: (
+                os.environ.get("REMARKABLE_SSH_TRACE", "").lower() in _TRUE_VALUES
+            ),
         )
 
     def record_retry(self, reason: str) -> None:
