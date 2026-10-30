@@ -10,13 +10,6 @@ scope and acceptance criteria.
 Track intermittent large-library SSH failures in
 [#157](https://github.com/SamMorrowDrums/remarkable-mcp/issues/157).
 
-### Cloud authoring
-
-Cloud mode creates native notebooks (`remarkable_author` `create_document`).
-Page mutation (`draw`, `add_page`) stays SSH-only until an append-only
-download-modify-upload path is independently safe. See
-[#118](https://github.com/SamMorrowDrums/remarkable-mcp/issues/118).
-
 ### Export
 
 Reusable PDF and Markdown export for one document is available through
