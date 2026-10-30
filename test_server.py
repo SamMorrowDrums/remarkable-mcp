@@ -53,6 +53,22 @@ async def _list_resources():
     return await mcp.list_resources()
 
 
+@pytest.fixture(autouse=True)
+def _restore_tool_registry():
+    """Restore the import-time tool registry after every test.
+
+    Tests re-register write tools under patched transports and pop them in
+    cleanup. Popping a tool the default cloud import also registers (e.g.
+    ``remarkable_mkdir``) would otherwise shrink the surface seen by every
+    later test, and make later assertions depend on test order.
+    """
+    tools = mcp._tool_manager._tools
+    snapshot = dict(tools)
+    yield
+    tools.clear()
+    tools.update(snapshot)
+
+
 # =============================================================================
 # Test Fixtures
 # =============================================================================
@@ -3397,27 +3413,26 @@ class TestWriteTools:
         """SSH-only write tools must not be exposed in USB web mode (upload-only)."""
         from remarkable_mcp.write_tools import register_write_tools
 
+        managed = [
+            "remarkable_upload",
+            "remarkable_mkdir",
+            "remarkable_move",
+            "remarkable_rename",
+            "remarkable_delete",
+        ]
+        for name in managed:
+            mcp._tool_manager._tools.pop(name, None)
         env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
         env["REMARKABLE_USE_USB_WEB"] = "1"
         with patch.dict(os.environ, env, clear=True):
             register_write_tools()
-            try:
-                tools = await _list_tools()
-                names = {t.name for t in tools}
-                assert "remarkable_upload" in names  # upload works on USB web
-                assert "remarkable_mkdir" not in names
-                assert "remarkable_move" not in names
-                assert "remarkable_rename" not in names
-                assert "remarkable_delete" not in names
-            finally:
-                for name in [
-                    "remarkable_upload",
-                    "remarkable_mkdir",
-                    "remarkable_move",
-                    "remarkable_rename",
-                    "remarkable_delete",
-                ]:
-                    mcp._tool_manager._tools.pop(name, None)
+            tools = await _list_tools()
+            names = {t.name for t in tools}
+            assert "remarkable_upload" in names  # upload works on USB web
+            assert "remarkable_mkdir" not in names
+            assert "remarkable_move" not in names
+            assert "remarkable_rename" not in names
+            assert "remarkable_delete" not in names
 
     @pytest.mark.asyncio
     async def test_author_only_registered_in_ssh_mode(self):
