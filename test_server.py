@@ -3898,12 +3898,13 @@ class _FakeSyncStore:
     first response was lost.
     """
 
-    def __init__(self, conflicts=0, lost_acks=0):
+    def __init__(self, conflicts=0, lost_acks=0, folder_ids=()):
         import hashlib
 
-        empty_root = b"4\n0:.:0:0\n"
-        self.root = hashlib.sha256(empty_root).hexdigest()
-        self.blobs = {self.root: empty_root}
+        lines = [f"{'0' * 64}:0:{folder_id}:1:1" for folder_id in folder_ids]
+        root_body = "\n".join(["4", f"0:.:{len(lines)}:{len(lines)}", *lines]) + "\n"
+        self.root = hashlib.sha256(root_body.encode("utf-8")).hexdigest()
+        self.blobs = {self.root: root_body.encode("utf-8")}
         self.generation = 1
         self.conflicts = conflicts
         self.lost_acks = lost_acks
@@ -3968,7 +3969,7 @@ class TestCloudCreateNotebook:
         return client, created
 
     def test_uploads_notebook_blobs_and_root_entry(self):
-        store = _FakeSyncStore()
+        store = _FakeSyncStore(folder_ids=["folder-1"])
         _, created = self._create(store, parent_id="folder-1")
         doc_id = created["document"].id
         page_id = created["page_id"]
@@ -4024,6 +4025,18 @@ class TestCloudCreateNotebook:
         assert len(store.committed_hashes) == 2
         assert sum(f":{doc_id}:" in line for line in store.root_lines()) == 1
         assert store.root_lines()[1] == f"0:.:1:{store.root_lines()[2].split(':')[4]}"
+
+    def test_missing_parent_aborts_before_commit(self):
+        from remarkable_mcp.sync import CloudWriteError
+
+        store = _FakeSyncStore()
+        root_before = store.root
+
+        with pytest.raises(CloudWriteError, match="folder-gone"):
+            self._create(store, parent_id="folder-gone")
+
+        assert store.committed_hashes == []
+        assert store.root == root_before
 
     @pytest.mark.asyncio
     async def test_remarkable_read_finds_seeded_text(self):
@@ -4102,6 +4115,25 @@ class TestCloudAuthorDispatch:
         data = json.loads(result.content[0].text)
         assert data["_error"]["type"] == "folder_not_found"
         client.create_notebook.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_document_cloud_write_error_is_structured(self):
+        from remarkable_mcp.sync import CloudWriteError
+
+        client = self._cloud_client()
+        client.create_notebook.side_effect = CloudWriteError("Parent folder x is gone.")
+
+        with (
+            patch.dict(os.environ, self._cloud_env(), clear=True),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+        ):
+            result = await _call_tool(
+                "remarkable_author", {"method": "create_document", "name": "Notes"}
+            )
+
+        data = json.loads(result.content[0].text)
+        assert data["_error"]["type"] == "create_document_failed"
+        assert "Parent folder x is gone." in data["_error"]["message"]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

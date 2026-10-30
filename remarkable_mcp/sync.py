@@ -971,9 +971,19 @@ class RemarkableClient:
         A retried root PUT whose first response was lost can report a conflict
         for a commit that already landed; the re-read root then holds the entry,
         so it is replaced rather than appended twice.
+
+        The parent is resolved by the caller before this commit; it is checked
+        again against the root being committed so a folder deleted in between
+        aborts the write instead of leaving the document under a missing parent.
         """
         new_entry = self._upload_doc_index(doc_id, files)
-        self._sync_root(lambda entries: [e for e in entries if e["id"] != doc_id] + [new_entry])
+
+        def add(entries):
+            if parent_id and not any(e["id"] == parent_id for e in entries):
+                raise CloudWriteError(f"Parent folder {parent_id} is no longer in the cloud root.")
+            return [e for e in entries if e["id"] != doc_id] + [new_entry]
+
+        self._sync_root(add)
         return Document(
             id=doc_id,
             hash=new_entry["hash"],
