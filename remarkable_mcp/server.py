@@ -244,6 +244,8 @@ and sync to all your devices:
 - `remarkable_move(document, dest_folder)` - Move a document/folder
 - `remarkable_rename(document, new_name)` - Rename a document/folder
 - `remarkable_delete(document)` - Delete a document/folder (destructive)
+- `remarkable_author(method, ...)` - Author native ink/notebooks: draw, add_page,
+  create_document
 
 ### Safety
 - **Delete is destructive** — the MCP client should confirm with the user first

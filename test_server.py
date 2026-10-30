@@ -150,8 +150,8 @@ class TestMCPServerInitialization:
     async def test_tools_count(self):
         """Cloud default: 7 read/export tools + always-on canvas + 7 write tools.
 
-        The write tools include ``remarkable_author`` (create_document only in
-        cloud mode), so the default cloud surface is 15 tools.
+        The write tools include ``remarkable_author``, so the default cloud
+        surface is 15 tools.
         """
         tools = await _list_tools()
         assert len(tools) == 15, f"Expected 15 tools, got {len(tools)}"
@@ -7530,6 +7530,26 @@ class TestCLIFlags:
         with patch.dict(os.environ, {"REMARKABLE_READ_ONLY": "1"}):
             instructions = _build_instructions()
         assert "remarkable_markdown_to_pdf" not in instructions
+
+    def test_cloud_write_instructions_advertise_author(self):
+        from remarkable_mcp.server import _build_instructions
+
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k
+            not in (
+                "REMARKABLE_USE_SSH",
+                "REMARKABLE_USE_USB_WEB",
+                "REMARKABLE_LOCAL_DIR",
+                "REMARKABLE_USE_LOCAL_DIR",
+                "REMARKABLE_READ_ONLY",
+            )
+        }
+        with patch.dict(os.environ, env, clear=True):
+            instructions = _build_instructions()
+        cloud_section = instructions.split("## Cloud Mode (Active)", 1)[1]
+        assert "remarkable_author(method" in cloud_section
 
     def test_http_preserves_explicit_ssh_key(self):
         from remarkable_mcp import cli
