@@ -12,7 +12,7 @@ for backward compatibility but are now no-ops (write is the default). --write an
 --read-only are mutually exclusive.
 
 Write support by transport:
-- Cloud mode: upload, mkdir, move, rename, delete (-> trash), author (create_document)
+- Cloud mode: upload, mkdir, move, rename, delete (-> trash), author (all methods)
 - SSH mode:   upload, mkdir, move, rename, delete, author (all methods)
 - USB web mode: upload only (via POST /upload endpoint)
 
@@ -63,11 +63,6 @@ MKDIR_ANNOTATIONS = WRITE_ANNOTATIONS
 MOVE_ANNOTATIONS = WRITE_ANNOTATIONS
 RENAME_ANNOTATIONS = WRITE_ANNOTATIONS
 DELETE_ANNOTATIONS = ToolAnnotations(read_only_hint=False, destructive_hint=True)
-
-# remarkable_author methods the cloud transport supports. draw and add_page
-# would need a download-modify-upload of an existing document, which is not
-# implemented safely yet (issue #118).
-CLOUD_AUTHOR_METHODS = ("create_document",)
 
 
 def read_only_enabled() -> bool:
@@ -1521,24 +1516,100 @@ def _cloud_author_create_document(
     )
 
 
-def _cloud_author(
+def _cloud_author_draw(
     client,
-    method: str,
-    name: Optional[str],
-    text: Optional[str],
-    folder: Optional[str],
+    document: str,
+    page: int,
+    strokes: list,
+    ui_submitted: bool,
 ) -> str:
-    """Dispatch a remarkable_author call on the cloud transport."""
-    if method not in CLOUD_AUTHOR_METHODS:
+    """Append strokes to a page of a cloud document."""
+    from requests import RequestException
+
+    from remarkable_mcp.strokes import StrokeError
+    from remarkable_mcp.sync import CloudWriteError
+
+    target, error = _find_author_target(client, document)
+    if error:
+        return error
+    content_data = _parse_content(client.download_raw_file(target, "content"))
+    page_ids, error = _draw_page_ids(content_data, page, target.VissibleName)
+    if error:
+        return error
+
+    try:
+        drawn = client.append_page_strokes(target.ID, page_ids[page - 1], strokes)
+    except (StrokeError, CloudWriteError, RequestException) as e:
         return make_error(
-            error_type="unsupported_in_transport",
-            message=f'remarkable_author(method="{method}") is not available in cloud mode.',
+            error_type="stroke_write_failed",
+            message=f"Failed to write strokes to page {page} of '{target.VissibleName}': {e}",
             suggestion=(
-                'Cloud mode supports method="create_document" only. draw and add_page '
-                "modify existing pages and need SSH mode: remarkable-mcp --ssh"
+                "Check the stroke format (points normalized [0,1]) and use "
+                "remarkable_browse() to check the document, then retry."
             ),
         )
-    return _cloud_author_create_document(client, name, text, folder)
+    _invalidate_client_cache(client)
+    _clear_document_extraction_cache(target.ID)
+
+    result = _draw_result(
+        target.VissibleName,
+        page,
+        page_ids,
+        strokes,
+        drawn["paper_size"],
+        str(content_data.get("fileType", "") or ""),
+        created_overlay=drawn["created_overlay"],
+        transport="cloud",
+        ui_submitted=ui_submitted,
+        refresh_pending=False,
+    )
+    return make_response(
+        result,
+        f"Appended {len(strokes)} stroke(s) to page {page} of '{target.VissibleName}' in "
+        "the reMarkable cloud; the tablet picks them up on its next sync. Call "
+        "remarkable_canvas(document, page) to view the updated page.",
+    )
+
+
+def _cloud_author_add_page(client, document: str) -> str:
+    """Append a blank, drawable page to the end of a cloud notebook."""
+    from requests import RequestException
+
+    from remarkable_mcp import notebooks as nb
+    from remarkable_mcp.sync import CloudWriteError
+
+    target, error = _find_author_target(client, document)
+    if error:
+        return error
+
+    try:
+        added = client.add_notebook_page(target.ID)
+    except (CloudWriteError, RequestException) as e:
+        return make_error(
+            error_type="add_page_failed",
+            message=f"Failed to add a page to '{target.VissibleName}': {e}",
+            suggestion="Use remarkable_browse() to check the document, then retry.",
+        )
+    except ValueError as e:
+        return _not_a_notebook_error(e)
+    _invalidate_client_cache(client)
+    _clear_document_extraction_cache(target.ID)
+
+    result = {
+        "added": True,
+        "document": target.VissibleName,
+        "page_added": added["page_index"],
+        "total_pages": added["total_pages"],
+        "paper_size": list(nb.DEFAULT_PAPER),
+        "transport": "cloud",
+        "refresh_pending": False,
+    }
+    return make_response(
+        result,
+        f"Added a blank page (now page {added['page_index']} of {added['total_pages']}) "
+        "in the reMarkable cloud; the tablet picks it up on its next sync. Call "
+        f"remarkable_canvas('{target.VissibleName}', {added['page_index']}) to draw on it.",
+    )
 
 
 def register_write_tools():
@@ -1572,14 +1643,15 @@ def register_write_tools():
         Requires write mode (the default; disabled with --read-only). Support by
         transport:
         - SSH: all three methods.
-        - Cloud: create_document only. draw and add_page return an
-          unsupported_in_transport error; use SSH mode for them. This also
-          applies when an SSH configuration fell back to the cloud because the
-          tablet was unreachable.
+        - Cloud: all three methods, also when an SSH configuration fell back to
+          the cloud because the tablet was unreachable. The tablet picks the
+          change up on its next sync. draw and add_page re-read the document
+          on every commit attempt and only append, so ink or pages another
+          device synced in the meantime are kept.
         - USB web: not available (the tool is not registered).
-        All methods are non-destructive (draw appends to existing ink and backs
-        the page up to {pageId}.rm.bak the first time), so no confirmation
-        prompt is required.
+        All methods are non-destructive (draw appends to existing ink; over SSH
+        it also backs the page up to {pageId}.rm.bak the first time), so no
+        confirmation prompt is required.
 
         Pick the method, then pass only that method's parameters:
 
@@ -1629,7 +1701,7 @@ def register_write_tools():
         - defer_restart: SSH only. Skip the xochitl restart for this write. Call
           remarkable_refresh() once after the batch. The response sets
           refresh_pending=true while a refresh is owed. Ignored in cloud mode
-          (no xochitl; the tablet picks the notebook up on its next sync).
+          (no xochitl; the tablet picks the change up on its next sync).
         </parameters>
         <examples>
         - remarkable_author(method="draw", document="Ideas", page=1,
@@ -1662,7 +1734,12 @@ def register_write_tools():
             # cloud client by now (_get_ssh_client() below resolves it first),
             # so the SSH methods must not run against it.
             if _is_cloud_mode() or is_cloud_fallback_active():
-                return _cloud_author(_get_ssh_client(), method, name, text, folder)
+                client = _get_ssh_client()
+                if method == "draw":
+                    return _cloud_author_draw(client, document, page, strokes, ui_submitted)
+                if method == "add_page":
+                    return _cloud_author_add_page(client, document)
+                return _cloud_author_create_document(client, name, text, folder)
 
             if method == "draw":
                 return _author_draw(document, page, strokes, ui_submitted, defer_restart)
@@ -1683,8 +1760,8 @@ def register_write_tools():
         return await asyncio.to_thread(_impl)
 
     # USB web has no write-back path for native notebooks, so the tool is only
-    # exposed where at least one method works: SSH (all methods) and cloud
-    # (create_document). Clients on USB web don't see a tool they couldn't use.
+    # exposed over SSH and cloud. Clients on USB web don't see a tool they
+    # couldn't use.
     if _is_ssh_mode() or _is_cloud_mode():
         mcp.tool(annotations=WRITE_ANNOTATIONS)(remarkable_author)
 

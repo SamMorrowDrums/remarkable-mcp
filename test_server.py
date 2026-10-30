@@ -4472,10 +4472,46 @@ class TestCloudAuthorDispatch:
     def _cloud_client(self, collection=()):
         new_doc = Mock()
         new_doc.id = "doc-new"
-        client = Mock(spec=["get_meta_items", "create_notebook"])
+        client = Mock(
+            spec=[
+                "get_meta_items",
+                "create_notebook",
+                "download_raw_file",
+                "add_notebook_page",
+                "append_page_strokes",
+            ]
+        )
         client.get_meta_items.return_value = list(collection)
         client.create_notebook.return_value = {"document": new_doc, "page_id": "page-1"}
+        client.download_raw_file.return_value = json.dumps(
+            {"fileType": "notebook", "cPages": {"pages": [{"id": "p1"}, {"id": "p2"}]}}
+        ).encode()
+        client.add_notebook_page.return_value = {
+            "page_id": "p3",
+            "page_index": 3,
+            "total_pages": 3,
+        }
+        client.append_page_strokes.return_value = {
+            "created_overlay": False,
+            "paper_size": [1620, 2160],
+        }
         return client
+
+    def _notebook(self):
+        doc = Mock()
+        doc.ID = "doc-1"
+        doc.VissibleName = "Notes"
+        doc.Parent = ""
+        doc.is_folder = False
+        return doc
+
+    async def _author(self, client, arguments):
+        with (
+            patch.dict(os.environ, self._cloud_env(), clear=True),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+        ):
+            result = await _call_tool("remarkable_author", arguments)
+        return json.loads(result.content[0].text)
 
     @pytest.mark.asyncio
     async def test_create_document_uses_cloud_client(self):
@@ -4553,38 +4589,138 @@ class TestCloudAuthorDispatch:
         assert "Parent folder x is gone." in data["_error"]["message"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "arguments",
-        [
+    async def test_add_page_uses_cloud_client(self):
+        client = self._cloud_client([self._notebook()])
+
+        data = await self._author(client, {"method": "add_page", "document": "Notes"})
+
+        client.add_notebook_page.assert_called_once_with("doc-1")
+        assert data["added"] is True
+        assert data["document"] == "Notes"
+        assert data["page_added"] == 3
+        assert data["total_pages"] == 3
+        assert data["paper_size"] == [1404, 1872]
+        assert data["transport"] == "cloud"
+        assert data["refresh_pending"] is False
+
+    @pytest.mark.asyncio
+    async def test_draw_uses_cloud_client(self):
+        client = self._cloud_client([self._notebook()])
+        strokes = [{"points": [[0.1, 0.1], [0.2, 0.2]]}]
+
+        data = await self._author(
+            client,
             {
                 "method": "draw",
                 "document": "Notes",
-                "page": 1,
-                "strokes": [{"points": [[0.1, 0.1], [0.2, 0.2]]}],
+                "page": 2,
+                "strokes": strokes,
+                "ui_submitted": True,
             },
-            {"method": "add_page", "document": "Notes"},
+        )
+
+        client.append_page_strokes.assert_called_once_with("doc-1", "p2", strokes)
+        assert data["written"] is True
+        assert data["document"] == "Notes"
+        assert data["page"] == 2
+        assert data["total_pages"] == 2
+        assert data["strokes_added"] == 1
+        assert data["paper_size"] == [1620, 2160]
+        assert data["file_type"] == "notebook"
+        assert data["created_overlay"] is False
+        assert data["writable"] is True
+        assert data["ui_submitted"] is True
+        assert data["transport"] == "cloud"
+        assert data["refresh_pending"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "arguments, content, error_type",
+        [
+            (
+                {"method": "draw", "document": "Notes", "page": 3, "strokes": [_STROKE_A]},
+                None,
+                "page_out_of_range",
+            ),
+            (
+                {"method": "draw", "document": "Notes", "page": 1, "strokes": [_STROKE_A]},
+                b"{}",
+                "no_pages",
+            ),
+            (
+                {"method": "add_page", "document": "Missing"},
+                None,
+                "document_not_found",
+            ),
+        ],
+        ids=["page-out-of-range", "no-pages", "unknown-document"],
+    )
+    async def test_page_method_rejected_before_write(self, arguments, content, error_type):
+        client = self._cloud_client([self._notebook()])
+        if content is not None:
+            client.download_raw_file.return_value = content
+
+        data = await self._author(client, arguments)
+
+        assert data["_error"]["type"] == error_type
+        client.add_notebook_page.assert_not_called()
+        client.append_page_strokes.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "arguments, client_method, error, error_type",
+        [
+            (
+                {"method": "add_page", "document": "Notes"},
+                "add_notebook_page",
+                "cloud_write_error",
+                "add_page_failed",
+            ),
+            (
+                {"method": "add_page", "document": "Notes"},
+                "add_notebook_page",
+                "not_a_notebook",
+                "not_a_notebook",
+            ),
+            (
+                {"method": "draw", "document": "Notes", "page": 1, "strokes": [_STROKE_A]},
+                "append_page_strokes",
+                "http_error",
+                "stroke_write_failed",
+            ),
+            (
+                {"method": "draw", "document": "Notes", "page": 1, "strokes": [_STROKE_A]},
+                "append_page_strokes",
+                "stroke_error",
+                "stroke_write_failed",
+            ),
         ],
     )
-    async def test_page_methods_unsupported_in_cloud(self, arguments):
-        client = self._cloud_client()
+    async def test_page_method_write_error_is_structured(
+        self, arguments, client_method, error, error_type
+    ):
+        from remarkable_mcp.strokes import StrokeError
+        from remarkable_mcp.sync import CloudWriteError
 
-        with (
-            patch.dict(os.environ, self._cloud_env(), clear=True),
-            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
-        ):
-            result = await _call_tool("remarkable_author", arguments)
+        client = self._cloud_client([self._notebook()])
+        getattr(client, client_method).side_effect = {
+            "cloud_write_error": CloudWriteError("Page p1 is gone."),
+            "http_error": requests.HTTPError("Page p1 is gone."),
+            "stroke_error": StrokeError("Page p1 is gone."),
+            "not_a_notebook": ValueError("Page p1 is gone."),
+        }[error]
 
-        data = json.loads(result.content[0].text)
-        assert data["_error"]["type"] == "unsupported_in_transport"
-        assert "--ssh" in data["_error"]["suggestion"]
-        client.get_meta_items.assert_not_called()
+        data = await self._author(client, arguments)
+
+        assert data["_error"]["type"] == error_type
+        assert "Page p1 is gone." in data["_error"]["message"]
 
     @pytest.mark.asyncio
     async def test_ssh_config_fallen_back_to_cloud_routes_to_cloud(self, monkeypatch):
         from remarkable_mcp import api
 
         monkeypatch.setattr(api, "_fell_back_to_cloud", True)
-        client = self._cloud_client()
+        client = self._cloud_client([self._notebook()])
 
         with (
             patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
@@ -4599,7 +4735,8 @@ class TestCloudAuthorDispatch:
 
         assert json.loads(created.content[0].text)["transport"] == "cloud"
         client.create_notebook.assert_called_once_with("Notes", "", "")
-        assert json.loads(added.content[0].text)["_error"]["type"] == "unsupported_in_transport"
+        assert json.loads(added.content[0].text)["transport"] == "cloud"
+        client.add_notebook_page.assert_called_once_with("doc-1")
 
 
 class TestCloudBlobCache:
