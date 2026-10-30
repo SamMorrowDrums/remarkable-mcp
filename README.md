@@ -66,7 +66,7 @@ Start with the first mode that fits your setup.
 |---:|---|---|---|---|
 | 1 | USB web | Connect the tablet and enable USB web | Upload; destination chosen by tablet | You want the shortest setup without a subscription or developer mode |
 | 2 | Local directory | Install and sign in to the desktop app | No | You want offline, device-free reads from the desktop cache |
-| 3 | Cloud | Register once; Connect subscription required | Full document and folder management | You need wireless or remote access |
+| 3 | Cloud | Register once; Connect subscription required | Full document and folder management; new notebooks | You need wireless or remote access |
 | 4 | SSH | Enable developer mode and configure SSH | Full management and native authoring | You need direct filesystem access or native ink writes |
 
 ### USB Web Interface
@@ -623,6 +623,8 @@ Write tools let you upload, organize, and manage documents on your reMarkable. *
 | Move | ❌ | ✅ | ✅ | ❌ |
 | Rename | ❌ | ✅ | ✅ | ❌ |
 | Delete | ❌ | ✅ (→ trash) | ✅ (→ trash; optional permanent) | ❌ |
+| Create notebook (`remarkable_author` `create_document`) | ❌ | ✅ | ✅ | ❌ |
+| Draw / add page (`remarkable_author` `draw`, `add_page`) | ❌ | ❌ | ✅ | ❌ |
 
 ### Disabling Write Tools (read-only mode)
 
@@ -673,7 +675,7 @@ Or set the environment variable:
 | `remarkable_rename(document, new_name, defer_restart)` | Rename a document or folder (cloud and SSH) |
 | `remarkable_delete(document, defer_restart, permanent)` | Move a document/folder to Trash; SSH can permanently remove it with `permanent=True` |
 | `remarkable_refresh()` | Safely restart `xochitl` once to apply pending writes made with `defer_restart=True`; no-op after this process has confirmed a clean state — **SSH only** |
-| `remarkable_author(method, ..., defer_restart)` | Author native ink and notebooks — `draw` (append strokes), `add_page` (append a blank notebook page), `create_document` (new notebook) — **SSH only** |
+| `remarkable_author(method, ..., defer_restart)` | Author native ink and notebooks — `draw` (append strokes), `add_page` (append a blank notebook page), `create_document` (new notebook) — all methods over SSH; **cloud supports `create_document` only** |
 
 ### Safety
 
@@ -722,7 +724,9 @@ remarkable_upload("a.pdf", parent_folder="/Research", defer_restart=True)
 remarkable_upload("b.pdf", parent_folder="/Research", defer_restart=True)
 remarkable_refresh()
 
-# Author native ink and notebooks (SSH only)
+# Author native ink and notebooks
+# draw and add_page are SSH only; create_document also works in cloud mode,
+# where the tablet picks the new notebook up on its next sync.
 # Append pen/highlighter strokes to a page (coordinates normalized [0,1] from
 # the page's top-left). The interactive canvas Save button calls this too.
 remarkable_author(
@@ -740,6 +744,18 @@ remarkable_author(method="create_document", name="Sketches")
 
 # Only seed typed text when the user explicitly requested it.
 remarkable_author(method="create_document", name="Meeting notes", text="Agenda\nFollow-ups")
+
+# Line prefixes set native paragraph styles: "# " title, "## " heading,
+# "### " subheading, "- " or "* " bullet, "  - " second-level bullet,
+# "1. " numbered item (the device renumbers), "- [ ] " / "- [x] " checkbox.
+remarkable_author(
+    method="create_document",
+    name="Sprint",
+    text=(
+        "# Sprint 12\n## Goals\n### Export\n- Ship export\n  - PDF first\n"
+        "1. Review PR\n2. Merge\n- [ ] Release notes\n- [x] Fix CI"
+    ),
+)
 ```
 
 ---

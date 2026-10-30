@@ -37,7 +37,7 @@ Each `(mode, tool)` cell is one of:
 | Result | Meaning |
 | ------ | ------- |
 | **PASS** ✅ | The tool ran and returned a sensible result for this transport. |
-| **N/A** ⛔ | The transport does not expose this tool — it is *correctly hidden* (e.g. `mkdir`/`move`/`rename`/`delete` over USB web, or `remarkable_author` outside SSH). This is expected, **not** a failure. |
+| **N/A** ⛔ | The transport does not expose this tool — it is *correctly hidden* (e.g. `mkdir`/`move`/`rename`/`delete` over USB web, or `remarkable_author` over USB web). This is expected, **not** a failure. |
 | **SKIP** | The tool could not be run (mode unreachable, or no target document to read). |
 | **FAIL** ❌ | The tool is exposed but errored or returned the wrong thing. **This is the only result that means something is broken.** |
 
@@ -56,15 +56,18 @@ tool visibility changes.
 | `remarkable_status` / `browse` / `recent` / `search` / `read` / `image` / `canvas` | PASS | PASS | PASS | PASS |
 | `remarkable_upload` | **N/A** | PASS | PASS | PASS |
 | `remarkable_mkdir` / `rename` / `move` / `delete` | **N/A** | PASS | **N/A** | PASS |
-| `remarkable_author` | **N/A** | **N/A** | **N/A** | PASS |
+| `remarkable_author` | **N/A** | PASS (`create_document` only) | **N/A** | PASS |
 
 USB web is read + render + upload only. It preserves the uploaded filename but
 does not accept a destination-folder parameter; the tablet web service chooses
 the folder. Its HTTP API exposes no folder/move/rename/delete endpoints, so those tools are not registered
 in that mode (shown as N/A). Local directory mode is strictly read-only (the
 folder is the desktop app's private sync cache), so no write tool registers
-there. `remarkable_author` requires native `.rm` write-back and is SSH-only
-today.
+there. `remarkable_author` is exposed over SSH and cloud. Over SSH the harness
+runs `create_document`, `add_page` and `draw`. In cloud mode only
+`create_document` is supported: the harness seeds the new notebook with a known
+marker, reads it back with `remarkable_read`, and records `add_page=N/A;
+draw=N/A`, since those methods modify existing `.rm` pages and stay SSH-only.
 
 ### Upload is verified end-to-end (cloud/ssh)
 

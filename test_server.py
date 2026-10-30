@@ -53,6 +53,22 @@ async def _list_resources():
     return await mcp.list_resources()
 
 
+@pytest.fixture(autouse=True)
+def _restore_tool_registry():
+    """Restore the import-time tool registry after every test.
+
+    Tests re-register write tools under patched transports and pop them in
+    cleanup. Popping a tool the default cloud import also registers (e.g.
+    ``remarkable_mkdir``) would otherwise shrink the surface seen by every
+    later test, and make later assertions depend on test order.
+    """
+    tools = mcp._tool_manager._tools
+    snapshot = dict(tools)
+    yield
+    tools.clear()
+    tools.update(snapshot)
+
+
 # =============================================================================
 # Test Fixtures
 # =============================================================================
@@ -132,13 +148,13 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Cloud default: 7 read/export tools + always-on canvas + 6 write tools.
+        """Cloud default: 7 read/export tools + always-on canvas + 7 write tools.
 
-        ``remarkable_author`` is SSH-only and therefore hidden in cloud mode, so
-        the default cloud surface is 14 tools.
+        The write tools include ``remarkable_author`` (create_document only in
+        cloud mode), so the default cloud surface is 15 tools.
         """
         tools = await _list_tools()
-        assert len(tools) == 14, f"Expected 14 tools, got {len(tools)}"
+        assert len(tools) == 15, f"Expected 15 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -1585,7 +1601,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await _list_tools()
 
-        assert len(tools) == 14
+        assert len(tools) == 15
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:
@@ -3027,9 +3043,9 @@ class TestWriteTools:
     async def test_write_tools_registered_by_default(self):
         """Write tools ARE registered by default (write-on); read-only would skip them.
 
-        ``remarkable_author`` is intentionally excluded here: it is SSH-only and
-        therefore hidden in cloud mode (the mode these tests import). See
-        ``test_author_only_registered_in_ssh_mode`` for its gating.
+        Includes ``remarkable_author``: the default import is cloud mode, which
+        supports its create_document method. See
+        ``test_author_registered_in_ssh_and_cloud_modes`` for its gating.
         """
         tools = await _list_tools()
         tool_names = [tool.name for tool in tools]
@@ -3041,15 +3057,13 @@ class TestWriteTools:
             "remarkable_move",
             "remarkable_rename",
             "remarkable_delete",
+            "remarkable_author",
         ]
 
         for tool_name in write_tool_names:
             assert tool_name in tool_names, (
                 f"Write tool {tool_name} should be registered by default"
             )
-        assert "remarkable_author" not in tool_names, (
-            "remarkable_author is SSH-only and must be hidden in cloud mode"
-        )
 
     @pytest.mark.asyncio
     async def test_write_tools_registered_when_enabled(self):
@@ -3397,67 +3411,75 @@ class TestWriteTools:
         """SSH-only write tools must not be exposed in USB web mode (upload-only)."""
         from remarkable_mcp.write_tools import register_write_tools
 
+        managed = [
+            "remarkable_upload",
+            "remarkable_mkdir",
+            "remarkable_move",
+            "remarkable_rename",
+            "remarkable_delete",
+        ]
+        for name in managed:
+            mcp._tool_manager._tools.pop(name, None)
         env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
         env["REMARKABLE_USE_USB_WEB"] = "1"
         with patch.dict(os.environ, env, clear=True):
             register_write_tools()
-            try:
-                tools = await _list_tools()
-                names = {t.name for t in tools}
-                assert "remarkable_upload" in names  # upload works on USB web
-                assert "remarkable_mkdir" not in names
-                assert "remarkable_move" not in names
-                assert "remarkable_rename" not in names
-                assert "remarkable_delete" not in names
-            finally:
-                for name in [
-                    "remarkable_upload",
-                    "remarkable_mkdir",
-                    "remarkable_move",
-                    "remarkable_rename",
-                    "remarkable_delete",
-                ]:
-                    mcp._tool_manager._tools.pop(name, None)
+            tools = await _list_tools()
+            names = {t.name for t in tools}
+            assert "remarkable_upload" in names  # upload works on USB web
+            assert "remarkable_mkdir" not in names
+            assert "remarkable_move" not in names
+            assert "remarkable_rename" not in names
+            assert "remarkable_delete" not in names
 
     @pytest.mark.asyncio
-    async def test_author_only_registered_in_ssh_mode(self):
-        """remarkable_author is SSH-only: present in SSH, hidden in cloud and USB web.
+    async def test_usb_web_wins_over_ssh_for_write_tools(self):
+        """With both modes set, get_rmapi() returns the USB client, so SSH tools stay hidden."""
+        from remarkable_mcp.write_tools import _is_ssh_mode, register_write_tools
 
-        Native ink/notebook authoring has no cloud/USB-web write-back path yet, so
-        rather than registering the tool everywhere and erroring at call time we
-        only expose it in SSH mode.
+        managed = [
+            "remarkable_author",
+            "remarkable_mkdir",
+            "remarkable_move",
+            "remarkable_rename",
+            "remarkable_delete",
+        ]
+        for name in managed:
+            mcp._tool_manager._tools.pop(name, None)
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1", "REMARKABLE_USE_USB_WEB": "1"}):
+            assert _is_ssh_mode() is False
+            register_write_tools()
+            names = {t.name for t in await _list_tools()}
+            assert "remarkable_upload" in names
+            assert names.isdisjoint(managed)
+
+    @pytest.mark.asyncio
+    async def test_author_registered_in_ssh_and_cloud_modes(self):
+        """remarkable_author is present in SSH and cloud, hidden in USB web.
+
+        SSH supports every method and cloud supports create_document. USB web has
+        no notebook write-back path, so the tool is not exposed there.
         """
         from remarkable_mcp.write_tools import register_write_tools
 
         # SSH mode -> author present.
+        mcp._tool_manager._tools.pop("remarkable_author", None)
         with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
             register_write_tools()
-            try:
-                names = {t.name for t in await _list_tools()}
-                assert "remarkable_author" in names
-            finally:
-                mcp._tool_manager._tools.pop("remarkable_author", None)
+            names = {t.name for t in await _list_tools()}
+            assert "remarkable_author" in names
 
-        # Cloud mode -> author hidden.
+        # Cloud mode -> author present.
+        mcp._tool_manager._tools.pop("remarkable_author", None)
         env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
         env.pop("REMARKABLE_USE_USB_WEB", None)
         with patch.dict(os.environ, env, clear=True):
             register_write_tools()
-            try:
-                names = {t.name for t in await _list_tools()}
-                assert "remarkable_author" not in names
-            finally:
-                for name in [
-                    "remarkable_author",
-                    "remarkable_upload",
-                    "remarkable_mkdir",
-                    "remarkable_move",
-                    "remarkable_rename",
-                    "remarkable_delete",
-                ]:
-                    mcp._tool_manager._tools.pop(name, None)
+            names = {t.name for t in await _list_tools()}
+            assert "remarkable_author" in names
 
         # USB web mode -> author hidden.
+        mcp._tool_manager._tools.pop("remarkable_author", None)
         env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
         env["REMARKABLE_USE_USB_WEB"] = "1"
         with patch.dict(os.environ, env, clear=True):
@@ -3886,6 +3908,455 @@ class TestConcurrentToolDispatch:
             f"Concurrent tool calls appear serialized: elapsed={elapsed:.2f}s "
             f"vs single-call delay={call_delay}s"
         )
+
+
+class _FakeSyncStore:
+    """In-memory sync v3/v4 store served through ``_http_request_with_retry``.
+
+    ``conflicts`` makes that many root commits fail with HTTP 409, as if another
+    client had committed first. ``lost_acks`` makes that many root commits
+    apply and then answer HTTP 412, as when a retried PUT replays a commit whose
+    first response was lost. ``folders`` maps a folder id to its parent id
+    ("trash" for a deleted folder); each gets a real index and metadata blob.
+    """
+
+    def __init__(self, conflicts=0, lost_acks=0, folders=None):
+        import hashlib
+
+        self.blobs = {}
+        lines = []
+        for folder_id, parent in (folders or {}).items():
+            meta = json.dumps(
+                {"type": "CollectionType", "visibleName": folder_id, "parent": parent}
+            ).encode("utf-8")
+            meta_hash = hashlib.sha256(meta).hexdigest()
+            index = f"3\n{meta_hash}:0:{folder_id}.metadata:0:{len(meta)}\n".encode("utf-8")
+            index_hash = hashlib.sha256(index).hexdigest()
+            self.blobs.update({meta_hash: meta, index_hash: index})
+            lines.append(f"{index_hash}:0:{folder_id}:1:{len(meta)}")
+        total = sum(int(line.split(":")[4]) for line in lines)
+        root_body = "\n".join(["4", f"0:.:{len(lines)}:{total}", *lines]) + "\n"
+        self.root = hashlib.sha256(root_body.encode("utf-8")).hexdigest()
+        self.blobs[self.root] = root_body.encode("utf-8")
+        self.generation = 1
+        self.conflicts = conflicts
+        self.lost_acks = lost_acks
+        self.put_names = []
+        self.committed_hashes = []
+
+    def _response(self, status_code=200, json_data=None, content=b""):
+        response = Mock()
+        response.status_code = status_code
+        response.ok = status_code < 400
+        response.headers = {}
+        response.content = content
+        response.text = json.dumps(json_data) if json_data is not None else ""
+        response.json.return_value = json_data
+        response.raise_for_status = Mock()
+        return response
+
+    def __call__(self, method, url, **kwargs):
+        from remarkable_mcp.sync import FILES_URL, ROOT_PUT_URL, ROOT_URL
+
+        if url == ROOT_URL:
+            return self._response(json_data={"hash": self.root, "generation": self.generation})
+        if url == ROOT_PUT_URL:
+            body = kwargs["json"]
+            self.committed_hashes.append(body["hash"])
+            if self.conflicts:
+                self.conflicts -= 1
+                self.generation += 1
+                return self._response(status_code=409)
+            assert body["generation"] == self.generation
+            self.root = body["hash"]
+            self.generation += 1
+            if self.lost_acks:
+                self.lost_acks -= 1
+                return self._response(status_code=412)
+            return self._response(json_data={"hash": self.root, "generation": self.generation})
+        if url.startswith(f"{FILES_URL}/"):
+            blob_hash = url.rsplit("/", 1)[1]
+            if method == "PUT":
+                self.put_names.append(kwargs["headers"]["rm-filename"])
+                self.blobs[blob_hash] = kwargs["data"]
+                return self._response()
+            return self._response(content=self.blobs[blob_hash])
+        raise AssertionError(f"Unexpected request: {method} {url}")
+
+    def root_lines(self):
+        return self.blobs[self.root].decode("utf-8").strip().split("\n")
+
+
+class TestStyledTextPages:
+    """page_rm_bytes maps Markdown line prefixes to native paragraph styles."""
+
+    def _paragraph_entries(self, page_bytes, monkeypatch):
+        """Return ``(text, style entry bytes as hex or None)`` per paragraph.
+
+        rmscene drops what follows the format code and maps unknown codes to
+        PLAIN, so the raw entry bytes are captured instead of its parsed style.
+        """
+        import io
+
+        from rmscene import read_tree, scene_stream
+        from rmscene.tagged_block_common import LwwValue
+        from rmscene.text import TextDocument
+
+        entries = {}
+
+        def capture(stream):
+            char_id = stream.data.read_crdt_id()
+            timestamp = stream.read_id(1)
+            with stream.read_subblock(2) as subblock:
+                body = stream.data.read_bytes(subblock.size)
+            entries[char_id] = body.hex()
+            return char_id, LwwValue(timestamp, body[1])
+
+        monkeypatch.setattr(scene_stream, "text_format_from_stream", capture)
+        tree = read_tree(io.BytesIO(page_bytes))
+        document = TextDocument.from_scene_item(tree.root_text)
+        return [(str(p), entries.get(p.start_id)) for p in document.contents]
+
+    def test_prefixes_become_paragraph_styles(self, monkeypatch):
+        from remarkable_mcp import notebooks
+
+        page = notebooks.page_rm_bytes(
+            "# Title\n## Heading\n### Subheading\nBody\n- Point\n  - Sub-point\n"
+            "* Star point\n1. First\n12. Twelfth\n- [ ] To do\n- [x] Done\n- [X] Also done"
+        )
+
+        # Entry bytes match a Paper Pro page styled on the device: "11" then the
+        # format code, and for the larger heading two extra tagged fields.
+        assert self._paragraph_entries(page, monkeypatch) == [
+            ("Title", "1102"),
+            ("Heading", "110321023403000000"),
+            ("Subheading", "1103"),
+            ("Body", None),
+            ("Point", "1104"),
+            ("Sub-point", "1105"),
+            ("Star point", "1104"),
+            ("First", "110a"),
+            ("Twelfth", "110a"),
+            ("To do", "1106"),
+            ("Done", "1107"),
+            ("Also done", "1107"),
+        ]
+
+    def test_body_first_line_keeps_plain_entry(self, monkeypatch):
+        from remarkable_mcp import notebooks
+
+        assert self._paragraph_entries(notebooks.page_rm_bytes("Body\n# Title"), monkeypatch) == [
+            ("Body", "1101"),
+            ("Title", "1102"),
+        ]
+
+    def test_number_without_dot_space_stays_body(self, monkeypatch):
+        from remarkable_mcp import notebooks
+
+        entries = self._paragraph_entries(
+            notebooks.page_rm_bytes("2026 plan\n3.5 ratio"), monkeypatch
+        )
+        assert entries == [("2026 plan", "1101"), ("3.5 ratio", None)]
+
+    def test_plain_text_bytes_are_unchanged(self):
+        import io
+        import uuid
+
+        from rmscene import simple_text_document, write_blocks
+
+        from remarkable_mcp import notebooks
+        from remarkable_mcp.strokes import WRITE_VERSION
+
+        author = uuid.uuid4()
+        expected = io.BytesIO()
+        write_blocks(
+            expected,
+            list(simple_text_document("Agenda\nFollow-ups", author_uuid=author)),
+            options={"version": WRITE_VERSION},
+        )
+
+        assert notebooks.page_rm_bytes("Agenda\nFollow-ups", author_uuid=str(author)) == (
+            expected.getvalue()
+        )
+
+    def test_styled_page_stays_drawable(self):
+        from remarkable_mcp import notebooks, strokes
+
+        page = notebooks.page_rm_bytes("# Title\n## Heading\n1. Item\n- [ ] To do")
+        drawn = strokes.append_strokes(page, [{"points": [[0.1, 0.5], [0.9, 0.5]]}])
+
+        # rmscene cannot re-encode the heading fields or the numbered code, so
+        # the styled bytes must survive drawing untouched.
+        assert drawn.startswith(page)
+        assert len(drawn) > len(page)
+
+
+class TestCloudCreateNotebook:
+    """RemarkableClient.create_notebook against an in-memory sync store."""
+
+    def _create(self, store, **kwargs):
+        from remarkable_mcp.sync import RemarkableClient
+
+        client = RemarkableClient(user_token="user-token")
+        with (
+            patch("remarkable_mcp.sync._http_request_with_retry", side_effect=store),
+            patch("remarkable_mcp.sync.time.sleep"),
+        ):
+            created = client.create_notebook("Agenda", **kwargs)
+        return client, created
+
+    def test_uploads_notebook_blobs_and_root_entry(self):
+        store = _FakeSyncStore(folders={"folder-1": ""})
+        _, created = self._create(store, parent_id="folder-1")
+        doc_id = created["document"].id
+        page_id = created["page_id"]
+
+        assert store.put_names == [
+            f"{doc_id}.content",
+            f"{doc_id}.metadata",
+            f"{doc_id}/{page_id}.rm",
+            f"{doc_id}.docSchema",
+            "root.docSchema",
+        ]
+        doc_line = next(line for line in store.root_lines() if f":{doc_id}:" in line)
+        assert doc_line.split(":")[3] == "3"
+        assert created["document"].hash == doc_line.split(":")[0]
+
+        index = store.blobs[created["document"].hash].decode("utf-8")
+        entries = {line.split(":")[2]: line.split(":")[0] for line in index.strip().split("\n")[1:]}
+        metadata = json.loads(store.blobs[entries[f"{doc_id}.metadata"]])
+        assert metadata["type"] == "DocumentType"
+        assert metadata["parent"] == "folder-1"
+        assert metadata["version"] == 1
+        assert metadata["metadatamodified"] is False
+        assert metadata["modified"] is False
+        assert metadata["synced"] is False
+        content = json.loads(store.blobs[entries[f"{doc_id}.content"]])
+        assert content["fileType"] == "notebook"
+        assert [p["id"] for p in content["cPages"]["pages"]] == [page_id]
+        assert store.blobs[entries[f"{doc_id}/{page_id}.rm"]].startswith(
+            b"reMarkable .lines file, version=6"
+        )
+
+    def test_conflict_retry_republishes_same_document(self):
+        from remarkable_mcp import notebooks
+
+        store = _FakeSyncStore(conflicts=1)
+        with patch.object(notebooks, "page_rm_bytes", wraps=notebooks.page_rm_bytes) as build:
+            _, created = self._create(store, text="Agenda")
+        doc_id = created["document"].id
+
+        build.assert_called_once()
+        assert len(store.committed_hashes) == 2
+        assert store.committed_hashes[0] == store.committed_hashes[1]
+        assert store.put_names.count(f"{doc_id}.docSchema") == 1
+        assert store.put_names.count(f"{doc_id}/{created['page_id']}.rm") == 1
+        assert store.put_names.count("root.docSchema") == 2
+        assert sum(f":{doc_id}:" in line for line in store.root_lines()) == 1
+
+    def test_replayed_commit_keeps_one_root_entry(self):
+        store = _FakeSyncStore(lost_acks=1)
+        _, created = self._create(store)
+        doc_id = created["document"].id
+
+        assert len(store.committed_hashes) == 2
+        assert sum(f":{doc_id}:" in line for line in store.root_lines()) == 1
+        assert store.root_lines()[1] == f"0:.:1:{store.root_lines()[2].split(':')[4]}"
+
+    def test_missing_parent_aborts_before_commit(self):
+        from remarkable_mcp.sync import CloudWriteError
+
+        store = _FakeSyncStore()
+        root_before = store.root
+
+        with pytest.raises(CloudWriteError, match="folder-gone"):
+            self._create(store, parent_id="folder-gone")
+
+        assert store.committed_hashes == []
+        assert store.root == root_before
+
+    @pytest.mark.parametrize(
+        "folders, parent_id",
+        [
+            ({"folder-1": "trash"}, "folder-1"),
+            ({"folder-1": "trash", "folder-2": "folder-1"}, "folder-2"),
+        ],
+        ids=["trashed-parent", "trashed-ancestor"],
+    )
+    def test_trashed_parent_aborts_before_commit(self, folders, parent_id):
+        from remarkable_mcp.sync import CloudWriteError
+
+        store = _FakeSyncStore(folders=folders)
+        root_before = store.root
+
+        with pytest.raises(CloudWriteError, match="trash"):
+            self._create(store, parent_id=parent_id)
+
+        assert store.committed_hashes == []
+        assert store.root == root_before
+
+    def test_nested_live_parent_is_accepted(self):
+        store = _FakeSyncStore(folders={"folder-1": "", "folder-2": "folder-1"})
+        _, created = self._create(store, parent_id="folder-2")
+
+        assert sum(f":{created['document'].id}:" in line for line in store.root_lines()) == 1
+
+    @pytest.mark.asyncio
+    async def test_remarkable_read_finds_seeded_text(self):
+        store = _FakeSyncStore()
+        client, _ = self._create(store, text="Agenda\nFollow-ups")
+
+        with (
+            patch("remarkable_mcp.sync._http_request_with_retry", side_effect=store),
+            patch("remarkable_mcp.tools.get_rmapi", return_value=client),
+        ):
+            result = await _call_tool("remarkable_read", {"document": "Agenda"})
+
+        data = json.loads(result.content[0].text)
+        assert "_error" not in data, data
+        assert "Follow-ups" in json.dumps(data)
+
+
+class TestCloudAuthorDispatch:
+    """remarkable_author routing on the cloud transport."""
+
+    def _cloud_env(self):
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env.pop("REMARKABLE_USE_USB_WEB", None)
+        env.pop("REMARKABLE_READ_ONLY", None)
+        return env
+
+    def _cloud_client(self, collection=()):
+        new_doc = Mock()
+        new_doc.id = "doc-new"
+        client = Mock(spec=["get_meta_items", "create_notebook"])
+        client.get_meta_items.return_value = list(collection)
+        client.create_notebook.return_value = {"document": new_doc, "page_id": "page-1"}
+        return client
+
+    @pytest.mark.asyncio
+    async def test_create_document_uses_cloud_client(self):
+        folder = Mock()
+        folder.ID = "folder-1"
+        folder.VissibleName = "Work"
+        folder.Parent = ""
+        folder.is_folder = True
+        client = self._cloud_client([folder])
+
+        with (
+            patch.dict(os.environ, self._cloud_env(), clear=True),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+        ):
+            result = await _call_tool(
+                "remarkable_author",
+                {"method": "create_document", "name": "Notes", "text": "Hi", "folder": "/Work"},
+            )
+
+        data = json.loads(result.content[0].text)
+        client.create_notebook.assert_called_once_with("Notes", "folder-1", "Hi")
+        assert data["created"] is True
+        assert data["document_id"] == "doc-new"
+        assert data["page_id"] == "page-1"
+        assert data["has_text"] is True
+        assert data["folder"] == "/Work"
+        assert data["transport"] == "cloud"
+        assert data["refresh_pending"] is False
+
+    @pytest.mark.asyncio
+    async def test_create_document_unknown_folder(self):
+        client = self._cloud_client()
+
+        with (
+            patch.dict(os.environ, self._cloud_env(), clear=True),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+        ):
+            result = await _call_tool(
+                "remarkable_author",
+                {"method": "create_document", "name": "Notes", "folder": "/Missing"},
+            )
+
+        data = json.loads(result.content[0].text)
+        assert data["_error"]["type"] == "folder_not_found"
+        client.create_notebook.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "cloud_write_error",
+            "http_error",
+        ],
+    )
+    async def test_create_document_cloud_write_error_is_structured(self, error):
+        from remarkable_mcp.sync import CloudWriteError
+
+        client = self._cloud_client()
+        client.create_notebook.side_effect = (
+            CloudWriteError("Parent folder x is gone.")
+            if error == "cloud_write_error"
+            else requests.HTTPError("Parent folder x is gone.")
+        )
+
+        with (
+            patch.dict(os.environ, self._cloud_env(), clear=True),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+        ):
+            result = await _call_tool(
+                "remarkable_author", {"method": "create_document", "name": "Notes"}
+            )
+
+        data = json.loads(result.content[0].text)
+        assert data["_error"]["type"] == "create_document_failed"
+        assert "Parent folder x is gone." in data["_error"]["message"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {
+                "method": "draw",
+                "document": "Notes",
+                "page": 1,
+                "strokes": [{"points": [[0.1, 0.1], [0.2, 0.2]]}],
+            },
+            {"method": "add_page", "document": "Notes"},
+        ],
+    )
+    async def test_page_methods_unsupported_in_cloud(self, arguments):
+        client = self._cloud_client()
+
+        with (
+            patch.dict(os.environ, self._cloud_env(), clear=True),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+        ):
+            result = await _call_tool("remarkable_author", arguments)
+
+        data = json.loads(result.content[0].text)
+        assert data["_error"]["type"] == "unsupported_in_transport"
+        assert "--ssh" in data["_error"]["suggestion"]
+        client.get_meta_items.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ssh_config_fallen_back_to_cloud_routes_to_cloud(self, monkeypatch):
+        from remarkable_mcp import api
+
+        monkeypatch.setattr(api, "_fell_back_to_cloud", True)
+        client = self._cloud_client()
+
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+        ):
+            created = await _call_tool(
+                "remarkable_author", {"method": "create_document", "name": "Notes"}
+            )
+            added = await _call_tool(
+                "remarkable_author", {"method": "add_page", "document": "Notes"}
+            )
+
+        assert json.loads(created.content[0].text)["transport"] == "cloud"
+        client.create_notebook.assert_called_once_with("Notes", "", "")
+        assert json.loads(added.content[0].text)["_error"]["type"] == "unsupported_in_transport"
 
 
 class TestCloudBlobCache:
@@ -6701,23 +7172,11 @@ class TestCLIFlags:
 
 
 class TestCanvasWrite:
-    """Test the remarkable_author tool (method="draw" stroke write-back, SSH-first)."""
+    """Test the remarkable_author tool (method="draw" stroke write-back, SSH-first).
 
-    @pytest.fixture(autouse=True)
-    def _register_author(self):
-        """Expose remarkable_author for these tests.
-
-        The tool is SSH-only and therefore hidden in the default (cloud) import
-        mode, so register it explicitly under SSH, then remove it afterward to
-        restore the default surface. Individual tests still patch
-        REMARKABLE_USE_SSH at call time so the impl runs in SSH mode.
-        """
-        from remarkable_mcp.write_tools import register_write_tools
-
-        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}):
-            register_write_tools()
-        yield
-        mcp._tool_manager._tools.pop("remarkable_author", None)
+    The default cloud import already registers the tool; each test patches
+    REMARKABLE_USE_SSH at call time so the impl takes the SSH path.
+    """
 
     def _mock_doc(self):
         doc = Mock()
