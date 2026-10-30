@@ -693,23 +693,6 @@ def _write_result_message(
     return f"{done} Restart deferred — call remarkable_refresh() once your batch is done."
 
 
-def _page_ids_from_content(content_data: dict) -> list:
-    """Return ordered page ids from a parsed ``.content`` file.
-
-    Handles both the modern ``cPages.pages[].id`` schema (native notebooks) and
-    the legacy flat ``pages`` UUID list (PDF/EPUB-backed documents).
-    """
-    cpages = content_data.get("cPages")
-    if isinstance(cpages, dict) and isinstance(cpages.get("pages"), list):
-        ids = [p.get("id") for p in cpages["pages"] if isinstance(p, dict) and p.get("id")]
-        if ids:
-            return ids
-    pages = content_data.get("pages")
-    if isinstance(pages, list) and all(isinstance(p, str) for p in pages):
-        return list(pages)
-    return []
-
-
 def _read_remote_bytes(ssh_client: SSHClient, remote_path: str) -> Optional[bytes]:
     """Download a remote file's bytes, or None if it does not exist / fails."""
     try:
@@ -1204,7 +1187,7 @@ def _author_draw(
         content_data = json.loads(content_raw) if content_raw else {}
     except (ValueError, TypeError):
         content_data = {}
-    page_ids = _page_ids_from_content(content_data)
+    page_ids = nb.page_ids_from_content(content_data)
     if not page_ids:
         return make_error(
             error_type="no_pages",
@@ -1325,12 +1308,6 @@ def _author_add_page(document: str, defer_restart: bool = False) -> str:
             suggestion="The document may be missing or have an unexpected format.",
         )
 
-    # Reuse the notebook's existing author uuid so CRDT author ids stay aligned.
-    author_uuid = None
-    uuids = content_data.get("cPages", {}).get("uuids")
-    if isinstance(uuids, list) and uuids and isinstance(uuids[0], dict):
-        author_uuid = uuids[0].get("first")
-
     new_page_id = nb.new_uuid()
     try:
         updated = nb.append_page_to_content(content_data, new_page_id)
@@ -1344,10 +1321,7 @@ def _author_add_page(document: str, defer_restart: bool = False) -> str:
             ),
         )
 
-    try:
-        page_bytes = nb.blank_page_rm_bytes(author_uuid=author_uuid)
-    except (ValueError, TypeError):
-        page_bytes = nb.blank_page_rm_bytes()
+    page_bytes = nb.blank_page_rm_bytes(author_uuid=nb.content_author_uuid(content_data))
 
     _write_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}/{new_page_id}.rm", page_bytes)
     _write_content_file(ssh_client, doc_uuid, updated["content"])

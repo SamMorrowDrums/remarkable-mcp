@@ -183,6 +183,40 @@ def new_document_metadata(visible_name: str, parent: str = "") -> dict:
     }
 
 
+def page_ids_from_content(content_data: dict) -> list:
+    """Return ordered page ids from a parsed ``.content`` file.
+
+    Handles both the modern ``cPages.pages[].id`` schema (native notebooks) and
+    the legacy flat ``pages`` UUID list (PDF/EPUB-backed documents).
+    """
+    cpages = content_data.get("cPages")
+    if isinstance(cpages, dict) and isinstance(cpages.get("pages"), list):
+        ids = [p.get("id") for p in cpages["pages"] if isinstance(p, dict) and p.get("id")]
+        if ids:
+            return ids
+    pages = content_data.get("pages")
+    if isinstance(pages, list) and all(isinstance(p, str) for p in pages):
+        return list(pages)
+    return []
+
+
+def content_author_uuid(content_data: dict) -> Optional[str]:
+    """Return the notebook's first ``cPages.uuids`` author uuid, or None.
+
+    New pages reuse it so their CRDT author ids line up with the notebook's.
+    A missing or malformed uuid yields None, and the caller builds the page
+    with a fresh author uuid instead.
+    """
+    cpages = content_data.get("cPages")
+    uuids = cpages.get("uuids") if isinstance(cpages, dict) else None
+    if not (isinstance(uuids, list) and uuids and isinstance(uuids[0], dict)):
+        return None
+    try:
+        return str(_uuid.UUID(str(uuids[0].get("first"))))
+    except (ValueError, TypeError):
+        return None
+
+
 def append_page_to_content(content_data: dict, new_page_id: str) -> dict:
     """Append a blank page entry to an existing notebook's ``.content`` dict.
 

@@ -7694,6 +7694,25 @@ class TestNotebookBuilders:
         assert c["pageCount"] == 2
         assert c["cPages"]["pages"][1]["idx"]["value"] == "bb"
 
+    @pytest.mark.parametrize(
+        "content, expected",
+        [
+            ({"cPages": {"uuids": [{"first": "A1B2C3D4-0000-4000-8000-000000000001"}]}}, True),
+            ({"cPages": {"uuids": [{"first": "not-a-uuid"}]}}, False),
+            ({"cPages": {"uuids": []}}, False),
+            ({"pages": ["a"]}, False),
+        ],
+        ids=["valid", "malformed", "empty", "no-cpages"],
+    )
+    def test_content_author_uuid(self, content, expected):
+        from remarkable_mcp import notebooks as nb
+
+        author = nb.content_author_uuid(content)
+        if expected:
+            assert author == "a1b2c3d4-0000-4000-8000-000000000001"
+        else:
+            assert author is None
+
     def test_append_page_rejects_non_notebook(self):
         from remarkable_mcp import notebooks as nb
 
