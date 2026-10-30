@@ -289,6 +289,10 @@ class CloudWriteError(RuntimeError):
     """Raised when a cloud write cannot be completed."""
 
 
+class NotANotebookError(CloudWriteError):
+    """Raised when a page is added to a document that is not a native notebook."""
+
+
 # CRC32C (Castagnoli) table for the GCS ``x-goog-hash`` upload integrity header.
 # reMarkable's blob store sits behind Google Cloud Storage, which rejects PUTs
 # without a matching ``crc32c`` checksum. stdlib ``zlib.crc32`` is IEEE, not
@@ -920,6 +924,36 @@ class RemarkableClient:
         self._documents_by_id = {}
         self._file_type_cache = {}
 
+    def _read_entry_metadata(self, entry: Dict[str, Any]) -> tuple:
+        """Return ``(files, metadata_entry, metadata)`` for one root entry."""
+        doc_id = entry["id"]
+        files = self._parse_index(self._get_file(entry["hash"], f"{doc_id}.docSchema"))
+        meta_entry = next((f for f in files if f["id"].endswith(".metadata")), None)
+        if meta_entry is None:
+            raise CloudWriteError(f"Document {doc_id} has no metadata blob.")
+        metadata = json.loads(self._get_file(meta_entry["hash"], meta_entry["id"]).decode("utf-8"))
+        return files, meta_entry, metadata
+
+    def _require_live_parent(self, entries: List[Dict[str, Any]], parent_id: str) -> None:
+        """Raise ``CloudWriteError`` unless ``parent_id`` can hold a new document.
+
+        Every folder from ``parent_id`` up to the root must be present in
+        ``entries`` and not in the trash: ``delete`` only re-parents a folder
+        under ``trash``, so a deleted folder is still listed in the root.
+        """
+        entries_by_id = {e["id"]: e for e in entries}
+        seen = set()
+        folder_id = parent_id
+        while folder_id and folder_id not in seen:
+            seen.add(folder_id)
+            entry = entries_by_id.get(folder_id)
+            if entry is None:
+                raise CloudWriteError(f"Parent folder {folder_id} is no longer in the cloud root.")
+            _, _, metadata = self._read_entry_metadata(entry)
+            if metadata.get("parent") == "trash" or metadata.get("deleted"):
+                raise CloudWriteError(f"Parent folder {folder_id} is in the trash.")
+            folder_id = metadata.get("parent", "")
+
     def _mutate_doc_metadata(self, entry: Dict[str, Any], apply: "Any") -> Dict[str, Any]:
         """Rewrite one document's ``.metadata`` blob and return its new root entry.
 
@@ -927,12 +961,7 @@ class RemarkableClient:
         bumped and ``lastModified`` refreshed so the device picks up the change.
         """
         doc_id = entry["id"]
-        files = self._parse_index(self._get_file(entry["hash"], f"{doc_id}.docSchema"))
-        meta_entry = next((f for f in files if f["id"].endswith(".metadata")), None)
-        if meta_entry is None:
-            raise CloudWriteError(f"Document {doc_id} has no metadata blob.")
-
-        metadata = json.loads(self._get_file(meta_entry["hash"], meta_entry["id"]).decode("utf-8"))
+        files, meta_entry, metadata = self._read_entry_metadata(entry)
         apply(metadata)
         try:
             metadata["version"] = int(metadata.get("version", 1)) + 1
@@ -956,6 +985,66 @@ class RemarkableClient:
             raise CloudWriteError(f"Document {doc_id} not found in cloud root.")
         return entry
 
+    def _add_new_document(
+        self,
+        doc_id: str,
+        files: List[Dict[str, Any]],
+        name: str,
+        doc_type: str,
+        parent_id: str,
+    ) -> Document:
+        """Index already-uploaded file blobs as a new document and add it to the root.
+
+        The root entry is computed once, so a generation-conflict retry inside
+        ``_sync_root`` re-adds the exact same entry without re-uploading blobs.
+        A retried root PUT whose first response was lost can report a conflict
+        for a commit that already landed; the re-read root then holds the entry,
+        so it is replaced rather than appended twice.
+
+        The parent is resolved by the caller before this commit; it is checked
+        again against the root being committed, so a parent removed from the
+        root or moved to the trash in between aborts the write.
+        """
+        new_entry = self._upload_doc_index(doc_id, files)
+
+        def add(entries):
+            self._require_live_parent(entries, parent_id)
+            return [e for e in entries if e["id"] != doc_id] + [new_entry]
+
+        self._sync_root(add)
+        return Document(
+            id=doc_id,
+            hash=new_entry["hash"],
+            name=name,
+            doc_type=doc_type,
+            parent=parent_id or "",
+        )
+
+    def _new_document_metadata(self, name: str, parent_id: str) -> Dict[str, Any]:
+        """Return the ``.metadata`` of a ``DocumentType`` created in the cloud.
+
+        The sync flags are all False and ``version`` is 1: the cloud copy is
+        the authoritative one, so the device has no local change to push.
+        """
+        now = self._now_ms()
+        return {
+            "createdTime": now,
+            "deleted": False,
+            "lastModified": now,
+            "lastOpened": now,
+            "lastOpenedPage": 0,
+            "metadatamodified": False,
+            "modified": False,
+            "new": False,
+            "parent": parent_id or "",
+            "pinned": False,
+            "source": "",
+            "synced": False,
+            "type": "DocumentType",
+            "version": 1,
+            "visibleName": name,
+        }
+
     def create_folder(self, name: str, parent_id: str = "") -> Document:
         """Create a folder (CollectionType) in the cloud and return it."""
         doc_id = str(uuid.uuid4())
@@ -972,15 +1061,170 @@ class RemarkableClient:
         }
         meta_bytes = json.dumps(metadata, sort_keys=True).encode("utf-8")
         files = [self._upload_file_blob(meta_bytes, f"{doc_id}.metadata")]
-        new_entry = self._upload_doc_index(doc_id, files)
-        self._sync_root(lambda entries: entries + [new_entry])
-        return Document(
-            id=doc_id,
-            hash=new_entry["hash"],
-            name=name,
-            doc_type="CollectionType",
-            parent=parent_id or "",
-        )
+        return self._add_new_document(doc_id, files, name, "CollectionType", parent_id)
+
+    def create_notebook(self, name: str, parent_id: str = "", text: str = "") -> Dict[str, Any]:
+        """Create a native notebook with one drawable page and return it.
+
+        The page is blank, or seeded with typed ``text``. Returns
+        ``{"document": Document, "page_id": str}``. The blob set matches a
+        native notebook created on a Paper Pro and read from the cloud store:
+        ``.content``, ``.metadata`` and one ``{doc_id}/{page_id}.rm`` page,
+        with no ``.pagedata``. Every id and
+        byte is built before the root commit, so a conflict retry republishes
+        the same document.
+        """
+        from remarkable_mcp import notebooks as nb
+
+        doc_id = nb.new_uuid()
+        page_id = nb.new_uuid()
+        author_uuid = nb.new_uuid()
+        page_bytes = nb.page_rm_bytes(text, author_uuid=author_uuid)
+        content_json = nb.new_notebook_content([page_id], author_uuid)
+        metadata = self._new_document_metadata(name, parent_id)
+
+        files = [
+            self._upload_file_blob(
+                json.dumps(content_json, sort_keys=True).encode("utf-8"), f"{doc_id}.content"
+            ),
+            self._upload_file_blob(
+                json.dumps(metadata, sort_keys=True).encode("utf-8"), f"{doc_id}.metadata"
+            ),
+            self._upload_file_blob(page_bytes, f"{doc_id}/{page_id}.rm"),
+        ]
+        document = self._add_new_document(doc_id, files, name, "DocumentType", parent_id)
+        return {"document": document, "page_id": page_id}
+
+    def _edit_document(self, doc_id: str, edit: "Any") -> None:
+        """Rebuild one document from its current blobs and commit the root.
+
+        ``edit(read_blob)`` receives ``read_blob(filename) -> Optional[bytes]``
+        over the document as it stands in the root about to be replaced, and
+        returns ``{filename: bytes}`` for the blobs to add or replace, or
+        ``None`` when its change is already there. It runs again on every
+        generation-conflict retry against the winning root, so a change another
+        client committed in between is read back and kept, and nothing built
+        from an older root is replayed. Blobs it does not name keep their hash.
+        """
+
+        def mutate(entries):
+            entry = self._require_entry(entries, doc_id)
+            files = self._parse_index(self._get_file(entry["hash"], f"{doc_id}.docSchema"))
+            by_name = {f["id"]: f for f in files}
+
+            def read_blob(name: str) -> Optional[bytes]:
+                blob = by_name.get(name)
+                return None if blob is None else self._get_file(blob["hash"], name)
+
+            changes = edit(read_blob)
+            if not changes:
+                return entries
+            for name, content in changes.items():
+                by_name[name] = self._upload_file_blob(content, name)
+            new_entry = self._upload_doc_index(doc_id, list(by_name.values()))
+            return self._replace_root_entry(entries, new_entry)
+
+        self._sync_root(mutate)
+
+    @staticmethod
+    def _read_content(doc_id: str, read_blob: "Any") -> Dict[str, Any]:
+        """Return a document's parsed ``.content`` through an ``_edit_document`` reader."""
+        raw = read_blob(f"{doc_id}.content")
+        if raw is None:
+            raise CloudWriteError(f"Document {doc_id} has no content blob.")
+        try:
+            content = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as e:
+            raise CloudWriteError(f"Document {doc_id} has an unreadable content blob: {e}") from e
+        if not isinstance(content, dict):
+            raise CloudWriteError(f"Document {doc_id} has an unreadable content blob.")
+        return content
+
+    def add_notebook_page(self, doc_id: str) -> Dict[str, Any]:
+        """Append a blank drawable page to the end of a native notebook.
+
+        Returns ``{"page_id", "page_index", "total_pages"}`` with a 1-based
+        index. Only ``.content`` and the new ``{doc_id}/{page_id}.rm`` change.
+        The page id is fixed across retries: when a retry finds it in
+        ``cPages``, the earlier commit landed and its acknowledgement was lost,
+        so the page is not appended twice. Raises ``NotANotebookError`` when
+        the document is not a native notebook.
+        """
+        from remarkable_mcp import notebooks as nb
+
+        page_id = nb.new_uuid()
+        page_ids: List[str] = []
+
+        def edit(read_blob):
+            content = self._read_content(doc_id, read_blob)
+            current = nb.page_ids_from_content(content)
+            if page_id in current:
+                page_ids[:] = current
+                return None
+            try:
+                nb.append_page_to_content(content, page_id)
+            except ValueError as e:
+                raise NotANotebookError(str(e)) from e
+            page_ids[:] = nb.page_ids_from_content(content)
+            page = nb.blank_page_rm_bytes(author_uuid=nb.content_author_uuid(content))
+            return {
+                f"{doc_id}.content": json.dumps(content, sort_keys=True).encode("utf-8"),
+                f"{doc_id}/{page_id}.rm": page,
+            }
+
+        self._edit_document(doc_id, edit)
+        return {
+            "page_id": page_id,
+            "page_index": page_ids.index(page_id) + 1,
+            "total_pages": len(page_ids),
+        }
+
+    def append_page_strokes(
+        self, doc_id: str, page_id: str, strokes: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Append pen strokes to one page of a document.
+
+        Returns ``{"created_overlay": bool, "paper_size": [width, height]}``.
+        Only ``{doc_id}/{page_id}.rm`` changes: its current bytes stay a
+        verbatim prefix and the strokes are appended after them, so ink another
+        client committed to the cloud first is kept. A page with no ``.rm`` yet
+        is seeded with a blank drawable layer. Each attempt remembers the
+        strokes it serialized; when a retry finds them on the page, the earlier
+        commit landed and its acknowledgement was lost, so they are not
+        appended again. A stroke is matched on its CRDT id and its line, so one
+        erased on another device between that commit and the retry no longer
+        matches and is appended again: an erased stroke may reappear, but no
+        stroke is lost. Raises ``StrokeError`` when the strokes cannot be
+        composed, and ``ValueError`` when the page bytes cannot be read.
+        """
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp import strokes as strokes_mod
+
+        page_name = f"{doc_id}/{page_id}.rm"
+        appended: List[bytes] = []
+        drawn: Dict[str, Any] = {}
+
+        def edit(read_blob):
+            content = self._read_content(doc_id, read_blob)
+            if page_id not in nb.page_ids_from_content(content):
+                raise CloudWriteError(f"Page {page_id} is no longer in document {doc_id}.")
+            original = read_blob(page_name)
+            if original is not None and any(
+                strokes_mod.contains_appended(original, tail) for tail in appended
+            ):
+                return None
+            base = original if original is not None else nb.blank_page_rm_bytes()
+            geometry = strokes_mod.page_geometry(base)
+            new_bytes = strokes_mod.append_strokes(base, strokes)
+            appended.append(new_bytes[len(base) :])
+            drawn.update(
+                created_overlay=original is None,
+                paper_size=[geometry["paper_width"], geometry["paper_height"]],
+            )
+            return {page_name: new_bytes}
+
+        self._edit_document(doc_id, edit)
+        return drawn
 
     def rename(self, doc_id: str, new_name: str) -> None:
         """Rename a document or folder in the cloud."""
@@ -1032,7 +1276,6 @@ class RemarkableClient:
             raise CloudWriteError(f"Unsupported upload type '{ext}'; use pdf or epub.")
 
         doc_id = str(uuid.uuid4())
-        now = self._now_ms()
 
         page_count, page_uuids = self._page_layout(content, ext)
         content_json = {
@@ -1052,23 +1295,7 @@ class RemarkableClient:
             "tags": [],
             "textScale": 1,
         }
-        metadata = {
-            "createdTime": now,
-            "deleted": False,
-            "lastModified": now,
-            "lastOpened": now,
-            "lastOpenedPage": 0,
-            "metadatamodified": False,
-            "modified": False,
-            "new": False,
-            "parent": parent_id or "",
-            "pinned": False,
-            "source": "",
-            "synced": False,
-            "type": "DocumentType",
-            "version": 1,
-            "visibleName": name,
-        }
+        metadata = self._new_document_metadata(name, parent_id)
         pagedata = ("Blank\n" * page_count) if page_count else "\n"
 
         files = [
@@ -1081,15 +1308,7 @@ class RemarkableClient:
             self._upload_file_blob(pagedata.encode("utf-8"), f"{doc_id}.pagedata"),
             self._upload_file_blob(content, f"{doc_id}.{ext}"),
         ]
-        new_entry = self._upload_doc_index(doc_id, files)
-        self._sync_root(lambda entries: entries + [new_entry])
-        return Document(
-            id=doc_id,
-            hash=new_entry["hash"],
-            name=name,
-            doc_type="DocumentType",
-            parent=parent_id or "",
-        )
+        return self._add_new_document(doc_id, files, name, "DocumentType", parent_id)
 
     @staticmethod
     def _page_layout(content: bytes, ext: str) -> tuple:

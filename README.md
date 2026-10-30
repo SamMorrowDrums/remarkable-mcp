@@ -66,7 +66,7 @@ Start with the first mode that fits your setup.
 |---:|---|---|---|---|
 | 1 | USB web | Connect the tablet and enable USB web | Upload; destination chosen by tablet | You want the shortest setup without a subscription or developer mode |
 | 2 | Local directory | Install and sign in to the desktop app | No | You want offline, device-free reads from the desktop cache |
-| 3 | Cloud | Register once; Connect subscription required | Full document and folder management | You need wireless or remote access |
+| 3 | Cloud | Register once; Connect subscription required | Full document and folder management; native authoring | You need wireless or remote access |
 | 4 | SSH | Enable developer mode and configure SSH | Full management and native authoring | You need direct filesystem access or native ink writes |
 
 ### USB Web Interface
@@ -623,6 +623,8 @@ Write tools let you upload, organize, and manage documents on your reMarkable. *
 | Move | ❌ | ✅ | ✅ | ❌ |
 | Rename | ❌ | ✅ | ✅ | ❌ |
 | Delete | ❌ | ✅ (→ trash) | ✅ (→ trash; optional permanent) | ❌ |
+| Create notebook (`remarkable_author` `create_document`) | ❌ | ✅ | ✅ | ❌ |
+| Draw / add page (`remarkable_author` `draw`, `add_page`) | ❌ | ✅ | ✅ | ❌ |
 
 ### Disabling Write Tools (read-only mode)
 
@@ -673,7 +675,7 @@ Or set the environment variable:
 | `remarkable_rename(document, new_name, defer_restart)` | Rename a document or folder (cloud and SSH) |
 | `remarkable_delete(document, defer_restart, permanent)` | Move a document/folder to Trash; SSH can permanently remove it with `permanent=True` |
 | `remarkable_refresh()` | Safely restart `xochitl` once to apply pending writes made with `defer_restart=True`; no-op after this process has confirmed a clean state — **SSH only** |
-| `remarkable_author(method, ..., defer_restart)` | Author native ink and notebooks — `draw` (append strokes), `add_page` (append a blank notebook page), `create_document` (new notebook) — **SSH only** |
+| `remarkable_author(method, ..., defer_restart)` | Author native ink and notebooks — `draw` (append strokes), `add_page` (append a blank notebook page), `create_document` (new notebook) — SSH and cloud |
 
 ### Safety
 
@@ -722,7 +724,9 @@ remarkable_upload("a.pdf", parent_folder="/Research", defer_restart=True)
 remarkable_upload("b.pdf", parent_folder="/Research", defer_restart=True)
 remarkable_refresh()
 
-# Author native ink and notebooks (SSH only)
+# Author native ink and notebooks (SSH and cloud). In cloud mode the tablet
+# picks each change up on its next sync; draw and add_page only append, so ink
+# or pages another device already synced to the cloud are kept.
 # Append pen/highlighter strokes to a page (coordinates normalized [0,1] from
 # the page's top-left). The interactive canvas Save button calls this too.
 remarkable_author(
@@ -740,6 +744,18 @@ remarkable_author(method="create_document", name="Sketches")
 
 # Only seed typed text when the user explicitly requested it.
 remarkable_author(method="create_document", name="Meeting notes", text="Agenda\nFollow-ups")
+
+# Line prefixes set native paragraph styles: "# " title, "## " heading,
+# "### " subheading, "- " or "* " bullet, "  - " second-level bullet,
+# "1. " numbered item (the device renumbers), "- [ ] " / "- [x] " checkbox.
+remarkable_author(
+    method="create_document",
+    name="Sprint",
+    text=(
+        "# Sprint 12\n## Goals\n### Export\n- Ship export\n  - PDF first\n"
+        "1. Review PR\n2. Merge\n- [ ] Release notes\n- [x] Fix CI"
+    ),
+)
 ```
 
 ---
@@ -763,13 +779,13 @@ How it behaves:
 
 ### Drawing and authoring from the canvas
 
-When write mode is on (the default) **and** the active transport is SSH, the canvas becomes a write surface:
+When write mode is on (the default) **and** the active transport is SSH or cloud, the canvas becomes a write surface:
 
 - **Draw**: choose a pen or highlighter, draw, then save native `.rm` ink to the device.
 - **Add page**: queue a blank native notebook page, draw on it, then save.
 - One source of truth: the canvas calls the **same** `remarkable_author` tool a model would call (`method="draw"` on Save, `method="add_page"` for ＋Page), so the human path and the model path produce byte-identical results.
 
-The Save / Draw / ＋Page controls are hidden when the page isn't writable (read-only mode, or a non-SSH transport), and the canvas falls back to a plain image viewer. The iframe bridge follows the MCP Apps spec but is best validated against your specific client.
+The Save / Draw / ＋Page controls are hidden when the page isn't writable (read-only mode, or a transport other than SSH and cloud), and the canvas falls back to a plain image viewer. The iframe bridge follows the MCP Apps spec but is best validated against your specific client.
 
 ---
 

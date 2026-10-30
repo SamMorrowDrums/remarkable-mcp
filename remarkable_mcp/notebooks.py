@@ -24,8 +24,10 @@ import uuid as _uuid
 from typing import Optional
 
 from rmscene import simple_text_document, write_blocks
+from rmscene.scene_stream import RootTextBlock
 
 from remarkable_mcp.strokes import WRITE_VERSION
+from remarkable_mcp.text_styles import parse_paragraphs, styled_root_text
 
 # reMarkable 1/2 portrait stroke space. simple_text_document emits no SceneInfo,
 # so render + write both fall back to this; keep them consistent.
@@ -55,11 +57,18 @@ def page_rm_bytes(text: str = "", author_uuid: Optional[str] = None) -> bytes:
     """Return serialized ``.rm`` bytes for a single drawable page.
 
     With ``text=""`` this is a blank page; with text it is seeded with typed
-    paragraphs (split on newlines). The result always contains a drawable layer
-    node, so :func:`remarkable_mcp.strokes.append_strokes` works on it.
+    paragraphs (split on newlines), styled from Markdown line prefixes as
+    :func:`remarkable_mcp.text_styles.parse_paragraphs` describes. The result
+    always contains a drawable layer node, so
+    :func:`remarkable_mcp.strokes.append_strokes` works on it.
     """
     au = _author_uuid(author_uuid)
-    blocks = list(simple_text_document(text, author_uuid=au))
+    paragraphs = parse_paragraphs(text)
+    body = "\n".join(content for _, content in paragraphs)
+    blocks = [
+        styled_root_text(block, paragraphs) if isinstance(block, RootTextBlock) else block
+        for block in simple_text_document(body, author_uuid=au)
+    ]
     buf = io.BytesIO()
     write_blocks(buf, blocks, options={"version": WRITE_VERSION})
     return buf.getvalue()
@@ -172,6 +181,40 @@ def new_document_metadata(visible_name: str, parent: str = "") -> dict:
         "synced": False,
         "version": 0,
     }
+
+
+def page_ids_from_content(content_data: dict) -> list:
+    """Return ordered page ids from a parsed ``.content`` file.
+
+    Handles both the modern ``cPages.pages[].id`` schema (native notebooks) and
+    the legacy flat ``pages`` UUID list (PDF/EPUB-backed documents).
+    """
+    cpages = content_data.get("cPages")
+    if isinstance(cpages, dict) and isinstance(cpages.get("pages"), list):
+        ids = [p.get("id") for p in cpages["pages"] if isinstance(p, dict) and p.get("id")]
+        if ids:
+            return ids
+    pages = content_data.get("pages")
+    if isinstance(pages, list) and all(isinstance(p, str) for p in pages):
+        return list(pages)
+    return []
+
+
+def content_author_uuid(content_data: dict) -> Optional[str]:
+    """Return the notebook's first ``cPages.uuids`` author uuid, or None.
+
+    New pages reuse it so their CRDT author ids line up with the notebook's.
+    A missing or malformed uuid yields None, and the caller builds the page
+    with a fresh author uuid instead.
+    """
+    cpages = content_data.get("cPages")
+    uuids = cpages.get("uuids") if isinstance(cpages, dict) else None
+    if not (isinstance(uuids, list) and uuids and isinstance(uuids[0], dict)):
+        return None
+    try:
+        return str(_uuid.UUID(str(uuids[0].get("first"))))
+    except (ValueError, TypeError):
+        return None
 
 
 def append_page_to_content(content_data: dict, new_page_id: str) -> dict:

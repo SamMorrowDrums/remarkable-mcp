@@ -10,11 +10,6 @@ scope and acceptance criteria.
 Track intermittent large-library SSH failures in
 [#157](https://github.com/SamMorrowDrums/remarkable-mcp/issues/157).
 
-### Cloud authoring
-
-Add native notebook creation to cloud mode before considering page mutation.
-See [#118](https://github.com/SamMorrowDrums/remarkable-mcp/issues/118).
-
 ### Export
 
 Reusable PDF and Markdown export for one document is available through
