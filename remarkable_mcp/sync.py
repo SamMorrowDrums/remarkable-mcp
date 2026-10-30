@@ -920,6 +920,36 @@ class RemarkableClient:
         self._documents_by_id = {}
         self._file_type_cache = {}
 
+    def _read_entry_metadata(self, entry: Dict[str, Any]) -> tuple:
+        """Return ``(files, metadata_entry, metadata)`` for one root entry."""
+        doc_id = entry["id"]
+        files = self._parse_index(self._get_file(entry["hash"], f"{doc_id}.docSchema"))
+        meta_entry = next((f for f in files if f["id"].endswith(".metadata")), None)
+        if meta_entry is None:
+            raise CloudWriteError(f"Document {doc_id} has no metadata blob.")
+        metadata = json.loads(self._get_file(meta_entry["hash"], meta_entry["id"]).decode("utf-8"))
+        return files, meta_entry, metadata
+
+    def _require_live_parent(self, entries: List[Dict[str, Any]], parent_id: str) -> None:
+        """Raise ``CloudWriteError`` unless ``parent_id`` can hold a new document.
+
+        Every folder from ``parent_id`` up to the root must be present in
+        ``entries`` and not in the trash: ``delete`` only re-parents a folder
+        under ``trash``, so a deleted folder is still listed in the root.
+        """
+        entries_by_id = {e["id"]: e for e in entries}
+        seen = set()
+        folder_id = parent_id
+        while folder_id and folder_id not in seen:
+            seen.add(folder_id)
+            entry = entries_by_id.get(folder_id)
+            if entry is None:
+                raise CloudWriteError(f"Parent folder {folder_id} is no longer in the cloud root.")
+            _, _, metadata = self._read_entry_metadata(entry)
+            if metadata.get("parent") == "trash" or metadata.get("deleted"):
+                raise CloudWriteError(f"Parent folder {folder_id} is in the trash.")
+            folder_id = metadata.get("parent", "")
+
     def _mutate_doc_metadata(self, entry: Dict[str, Any], apply: "Any") -> Dict[str, Any]:
         """Rewrite one document's ``.metadata`` blob and return its new root entry.
 
@@ -927,12 +957,7 @@ class RemarkableClient:
         bumped and ``lastModified`` refreshed so the device picks up the change.
         """
         doc_id = entry["id"]
-        files = self._parse_index(self._get_file(entry["hash"], f"{doc_id}.docSchema"))
-        meta_entry = next((f for f in files if f["id"].endswith(".metadata")), None)
-        if meta_entry is None:
-            raise CloudWriteError(f"Document {doc_id} has no metadata blob.")
-
-        metadata = json.loads(self._get_file(meta_entry["hash"], meta_entry["id"]).decode("utf-8"))
+        files, meta_entry, metadata = self._read_entry_metadata(entry)
         apply(metadata)
         try:
             metadata["version"] = int(metadata.get("version", 1)) + 1
@@ -973,14 +998,13 @@ class RemarkableClient:
         so it is replaced rather than appended twice.
 
         The parent is resolved by the caller before this commit; it is checked
-        again against the root being committed so a folder deleted in between
-        aborts the write instead of leaving the document under a missing parent.
+        again against the root being committed, so a parent removed from the
+        root or moved to the trash in between aborts the write.
         """
         new_entry = self._upload_doc_index(doc_id, files)
 
         def add(entries):
-            if parent_id and not any(e["id"] == parent_id for e in entries):
-                raise CloudWriteError(f"Parent folder {parent_id} is no longer in the cloud root.")
+            self._require_live_parent(entries, parent_id)
             return [e for e in entries if e["id"] != doc_id] + [new_entry]
 
         self._sync_root(add)

@@ -3916,16 +3916,28 @@ class _FakeSyncStore:
     ``conflicts`` makes that many root commits fail with HTTP 409, as if another
     client had committed first. ``lost_acks`` makes that many root commits
     apply and then answer HTTP 412, as when a retried PUT replays a commit whose
-    first response was lost.
+    first response was lost. ``folders`` maps a folder id to its parent id
+    ("trash" for a deleted folder); each gets a real index and metadata blob.
     """
 
-    def __init__(self, conflicts=0, lost_acks=0, folder_ids=()):
+    def __init__(self, conflicts=0, lost_acks=0, folders=None):
         import hashlib
 
-        lines = [f"{'0' * 64}:0:{folder_id}:1:1" for folder_id in folder_ids]
-        root_body = "\n".join(["4", f"0:.:{len(lines)}:{len(lines)}", *lines]) + "\n"
+        self.blobs = {}
+        lines = []
+        for folder_id, parent in (folders or {}).items():
+            meta = json.dumps(
+                {"type": "CollectionType", "visibleName": folder_id, "parent": parent}
+            ).encode("utf-8")
+            meta_hash = hashlib.sha256(meta).hexdigest()
+            index = f"3\n{meta_hash}:0:{folder_id}.metadata:0:{len(meta)}\n".encode("utf-8")
+            index_hash = hashlib.sha256(index).hexdigest()
+            self.blobs.update({meta_hash: meta, index_hash: index})
+            lines.append(f"{index_hash}:0:{folder_id}:1:{len(meta)}")
+        total = sum(int(line.split(":")[4]) for line in lines)
+        root_body = "\n".join(["4", f"0:.:{len(lines)}:{total}", *lines]) + "\n"
         self.root = hashlib.sha256(root_body.encode("utf-8")).hexdigest()
-        self.blobs = {self.root: root_body.encode("utf-8")}
+        self.blobs[self.root] = root_body.encode("utf-8")
         self.generation = 1
         self.conflicts = conflicts
         self.lost_acks = lost_acks
@@ -3990,7 +4002,7 @@ class TestCloudCreateNotebook:
         return client, created
 
     def test_uploads_notebook_blobs_and_root_entry(self):
-        store = _FakeSyncStore(folder_ids=["folder-1"])
+        store = _FakeSyncStore(folders={"folder-1": ""})
         _, created = self._create(store, parent_id="folder-1")
         doc_id = created["document"].id
         page_id = created["page_id"]
@@ -4058,6 +4070,32 @@ class TestCloudCreateNotebook:
 
         assert store.committed_hashes == []
         assert store.root == root_before
+
+    @pytest.mark.parametrize(
+        "folders, parent_id",
+        [
+            ({"folder-1": "trash"}, "folder-1"),
+            ({"folder-1": "trash", "folder-2": "folder-1"}, "folder-2"),
+        ],
+        ids=["trashed-parent", "trashed-ancestor"],
+    )
+    def test_trashed_parent_aborts_before_commit(self, folders, parent_id):
+        from remarkable_mcp.sync import CloudWriteError
+
+        store = _FakeSyncStore(folders=folders)
+        root_before = store.root
+
+        with pytest.raises(CloudWriteError, match="trash"):
+            self._create(store, parent_id=parent_id)
+
+        assert store.committed_hashes == []
+        assert store.root == root_before
+
+    def test_nested_live_parent_is_accepted(self):
+        store = _FakeSyncStore(folders={"folder-1": "", "folder-2": "folder-1"})
+        _, created = self._create(store, parent_id="folder-2")
+
+        assert sum(f":{created['document'].id}:" in line for line in store.root_lines()) == 1
 
     @pytest.mark.asyncio
     async def test_remarkable_read_finds_seeded_text(self):
