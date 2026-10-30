@@ -968,9 +968,12 @@ class RemarkableClient:
 
         The root entry is computed once, so a generation-conflict retry inside
         ``_sync_root`` re-adds the exact same entry without re-uploading blobs.
+        A retried root PUT whose first response was lost can report a conflict
+        for a commit that already landed; the re-read root then holds the entry,
+        so it is replaced rather than appended twice.
         """
         new_entry = self._upload_doc_index(doc_id, files)
-        self._sync_root(lambda entries: entries + [new_entry])
+        self._sync_root(lambda entries: [e for e in entries if e["id"] != doc_id] + [new_entry])
         return Document(
             id=doc_id,
             hash=new_entry["hash"],
@@ -1026,9 +1029,10 @@ class RemarkableClient:
         """Create a native notebook with one drawable page and return it.
 
         The page is blank, or seeded with typed ``text``. Returns
-        ``{"document": Document, "page_id": str}``. The blobs mirror what a
-        Paper Pro syncs for a native notebook: ``.content``, ``.metadata`` and
-        one ``{doc_id}/{page_id}.rm`` page, with no ``.pagedata``. Every id and
+        ``{"document": Document, "page_id": str}``. The blob set matches a
+        native notebook created on a Paper Pro and read from the cloud store:
+        ``.content``, ``.metadata`` and one ``{doc_id}/{page_id}.rm`` page,
+        with no ``.pagedata``. Every id and
         byte is built before the root commit, so a conflict retry republishes
         the same document.
         """

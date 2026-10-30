@@ -3893,10 +3893,12 @@ class _FakeSyncStore:
     """In-memory sync v3/v4 store served through ``_http_request_with_retry``.
 
     ``conflicts`` makes that many root commits fail with HTTP 409, as if another
-    client had committed first.
+    client had committed first. ``lost_acks`` makes that many root commits
+    apply and then answer HTTP 412, as when a retried PUT replays a commit whose
+    first response was lost.
     """
 
-    def __init__(self, conflicts=0):
+    def __init__(self, conflicts=0, lost_acks=0):
         import hashlib
 
         empty_root = b"4\n0:.:0:0\n"
@@ -3904,6 +3906,7 @@ class _FakeSyncStore:
         self.blobs = {self.root: empty_root}
         self.generation = 1
         self.conflicts = conflicts
+        self.lost_acks = lost_acks
         self.put_names = []
         self.committed_hashes = []
 
@@ -3933,6 +3936,9 @@ class _FakeSyncStore:
             assert body["generation"] == self.generation
             self.root = body["hash"]
             self.generation += 1
+            if self.lost_acks:
+                self.lost_acks -= 1
+                return self._response(status_code=412)
             return self._response(json_data={"hash": self.root, "generation": self.generation})
         if url.startswith(f"{FILES_URL}/"):
             blob_hash = url.rsplit("/", 1)[1]
@@ -4009,6 +4015,15 @@ class TestCloudCreateNotebook:
         assert store.put_names.count(f"{doc_id}/{created['page_id']}.rm") == 1
         assert store.put_names.count("root.docSchema") == 2
         assert sum(f":{doc_id}:" in line for line in store.root_lines()) == 1
+
+    def test_replayed_commit_keeps_one_root_entry(self):
+        store = _FakeSyncStore(lost_acks=1)
+        _, created = self._create(store)
+        doc_id = created["document"].id
+
+        assert len(store.committed_hashes) == 2
+        assert sum(f":{doc_id}:" in line for line in store.root_lines()) == 1
+        assert store.root_lines()[1] == f"0:.:1:{store.root_lines()[2].split(':')[4]}"
 
     @pytest.mark.asyncio
     async def test_remarkable_read_finds_seeded_text(self):
