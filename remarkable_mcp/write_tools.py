@@ -1601,9 +1601,10 @@ def register_write_tools():
         - text: Optional typed text for the first page (create_document). Omit it
             unless the user explicitly requested specific content; never fabricate
             placeholder text. Paragraphs split on newlines; a line prefix sets the
-            native paragraph style: "# " title, "## " bold subheading, "- " or "* "
-            bullet, "  - " second-level bullet, "- [ ] " checkbox, "- [x] " checked
-            checkbox. Other lines are body text. Inline bold/italic is not supported.
+            native paragraph style: "# " title, "## " heading, "### " subheading,
+            "- " or "* " bullet, "  - " second-level bullet, "1. " numbered item
+            (the device renumbers), "- [ ] " checkbox, "- [x] " checked checkbox.
+            Other lines are body text. Inline bold/italic is not supported.
         - folder: Destination folder path (create_document; default "/").
         - ui_submitted: Set by the canvas app when the user clicked Save. Models omit it.
         - defer_restart: SSH only. Skip the xochitl restart for this write. Call

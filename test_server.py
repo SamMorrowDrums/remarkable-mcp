@@ -3990,37 +3990,73 @@ class _FakeSyncStore:
 class TestStyledTextPages:
     """page_rm_bytes maps Markdown line prefixes to native paragraph styles."""
 
-    def _paragraphs(self, page_bytes):
+    def _paragraph_entries(self, page_bytes, monkeypatch):
+        """Return ``(text, style entry bytes as hex or None)`` per paragraph.
+
+        rmscene drops what follows the format code and maps unknown codes to
+        PLAIN, so the raw entry bytes are captured instead of its parsed style.
+        """
         import io
 
-        from rmscene import read_tree
+        from rmscene import read_tree, scene_stream
+        from rmscene.tagged_block_common import LwwValue
         from rmscene.text import TextDocument
 
+        entries = {}
+
+        def capture(stream):
+            char_id = stream.data.read_crdt_id()
+            timestamp = stream.read_id(1)
+            with stream.read_subblock(2) as subblock:
+                body = stream.data.read_bytes(subblock.size)
+            entries[char_id] = body.hex()
+            return char_id, LwwValue(timestamp, body[1])
+
+        monkeypatch.setattr(scene_stream, "text_format_from_stream", capture)
         tree = read_tree(io.BytesIO(page_bytes))
         document = TextDocument.from_scene_item(tree.root_text)
-        return [(p.style.value, str(p)) for p in document.contents]
+        return [(str(p), entries.get(p.start_id)) for p in document.contents]
 
-    def test_prefixes_become_paragraph_styles(self):
-        from rmscene.scene_items import ParagraphStyle
-
+    def test_prefixes_become_paragraph_styles(self, monkeypatch):
         from remarkable_mcp import notebooks
 
         page = notebooks.page_rm_bytes(
-            "# Title\n## Subheading\nBody\n- Point\n  - Sub-point\n"
-            "* Star point\n- [ ] To do\n- [x] Done\n- [X] Also done"
+            "# Title\n## Heading\n### Subheading\nBody\n- Point\n  - Sub-point\n"
+            "* Star point\n1. First\n12. Twelfth\n- [ ] To do\n- [x] Done\n- [X] Also done"
         )
 
-        assert self._paragraphs(page) == [
-            (ParagraphStyle.HEADING, "Title"),
-            (ParagraphStyle.BOLD, "Subheading"),
-            (ParagraphStyle.PLAIN, "Body"),
-            (ParagraphStyle.BULLET, "Point"),
-            (ParagraphStyle.BULLET2, "Sub-point"),
-            (ParagraphStyle.BULLET, "Star point"),
-            (ParagraphStyle.CHECKBOX, "To do"),
-            (ParagraphStyle.CHECKBOX_CHECKED, "Done"),
-            (ParagraphStyle.CHECKBOX_CHECKED, "Also done"),
+        # Entry bytes match a Paper Pro page styled on the device: "11" then the
+        # format code, and for the larger heading two extra tagged fields.
+        assert self._paragraph_entries(page, monkeypatch) == [
+            ("Title", "1102"),
+            ("Heading", "110321023403000000"),
+            ("Subheading", "1103"),
+            ("Body", None),
+            ("Point", "1104"),
+            ("Sub-point", "1105"),
+            ("Star point", "1104"),
+            ("First", "110a"),
+            ("Twelfth", "110a"),
+            ("To do", "1106"),
+            ("Done", "1107"),
+            ("Also done", "1107"),
         ]
+
+    def test_body_first_line_keeps_plain_entry(self, monkeypatch):
+        from remarkable_mcp import notebooks
+
+        assert self._paragraph_entries(notebooks.page_rm_bytes("Body\n# Title"), monkeypatch) == [
+            ("Body", "1101"),
+            ("Title", "1102"),
+        ]
+
+    def test_number_without_dot_space_stays_body(self, monkeypatch):
+        from remarkable_mcp import notebooks
+
+        entries = self._paragraph_entries(
+            notebooks.page_rm_bytes("2026 plan\n3.5 ratio"), monkeypatch
+        )
+        assert entries == [("2026 plan", "1101"), ("3.5 ratio", None)]
 
     def test_plain_text_bytes_are_unchanged(self):
         import io
@@ -4046,9 +4082,12 @@ class TestStyledTextPages:
     def test_styled_page_stays_drawable(self):
         from remarkable_mcp import notebooks, strokes
 
-        page = notebooks.page_rm_bytes("# Title\n- [ ] To do")
+        page = notebooks.page_rm_bytes("# Title\n## Heading\n1. Item\n- [ ] To do")
         drawn = strokes.append_strokes(page, [{"points": [[0.1, 0.5], [0.9, 0.5]]}])
 
+        # rmscene cannot re-encode the heading fields or the numbered code, so
+        # the styled bytes must survive drawing untouched.
+        assert drawn.startswith(page)
         assert len(drawn) > len(page)
 
 

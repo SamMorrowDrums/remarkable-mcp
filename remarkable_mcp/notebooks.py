@@ -18,42 +18,20 @@ writes at the default paper size (see :data:`DEFAULT_PAPER`).
 
 from __future__ import annotations
 
-import dataclasses
 import io
 import time
 import uuid as _uuid
 from typing import Optional
 
 from rmscene import simple_text_document, write_blocks
-from rmscene.scene_items import ParagraphStyle
 from rmscene.scene_stream import RootTextBlock
-from rmscene.tagged_block_common import CrdtId, LwwValue
 
 from remarkable_mcp.strokes import WRITE_VERSION
+from remarkable_mcp.text_styles import parse_paragraphs, styled_root_text
 
 # reMarkable 1/2 portrait stroke space. simple_text_document emits no SceneInfo,
 # so render + write both fall back to this; keep them consistent.
 DEFAULT_PAPER = (1404, 1872)
-
-# Markdown line prefixes mapped to native paragraph styles. Checkboxes come
-# before "- " so the longer prefix wins; any other line is body text.
-PARAGRAPH_PREFIXES = (
-    ("- [ ] ", ParagraphStyle.CHECKBOX),
-    ("- [x] ", ParagraphStyle.CHECKBOX_CHECKED),
-    ("- [X] ", ParagraphStyle.CHECKBOX_CHECKED),
-    ("  - ", ParagraphStyle.BULLET2),
-    ("  * ", ParagraphStyle.BULLET2),
-    ("- ", ParagraphStyle.BULLET),
-    ("* ", ParagraphStyle.BULLET),
-    ("## ", ParagraphStyle.BOLD),
-    ("# ", ParagraphStyle.HEADING),
-)
-
-# simple_text_document stores the whole text as one CRDT item whose characters
-# get consecutive ids starting here; a paragraph's style is keyed by the id of
-# the newline that opens it, and the first paragraph by the (0, 0) end marker.
-_TEXT_FIRST_CHAR_ID = CrdtId(1, 16)
-_STYLE_TIMESTAMP = CrdtId(1, 15)
 
 
 def new_uuid() -> str:
@@ -75,60 +53,20 @@ def _author_uuid(author_uuid: Optional[str]):
     return _uuid.UUID(str(author_uuid))
 
 
-def parse_paragraphs(text: str) -> list[tuple[ParagraphStyle, str]]:
-    """Split ``text`` on newlines into ``(style, content)`` paragraphs.
-
-    A line starting with one of :data:`PARAGRAPH_PREFIXES` takes that style
-    and loses the prefix; every other line is ``PLAIN``.
-    """
-    paragraphs = []
-    for line in text.split("\n"):
-        style, content = ParagraphStyle.PLAIN, line
-        for prefix, prefix_style in PARAGRAPH_PREFIXES:
-            if line.startswith(prefix):
-                style, content = prefix_style, line[len(prefix) :]
-                break
-        paragraphs.append((style, content))
-    return paragraphs
-
-
-def _paragraph_styles(paragraphs: list[tuple[ParagraphStyle, str]]) -> dict:
-    """Return the ``Text.styles`` map for paragraphs joined with newlines.
-
-    Like ``simple_text_document``, later paragraphs get an entry only when they
-    are not ``PLAIN``: an unstyled paragraph renders as body text, and plain
-    input keeps the exact bytes of the unstyled builder.
-    """
-    styles = {CrdtId(0, 0): LwwValue(timestamp=_STYLE_TIMESTAMP, value=paragraphs[0][0])}
-    offset = len(paragraphs[0][1]) + 1
-    for style, content in paragraphs[1:]:
-        if style != ParagraphStyle.PLAIN:
-            newline_id = CrdtId(_TEXT_FIRST_CHAR_ID.part1, _TEXT_FIRST_CHAR_ID.part2 + offset - 1)
-            styles[newline_id] = LwwValue(timestamp=_STYLE_TIMESTAMP, value=style)
-        offset += len(content) + 1
-    return styles
-
-
 def page_rm_bytes(text: str = "", author_uuid: Optional[str] = None) -> bytes:
     """Return serialized ``.rm`` bytes for a single drawable page.
 
     With ``text=""`` this is a blank page; with text it is seeded with typed
     paragraphs (split on newlines), styled from Markdown line prefixes as
-    :func:`parse_paragraphs` describes. The result always contains a drawable
-    layer node, so :func:`remarkable_mcp.strokes.append_strokes` works on it.
+    :func:`remarkable_mcp.text_styles.parse_paragraphs` describes. The result
+    always contains a drawable layer node, so
+    :func:`remarkable_mcp.strokes.append_strokes` works on it.
     """
     au = _author_uuid(author_uuid)
     paragraphs = parse_paragraphs(text)
     body = "\n".join(content for _, content in paragraphs)
     blocks = [
-        (
-            dataclasses.replace(
-                block,
-                value=dataclasses.replace(block.value, styles=_paragraph_styles(paragraphs)),
-            )
-            if isinstance(block, RootTextBlock)
-            else block
-        )
+        styled_root_text(block, paragraphs) if isinstance(block, RootTextBlock) else block
         for block in simple_text_document(body, author_uuid=au)
     ]
     buf = io.BytesIO()

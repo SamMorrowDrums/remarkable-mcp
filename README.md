@@ -745,12 +745,16 @@ remarkable_author(method="create_document", name="Sketches")
 # Only seed typed text when the user explicitly requested it.
 remarkable_author(method="create_document", name="Meeting notes", text="Agenda\nFollow-ups")
 
-# Line prefixes set native paragraph styles: "# " title, "## " bold subheading,
-# "- " or "* " bullet, "  - " second-level bullet, "- [ ] " / "- [x] " checkbox.
+# Line prefixes set native paragraph styles: "# " title, "## " heading,
+# "### " subheading, "- " or "* " bullet, "  - " second-level bullet,
+# "1. " numbered item (the device renumbers), "- [ ] " / "- [x] " checkbox.
 remarkable_author(
     method="create_document",
     name="Sprint",
-    text="# Sprint 12\n## Goals\n- Ship export\n  - PDF first\n- [ ] Review PR\n- [x] Fix CI",
+    text=(
+        "# Sprint 12\n## Goals\n### Export\n- Ship export\n  - PDF first\n"
+        "1. Review PR\n2. Merge\n- [ ] Release notes\n- [x] Fix CI"
+    ),
 )
 ```
 
