@@ -1216,7 +1216,7 @@ def _draw_result(
     return result
 
 
-def _not_a_notebook_error(error: ValueError) -> str:
+def _not_a_notebook_error(error: Exception) -> str:
     return make_error(
         error_type="not_a_notebook",
         message=str(error),
@@ -1526,7 +1526,6 @@ def _cloud_author_draw(
     """Append strokes to a page of a cloud document."""
     from requests import RequestException
 
-    from remarkable_mcp.strokes import StrokeError
     from remarkable_mcp.sync import CloudWriteError
 
     target, error = _find_author_target(client, document)
@@ -1539,7 +1538,8 @@ def _cloud_author_draw(
 
     try:
         drawn = client.append_page_strokes(target.ID, page_ids[page - 1], strokes)
-    except (StrokeError, CloudWriteError, RequestException) as e:
+    # ValueError covers StrokeError and pages rmscene cannot read.
+    except (CloudWriteError, RequestException, ValueError) as e:
         return make_error(
             error_type="stroke_write_failed",
             message=f"Failed to write strokes to page {page} of '{target.VissibleName}': {e}",
@@ -1576,7 +1576,7 @@ def _cloud_author_add_page(client, document: str) -> str:
     from requests import RequestException
 
     from remarkable_mcp import notebooks as nb
-    from remarkable_mcp.sync import CloudWriteError
+    from remarkable_mcp.sync import CloudWriteError, NotANotebookError
 
     target, error = _find_author_target(client, document)
     if error:
@@ -1584,14 +1584,15 @@ def _cloud_author_add_page(client, document: str) -> str:
 
     try:
         added = client.add_notebook_page(target.ID)
-    except (CloudWriteError, RequestException) as e:
+    except NotANotebookError as e:
+        return _not_a_notebook_error(e)
+    # ValueError covers blob indexes and pages that cannot be parsed.
+    except (CloudWriteError, RequestException, ValueError) as e:
         return make_error(
             error_type="add_page_failed",
             message=f"Failed to add a page to '{target.VissibleName}': {e}",
             suggestion="Use remarkable_browse() to check the document, then retry.",
         )
-    except ValueError as e:
-        return _not_a_notebook_error(e)
     _invalidate_client_cache(client)
     _clear_document_extraction_cache(target.ID)
 
@@ -1647,7 +1648,8 @@ def register_write_tools():
           the cloud because the tablet was unreachable. The tablet picks the
           change up on its next sync. draw and add_page re-read the document
           on every commit attempt and only append, so ink or pages another
-          device synced in the meantime are kept.
+          device already synced to the cloud are kept. Edits a tablet has not
+          synced yet are outside this guarantee.
         - USB web: not available (the tool is not registered).
         All methods are non-destructive (draw appends to existing ink; over SSH
         it also backs the page up to {pageId}.rm.bak the first time), so no

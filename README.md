@@ -726,7 +726,7 @@ remarkable_refresh()
 
 # Author native ink and notebooks (SSH and cloud). In cloud mode the tablet
 # picks each change up on its next sync; draw and add_page only append, so ink
-# or pages another device synced in the meantime are kept.
+# or pages another device already synced to the cloud are kept.
 # Append pen/highlighter strokes to a page (coordinates normalized [0,1] from
 # the page's top-left). The interactive canvas Save button calls this too.
 remarkable_author(

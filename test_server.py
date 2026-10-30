@@ -4342,7 +4342,9 @@ class TestCloudEditNotebook:
         self._run(store, create)
         store.committed_hashes.clear()
 
-        with pytest.raises(ValueError, match="not a native notebook"):
+        from remarkable_mcp.sync import NotANotebookError
+
+        with pytest.raises(NotANotebookError, match="not a native notebook"):
             self._run(store, lambda: client.add_notebook_page(doc_id))
         assert store.committed_hashes == []
 
@@ -4683,9 +4685,21 @@ class TestCloudAuthorDispatch:
                 "not_a_notebook",
             ),
             (
+                {"method": "add_page", "document": "Notes"},
+                "add_notebook_page",
+                "unreadable_blob",
+                "add_page_failed",
+            ),
+            (
                 {"method": "draw", "document": "Notes", "page": 1, "strokes": [_STROKE_A]},
                 "append_page_strokes",
                 "http_error",
+                "stroke_write_failed",
+            ),
+            (
+                {"method": "draw", "document": "Notes", "page": 1, "strokes": [_STROKE_A]},
+                "append_page_strokes",
+                "unreadable_blob",
                 "stroke_write_failed",
             ),
             (
@@ -4700,14 +4714,17 @@ class TestCloudAuthorDispatch:
         self, arguments, client_method, error, error_type
     ):
         from remarkable_mcp.strokes import StrokeError
-        from remarkable_mcp.sync import CloudWriteError
+        from remarkable_mcp.sync import CloudWriteError, NotANotebookError
 
         client = self._cloud_client([self._notebook()])
         getattr(client, client_method).side_effect = {
             "cloud_write_error": CloudWriteError("Page p1 is gone."),
             "http_error": requests.HTTPError("Page p1 is gone."),
             "stroke_error": StrokeError("Page p1 is gone."),
-            "not_a_notebook": ValueError("Page p1 is gone."),
+            "not_a_notebook": NotANotebookError("Page p1 is gone."),
+            # rmscene and the blob-index parser raise a plain ValueError on bytes
+            # they cannot read.
+            "unreadable_blob": ValueError("Page p1 is gone."),
         }[error]
 
         data = await self._author(client, arguments)

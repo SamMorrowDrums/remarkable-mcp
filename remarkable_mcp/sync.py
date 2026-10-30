@@ -289,6 +289,10 @@ class CloudWriteError(RuntimeError):
     """Raised when a cloud write cannot be completed."""
 
 
+class NotANotebookError(CloudWriteError):
+    """Raised when a page is added to a document that is not a native notebook."""
+
+
 # CRC32C (Castagnoli) table for the GCS ``x-goog-hash`` upload integrity header.
 # reMarkable's blob store sits behind Google Cloud Storage, which rejects PUTs
 # without a matching ``crc32c`` checksum. stdlib ``zlib.crc32`` is IEEE, not
@@ -1143,8 +1147,8 @@ class RemarkableClient:
         index. Only ``.content`` and the new ``{doc_id}/{page_id}.rm`` change.
         The page id is fixed across retries: when a retry finds it in
         ``cPages``, the earlier commit landed and its acknowledgement was lost,
-        so the page is not appended twice. Raises ``ValueError`` when the
-        document is not a native notebook.
+        so the page is not appended twice. Raises ``NotANotebookError`` when
+        the document is not a native notebook.
         """
         from remarkable_mcp import notebooks as nb
 
@@ -1157,7 +1161,10 @@ class RemarkableClient:
             if page_id in current:
                 page_ids[:] = current
                 return None
-            nb.append_page_to_content(content, page_id)
+            try:
+                nb.append_page_to_content(content, page_id)
+            except ValueError as e:
+                raise NotANotebookError(str(e)) from e
             page_ids[:] = nb.page_ids_from_content(content)
             page = nb.blank_page_rm_bytes(author_uuid=nb.content_author_uuid(content))
             return {
@@ -1180,11 +1187,15 @@ class RemarkableClient:
         Returns ``{"created_overlay": bool, "paper_size": [width, height]}``.
         Only ``{doc_id}/{page_id}.rm`` changes: its current bytes stay a
         verbatim prefix and the strokes are appended after them, so ink another
-        client committed first is kept. A page with no ``.rm`` yet is seeded
-        with a blank drawable layer. Each attempt remembers the strokes it
-        serialized; when a retry finds them on the page, the earlier commit
-        landed and its acknowledgement was lost, so nothing is appended twice.
-        Raises ``StrokeError`` when the strokes cannot be composed.
+        client committed to the cloud first is kept. A page with no ``.rm`` yet
+        is seeded with a blank drawable layer. Each attempt remembers the
+        strokes it serialized; when a retry finds them on the page, the earlier
+        commit landed and its acknowledgement was lost, so they are not
+        appended again. A stroke is matched on its CRDT id and its line, so one
+        erased on another device between that commit and the retry no longer
+        matches and is appended again: an erased stroke may reappear, but no
+        stroke is lost. Raises ``StrokeError`` when the strokes cannot be
+        composed, and ``ValueError`` when the page bytes cannot be read.
         """
         from remarkable_mcp import notebooks as nb
         from remarkable_mcp import strokes as strokes_mod
