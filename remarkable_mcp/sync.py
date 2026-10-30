@@ -956,6 +956,54 @@ class RemarkableClient:
             raise CloudWriteError(f"Document {doc_id} not found in cloud root.")
         return entry
 
+    def _add_new_document(
+        self,
+        doc_id: str,
+        files: List[Dict[str, Any]],
+        name: str,
+        doc_type: str,
+        parent_id: str,
+    ) -> Document:
+        """Index already-uploaded file blobs as a new document and add it to the root.
+
+        The root entry is computed once, so a generation-conflict retry inside
+        ``_sync_root`` re-adds the exact same entry without re-uploading blobs.
+        """
+        new_entry = self._upload_doc_index(doc_id, files)
+        self._sync_root(lambda entries: entries + [new_entry])
+        return Document(
+            id=doc_id,
+            hash=new_entry["hash"],
+            name=name,
+            doc_type=doc_type,
+            parent=parent_id or "",
+        )
+
+    def _new_document_metadata(self, name: str, parent_id: str) -> Dict[str, Any]:
+        """Return the ``.metadata`` of a ``DocumentType`` created in the cloud.
+
+        The sync flags are all False and ``version`` is 1: the cloud copy is
+        the authoritative one, so the device has no local change to push.
+        """
+        now = self._now_ms()
+        return {
+            "createdTime": now,
+            "deleted": False,
+            "lastModified": now,
+            "lastOpened": now,
+            "lastOpenedPage": 0,
+            "metadatamodified": False,
+            "modified": False,
+            "new": False,
+            "parent": parent_id or "",
+            "pinned": False,
+            "source": "",
+            "synced": False,
+            "type": "DocumentType",
+            "version": 1,
+            "visibleName": name,
+        }
+
     def create_folder(self, name: str, parent_id: str = "") -> Document:
         """Create a folder (CollectionType) in the cloud and return it."""
         doc_id = str(uuid.uuid4())
@@ -972,15 +1020,38 @@ class RemarkableClient:
         }
         meta_bytes = json.dumps(metadata, sort_keys=True).encode("utf-8")
         files = [self._upload_file_blob(meta_bytes, f"{doc_id}.metadata")]
-        new_entry = self._upload_doc_index(doc_id, files)
-        self._sync_root(lambda entries: entries + [new_entry])
-        return Document(
-            id=doc_id,
-            hash=new_entry["hash"],
-            name=name,
-            doc_type="CollectionType",
-            parent=parent_id or "",
-        )
+        return self._add_new_document(doc_id, files, name, "CollectionType", parent_id)
+
+    def create_notebook(self, name: str, parent_id: str = "", text: str = "") -> Dict[str, Any]:
+        """Create a native notebook with one drawable page and return it.
+
+        The page is blank, or seeded with typed ``text``. Returns
+        ``{"document": Document, "page_id": str}``. The blobs mirror what a
+        Paper Pro syncs for a native notebook: ``.content``, ``.metadata`` and
+        one ``{doc_id}/{page_id}.rm`` page, with no ``.pagedata``. Every id and
+        byte is built before the root commit, so a conflict retry republishes
+        the same document.
+        """
+        from remarkable_mcp import notebooks as nb
+
+        doc_id = nb.new_uuid()
+        page_id = nb.new_uuid()
+        author_uuid = nb.new_uuid()
+        page_bytes = nb.page_rm_bytes(text, author_uuid=author_uuid)
+        content_json = nb.new_notebook_content([page_id], author_uuid)
+        metadata = self._new_document_metadata(name, parent_id)
+
+        files = [
+            self._upload_file_blob(
+                json.dumps(content_json, sort_keys=True).encode("utf-8"), f"{doc_id}.content"
+            ),
+            self._upload_file_blob(
+                json.dumps(metadata, sort_keys=True).encode("utf-8"), f"{doc_id}.metadata"
+            ),
+            self._upload_file_blob(page_bytes, f"{doc_id}/{page_id}.rm"),
+        ]
+        document = self._add_new_document(doc_id, files, name, "DocumentType", parent_id)
+        return {"document": document, "page_id": page_id}
 
     def rename(self, doc_id: str, new_name: str) -> None:
         """Rename a document or folder in the cloud."""
@@ -1032,7 +1103,6 @@ class RemarkableClient:
             raise CloudWriteError(f"Unsupported upload type '{ext}'; use pdf or epub.")
 
         doc_id = str(uuid.uuid4())
-        now = self._now_ms()
 
         page_count, page_uuids = self._page_layout(content, ext)
         content_json = {
@@ -1052,23 +1122,7 @@ class RemarkableClient:
             "tags": [],
             "textScale": 1,
         }
-        metadata = {
-            "createdTime": now,
-            "deleted": False,
-            "lastModified": now,
-            "lastOpened": now,
-            "lastOpenedPage": 0,
-            "metadatamodified": False,
-            "modified": False,
-            "new": False,
-            "parent": parent_id or "",
-            "pinned": False,
-            "source": "",
-            "synced": False,
-            "type": "DocumentType",
-            "version": 1,
-            "visibleName": name,
-        }
+        metadata = self._new_document_metadata(name, parent_id)
         pagedata = ("Blank\n" * page_count) if page_count else "\n"
 
         files = [
@@ -1081,15 +1135,7 @@ class RemarkableClient:
             self._upload_file_blob(pagedata.encode("utf-8"), f"{doc_id}.pagedata"),
             self._upload_file_blob(content, f"{doc_id}.{ext}"),
         ]
-        new_entry = self._upload_doc_index(doc_id, files)
-        self._sync_root(lambda entries: entries + [new_entry])
-        return Document(
-            id=doc_id,
-            hash=new_entry["hash"],
-            name=name,
-            doc_type="DocumentType",
-            parent=parent_id or "",
-        )
+        return self._add_new_document(doc_id, files, name, "DocumentType", parent_id)
 
     @staticmethod
     def _page_layout(content: bytes, ext: str) -> tuple:

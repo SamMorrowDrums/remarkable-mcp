@@ -12,8 +12,8 @@ for backward compatibility but are now no-ops (write is the default). --write an
 --read-only are mutually exclusive.
 
 Write support by transport:
-- Cloud mode: upload, mkdir, move, rename, delete (-> trash)
-- SSH mode:   upload, mkdir, move, rename, delete
+- Cloud mode: upload, mkdir, move, rename, delete (-> trash), author (create_document)
+- SSH mode:   upload, mkdir, move, rename, delete, author (all methods)
 - USB web mode: upload only (via POST /upload endpoint)
 
 Inspired by PR #70 from @McSchnizzle. SSH operations use the tablet filesystem,
@@ -42,6 +42,7 @@ from remarkable_mcp.api import (
     get_item_path,
     get_items_by_id,
     get_rmapi,
+    is_cloud_fallback_active,
 )
 from remarkable_mcp.capabilities import client_supports_elicitation
 from remarkable_mcp.responses import make_error, make_response
@@ -62,6 +63,11 @@ MKDIR_ANNOTATIONS = WRITE_ANNOTATIONS
 MOVE_ANNOTATIONS = WRITE_ANNOTATIONS
 RENAME_ANNOTATIONS = WRITE_ANNOTATIONS
 DELETE_ANNOTATIONS = ToolAnnotations(read_only_hint=False, destructive_hint=True)
+
+# remarkable_author methods the cloud transport supports. draw and add_page
+# would need a download-modify-upload of an existing document, which is not
+# implemented safely yet (issue #118).
+CLOUD_AUTHOR_METHODS = ("create_document",)
 
 
 def read_only_enabled() -> bool:
@@ -1438,6 +1444,68 @@ def _author_create_document(
     return make_response(result, hint)
 
 
+def _cloud_author_create_document(
+    client,
+    name: str,
+    text: Optional[str],
+    folder: Optional[str],
+) -> str:
+    """Create a new native notebook in the reMarkable cloud."""
+    from remarkable_mcp import notebooks as nb
+
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    parent_id = _resolve_parent_id(folder or "/", items_by_id, collection)
+    if parent_id is None:
+        folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
+        return make_error(
+            error_type="folder_not_found",
+            message=f"Folder not found: '{folder}'",
+            suggestion="Use remarkable_browse('/') to see available folders.",
+            did_you_mean=folders[:5] if folders else None,
+        )
+
+    created = client.create_notebook(name, parent_id, text or "")
+    _invalidate_client_cache(client)
+    result = {
+        "created": True,
+        "document": name,
+        "document_id": created["document"].id,
+        "page_id": created["page_id"],
+        "total_pages": 1,
+        "paper_size": list(nb.DEFAULT_PAPER),
+        "has_text": bool(text),
+        "folder": folder or "/",
+        "transport": "cloud",
+        "refresh_pending": False,
+    }
+    return make_response(
+        result,
+        f"Created notebook '{name}' in the reMarkable cloud; the tablet picks it up "
+        f"on its next sync. Call remarkable_read('{name}') to verify.",
+    )
+
+
+def _cloud_author(
+    client,
+    method: str,
+    name: Optional[str],
+    text: Optional[str],
+    folder: Optional[str],
+) -> str:
+    """Dispatch a remarkable_author call on the cloud transport."""
+    if method not in CLOUD_AUTHOR_METHODS:
+        return make_error(
+            error_type="unsupported_in_transport",
+            message=f'remarkable_author(method="{method}") is not available in cloud mode.',
+            suggestion=(
+                'Cloud mode supports method="create_document" only. draw and add_page '
+                "modify existing pages and need SSH mode: remarkable-mcp --ssh"
+            ),
+        )
+    return _cloud_author_create_document(client, name, text, folder)
+
+
 def register_write_tools():
     """Register all write tools with the MCP server."""
     # Imported lazily to break a circular import: server.py imports this module
@@ -1466,10 +1534,17 @@ def register_write_tools():
         ＋Page → add_page, new notebook → create_document) AND model-driven markup
         (highlighting, underlining, marking) — the model composes the strokes.</usecase>
         <instructions>
-        Requires SSH mode (the default tablet-filesystem transport for write-back)
-        and write mode (the default; disabled with --read-only). All methods are
-        non-destructive (draw appends to existing ink and backs the page up to
-        {pageId}.rm.bak the first time), so no confirmation prompt is required.
+        Requires write mode (the default; disabled with --read-only). Support by
+        transport:
+        - SSH: all three methods.
+        - Cloud: create_document only. draw and add_page return an
+          unsupported_in_transport error; use SSH mode for them. This also
+          applies when an SSH configuration fell back to the cloud because the
+          tablet was unreachable.
+        - USB web: not available (the tool is not registered).
+        All methods are non-destructive (draw appends to existing ink and backs
+        the page up to {pageId}.rm.bak the first time), so no confirmation
+        prompt is required.
 
         Pick the method, then pass only that method's parameters:
 
@@ -1512,9 +1587,10 @@ def register_write_tools():
             placeholder text. Paragraphs split on newlines.
         - folder: Destination folder path (create_document; default "/").
         - ui_submitted: Set by the canvas app when the user clicked Save. Models omit it.
-        - defer_restart: Skip the xochitl restart for this write. Call
+        - defer_restart: SSH only. Skip the xochitl restart for this write. Call
           remarkable_refresh() once after the batch. The response sets
-          refresh_pending=true while a refresh is owed.
+          refresh_pending=true while a refresh is owed. Ignored in cloud mode
+          (no xochitl; the tablet picks the notebook up on its next sync).
         </parameters>
         <examples>
         - remarkable_author(method="draw", document="Ideas", page=1,
@@ -1541,6 +1617,12 @@ def register_write_tools():
             if error:
                 return error
 
+            # An SSH config whose tablet was unreachable has fallen back to the
+            # cloud client by now (_get_ssh_client() below resolves it first),
+            # so the SSH methods must not run against it.
+            if _is_cloud_mode() or is_cloud_fallback_active():
+                return _cloud_author(_get_ssh_client(), method, name, text, folder)
+
             if method == "draw":
                 return _author_draw(document, page, strokes, ui_submitted, defer_restart)
             if method == "add_page":
@@ -1559,11 +1641,10 @@ def register_write_tools():
             )
         return await asyncio.to_thread(_impl)
 
-    # Native ink/notebook authoring is SSH-only today (cloud/USB-web write-back
-    # is not implemented yet), so only expose the tool in SSH mode rather than
-    # registering it everywhere and erroring at call time. Clients on other
-    # transports simply don't see a tool they couldn't use.
-    if _is_ssh_mode():
+    # USB web has no write-back path for native notebooks, so the tool is only
+    # exposed where at least one method works: SSH (all methods) and cloud
+    # (create_document). Clients on USB web don't see a tool they couldn't use.
+    if _is_ssh_mode() or _is_cloud_mode():
         mcp.tool(annotations=WRITE_ANNOTATIONS)(remarkable_author)
 
     @mcp.tool(annotations=UPLOAD_ANNOTATIONS)
