@@ -6846,11 +6846,10 @@ class TestCanvasResource:
     def test_canvas_footer_distinguishes_transport_from_read_only(self):
         from remarkable_mcp.app_canvas import _CANVAS_HTML
 
-        # When write is enabled but the transport isn't SSH, the footer mirrors
-        # the draw tool's SSH-only error instead of the generic read-only string.
+        # When write is enabled but the transport has no write-back, the footer
+        # names the transports that can draw instead of the read-only string.
         assert "writeMode" in _CANVAS_HTML
-        assert 'state.transport !== "ssh"' in _CANVAS_HTML
-        assert "connect via SSH" in _CANVAS_HTML
+        assert "connect via SSH or the reMarkable cloud" in _CANVAS_HTML
         assert "Read-only viewer" in _CANVAS_HTML
 
     def test_canvas_bridge_is_spec_compliant(self):
@@ -7212,7 +7211,7 @@ class TestRenderCanvasPage:
         assert sc["total_pages"] == 3
         assert sc["document_name"] == "Notes"
         assert sc["png_data_uri"].startswith("data:image/png;base64,")
-        assert sc["writable"] is False
+        assert sc["writable"] is True
         assert sc["page_width_px"] == 12
         assert sc["page_height_px"] == 16
         assert sc["paper_size"] == [820, 1458]
@@ -7221,6 +7220,23 @@ class TestRenderCanvasPage:
         assert sc["write_mode"] is True
         # Embedded PNG is included for non-app clients.
         assert any(isinstance(c, types.EmbeddedResource) for c in result.content)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "transport, writable",
+        [("ssh", True), ("cloud", True), ("usb-web", False), ("local-dir", False)],
+    )
+    async def test_render_writable_follows_author_transports(
+        self, monkeypatch, transport, writable
+    ):
+        import remarkable_mcp.api as api
+        from remarkable_mcp.app_canvas import _render_canvas_page
+
+        self._patch_common(monkeypatch, page_count=1, png=self._png_bytes())
+        monkeypatch.setattr(api, "get_active_transport", lambda: transport)
+        result = await _render_canvas_page("Notes", 1, None)
+
+        assert result.structured_content["writable"] is writable
 
     @pytest.mark.asyncio
     async def test_render_document_not_found(self, monkeypatch):

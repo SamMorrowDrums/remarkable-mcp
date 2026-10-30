@@ -467,12 +467,12 @@ _CANVAS_HTML = """<!doctype html>
     cancel.disabled = state.busy || !dirty;
     var footer = document.getElementById("footer");
     if (!w) {
-      // Distinguish the two reasons a page isn't writable so the canvas message
-      // matches what the draw tool would return: read-only MODE vs non-SSH
-      // TRANSPORT (write is on, but native write-back needs the SSH transport).
-      if (state.writeMode && state.transport && state.transport !== "ssh") {
+      // Distinguish the two reasons a page isn't writable: read-only MODE vs a
+      // TRANSPORT without native write-back (write is on, but only SSH and the
+      // cloud can write ink; the server folds both into `writable`).
+      if (state.writeMode && state.transport) {
         footer.textContent =
-          "View-only over this connection — connect via SSH (USB cable + SSH enabled) to draw.";
+          "View-only over this connection - connect via SSH or the reMarkable cloud to draw.";
       } else {
         footer.textContent = "Read-only viewer";
       }
@@ -781,12 +781,13 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
 
     transport = get_active_transport()
     write_mode = bool(write_enabled())
-    # The canvas can write strokes back only over SSH (the filesystem transport),
-    # and only when write mode is on. Surface both the combined `writable` flag
-    # (Save/Draw/＋Page visibility) AND its two inputs (`write_mode`, `transport`)
-    # so the app can explain WHY a page isn't writable — distinguishing read-only
-    # mode from a non-SSH transport, mirroring the draw tool's own error.
-    writable = write_mode and transport == "ssh"
+    # The canvas writes strokes back through remarkable_author, which runs over
+    # SSH (the filesystem transport) and the cloud, and only when write mode is
+    # on. Surface both the combined `writable` flag (Save/Draw/＋Page
+    # visibility) AND its two inputs (`write_mode`, `transport`) so the app can
+    # explain WHY a page isn't writable: read-only mode vs a transport without
+    # native write-back.
+    writable = write_mode and transport in ("ssh", "cloud")
 
     structured = {
         "document": doc_path,
