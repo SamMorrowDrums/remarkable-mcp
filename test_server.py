@@ -3987,6 +3987,71 @@ class _FakeSyncStore:
         return self.blobs[self.root].decode("utf-8").strip().split("\n")
 
 
+class TestStyledTextPages:
+    """page_rm_bytes maps Markdown line prefixes to native paragraph styles."""
+
+    def _paragraphs(self, page_bytes):
+        import io
+
+        from rmscene import read_tree
+        from rmscene.text import TextDocument
+
+        tree = read_tree(io.BytesIO(page_bytes))
+        document = TextDocument.from_scene_item(tree.root_text)
+        return [(p.style.value, str(p)) for p in document.contents]
+
+    def test_prefixes_become_paragraph_styles(self):
+        from rmscene.scene_items import ParagraphStyle
+
+        from remarkable_mcp import notebooks
+
+        page = notebooks.page_rm_bytes(
+            "# Title\n## Subheading\nBody\n- Point\n  - Sub-point\n"
+            "* Star point\n- [ ] To do\n- [x] Done\n- [X] Also done"
+        )
+
+        assert self._paragraphs(page) == [
+            (ParagraphStyle.HEADING, "Title"),
+            (ParagraphStyle.BOLD, "Subheading"),
+            (ParagraphStyle.PLAIN, "Body"),
+            (ParagraphStyle.BULLET, "Point"),
+            (ParagraphStyle.BULLET2, "Sub-point"),
+            (ParagraphStyle.BULLET, "Star point"),
+            (ParagraphStyle.CHECKBOX, "To do"),
+            (ParagraphStyle.CHECKBOX_CHECKED, "Done"),
+            (ParagraphStyle.CHECKBOX_CHECKED, "Also done"),
+        ]
+
+    def test_plain_text_bytes_are_unchanged(self):
+        import io
+        import uuid
+
+        from rmscene import simple_text_document, write_blocks
+
+        from remarkable_mcp import notebooks
+        from remarkable_mcp.strokes import WRITE_VERSION
+
+        author = uuid.uuid4()
+        expected = io.BytesIO()
+        write_blocks(
+            expected,
+            list(simple_text_document("Agenda\nFollow-ups", author_uuid=author)),
+            options={"version": WRITE_VERSION},
+        )
+
+        assert notebooks.page_rm_bytes("Agenda\nFollow-ups", author_uuid=str(author)) == (
+            expected.getvalue()
+        )
+
+    def test_styled_page_stays_drawable(self):
+        from remarkable_mcp import notebooks, strokes
+
+        page = notebooks.page_rm_bytes("# Title\n- [ ] To do")
+        drawn = strokes.append_strokes(page, [{"points": [[0.1, 0.5], [0.9, 0.5]]}])
+
+        assert len(drawn) > len(page)
+
+
 class TestCloudCreateNotebook:
     """RemarkableClient.create_notebook against an in-memory sync store."""
 

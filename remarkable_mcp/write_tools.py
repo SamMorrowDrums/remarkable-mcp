@@ -1600,7 +1600,10 @@ def register_write_tools():
         - name: Title of the new notebook (create_document).
         - text: Optional typed text for the first page (create_document). Omit it
             unless the user explicitly requested specific content; never fabricate
-            placeholder text. Paragraphs split on newlines.
+            placeholder text. Paragraphs split on newlines; a line prefix sets the
+            native paragraph style: "# " title, "## " bold subheading, "- " or "* "
+            bullet, "  - " second-level bullet, "- [ ] " checkbox, "- [x] " checked
+            checkbox. Other lines are body text. Inline bold/italic is not supported.
         - folder: Destination folder path (create_document; default "/").
         - ui_submitted: Set by the canvas app when the user clicked Save. Models omit it.
         - defer_restart: SSH only. Skip the xochitl restart for this write. Call
@@ -1615,6 +1618,8 @@ def register_write_tools():
         - remarkable_author(method="create_document", name="Sketches")
         - remarkable_author(method="create_document", name="Meeting notes",
             text="Agenda\nFollow-ups")  # only when the user supplied that text
+        - remarkable_author(method="create_document", name="Sprint",
+            text="# Sprint 12\n- Ship export\n- [ ] Review PR\n- [x] Fix CI")
         </examples>
         """
 
