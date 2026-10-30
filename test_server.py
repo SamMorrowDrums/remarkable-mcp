@@ -3918,9 +3918,11 @@ class _FakeSyncStore:
     apply and then answer HTTP 412, as when a retried PUT replays a commit whose
     first response was lost. ``folders`` maps a folder id to its parent id
     ("trash" for a deleted folder); each gets a real index and metadata blob.
+    ``interleave`` is called on each conflict instead of bumping the generation,
+    so a test can commit another writer's real change before the 409.
     """
 
-    def __init__(self, conflicts=0, lost_acks=0, folders=None):
+    def __init__(self, conflicts=0, lost_acks=0, folders=None, interleave=None):
         import hashlib
 
         self.blobs = {}
@@ -3941,6 +3943,7 @@ class _FakeSyncStore:
         self.generation = 1
         self.conflicts = conflicts
         self.lost_acks = lost_acks
+        self.interleave = interleave
         self.put_names = []
         self.committed_hashes = []
 
@@ -3965,7 +3968,10 @@ class _FakeSyncStore:
             self.committed_hashes.append(body["hash"])
             if self.conflicts:
                 self.conflicts -= 1
-                self.generation += 1
+                if self.interleave:
+                    self.interleave()
+                else:
+                    self.generation += 1
                 return self._response(status_code=409)
             assert body["generation"] == self.generation
             self.root = body["hash"]
@@ -3985,6 +3991,13 @@ class _FakeSyncStore:
 
     def root_lines(self):
         return self.blobs[self.root].decode("utf-8").strip().split("\n")
+
+    def doc_blobs(self, doc_id):
+        """Return ``{filename: bytes}`` for one document in the current root."""
+        doc_line = next(line for line in self.root_lines() if f":{doc_id}:" in line)
+        index = self.blobs[doc_line.split(":")[0]].decode("utf-8")
+        files = [line.split(":") for line in index.strip().split("\n")[1:]]
+        return {parts[2]: self.blobs[parts[0]] for parts in files}
 
 
 class TestStyledTextPages:
@@ -4215,6 +4228,236 @@ class TestCloudCreateNotebook:
         data = json.loads(result.content[0].text)
         assert "_error" not in data, data
         assert "Follow-ups" in json.dumps(data)
+
+
+_STROKE_A = {"points": [[0.1, 0.1], [0.4, 0.1]], "tool": "fineliner"}
+_STROKE_B = {"points": [[0.2, 0.6], [0.7, 0.8]], "tool": "highlighter", "color": "yellow"}
+
+
+def _page_lines(page_bytes):
+    """Return the ``(item_id, line)`` pairs of every stroke on a ``.rm`` page."""
+    import io
+
+    from rmscene import read_blocks
+    from rmscene.scene_stream import SceneLineItemBlock
+
+    return [
+        (b.item.item_id, b.item.value)
+        for b in read_blocks(io.BytesIO(page_bytes))
+        if isinstance(b, SceneLineItemBlock)
+    ]
+
+
+class TestCloudEditNotebook:
+    """RemarkableClient.add_notebook_page / append_page_strokes against a sync store."""
+
+    def _client(self):
+        from remarkable_mcp.sync import RemarkableClient
+
+        return RemarkableClient(user_token="user-token")
+
+    def _run(self, store, action):
+        with (
+            patch("remarkable_mcp.sync._http_request_with_retry", side_effect=store),
+            patch("remarkable_mcp.sync.time.sleep"),
+        ):
+            return action()
+
+    def _seed(self, store):
+        """Create a one-page notebook and return ``(doc_id, page_id)``."""
+        created = self._run(store, lambda: self._client().create_notebook("Ideas"))
+        store.put_names.clear()
+        store.committed_hashes.clear()
+        return created["document"].id, created["page_id"]
+
+    def _seed_without_page_blob(self, store):
+        """Create a notebook whose only page has no ``.rm`` blob yet."""
+        from remarkable_mcp import notebooks as nb
+
+        client = self._client()
+        doc_id, page_id = nb.new_uuid(), nb.new_uuid()
+        content = nb.new_notebook_content([page_id], nb.new_uuid())
+
+        def create():
+            files = [
+                client._upload_file_blob(json.dumps(content).encode(), f"{doc_id}.content"),
+                client._upload_file_blob(
+                    json.dumps(client._new_document_metadata("Blank", "")).encode(),
+                    f"{doc_id}.metadata",
+                ),
+            ]
+            client._add_new_document(doc_id, files, "Blank", "DocumentType", "")
+
+        self._run(store, create)
+        store.put_names.clear()
+        store.committed_hashes.clear()
+        return doc_id, page_id
+
+    def _pages(self, store, doc_id):
+        content = json.loads(store.doc_blobs(doc_id)[f"{doc_id}.content"])
+        return [p["id"] for p in content["cPages"]["pages"]]
+
+    def test_add_page_uploads_new_page_and_content_only(self):
+        import io
+
+        from rmscene import read_blocks
+        from rmscene.scene_stream import AuthorIdsBlock
+
+        store = _FakeSyncStore()
+        doc_id, first_page = self._seed(store)
+        before = store.doc_blobs(doc_id)
+
+        added = self._run(store, lambda: self._client().add_notebook_page(doc_id))
+        page_id = added["page_id"]
+        after = store.doc_blobs(doc_id)
+
+        assert sorted(store.put_names) == sorted(
+            [f"{doc_id}.content", f"{doc_id}/{page_id}.rm", f"{doc_id}.docSchema", "root.docSchema"]
+        )
+        assert added["page_index"] == 2
+        assert added["total_pages"] == 2
+        assert self._pages(store, doc_id) == [first_page, page_id]
+        assert after[f"{doc_id}.metadata"] == before[f"{doc_id}.metadata"]
+        assert after[f"{doc_id}/{first_page}.rm"] == before[f"{doc_id}/{first_page}.rm"]
+        content = json.loads(after[f"{doc_id}.content"])
+        author = content["cPages"]["uuids"][0]["first"]
+        blocks = list(read_blocks(io.BytesIO(after[f"{doc_id}/{page_id}.rm"])))
+        author_block = next(b for b in blocks if isinstance(b, AuthorIdsBlock))
+        assert str(author_block.author_uuids[1]) == author
+
+    def test_add_page_rejects_non_notebook_before_commit(self):
+        store = _FakeSyncStore()
+        client = self._client()
+        doc_id = "pdf-doc"
+
+        def create():
+            files = [
+                client._upload_file_blob(
+                    json.dumps({"fileType": "pdf", "pages": ["p1"]}).encode(), f"{doc_id}.content"
+                ),
+                client._upload_file_blob(b"{}", f"{doc_id}.metadata"),
+            ]
+            client._add_new_document(doc_id, files, "Paper", "DocumentType", "")
+
+        self._run(store, create)
+        store.committed_hashes.clear()
+
+        with pytest.raises(ValueError, match="not a native notebook"):
+            self._run(store, lambda: client.add_notebook_page(doc_id))
+        assert store.committed_hashes == []
+
+    def test_draw_appends_to_existing_page_bytes(self):
+        store = _FakeSyncStore()
+        doc_id, page_id = self._seed(store)
+        before = store.doc_blobs(doc_id)
+
+        drawn = self._run(
+            store, lambda: self._client().append_page_strokes(doc_id, page_id, [_STROKE_A])
+        )
+        after = store.doc_blobs(doc_id)
+        page = after[f"{doc_id}/{page_id}.rm"]
+
+        assert sorted(store.put_names) == sorted(
+            [f"{doc_id}/{page_id}.rm", f"{doc_id}.docSchema", "root.docSchema"]
+        )
+        assert page.startswith(before[f"{doc_id}/{page_id}.rm"])
+        assert len(_page_lines(page)) == 1
+        assert after[f"{doc_id}.content"] == before[f"{doc_id}.content"]
+        assert after[f"{doc_id}.metadata"] == before[f"{doc_id}.metadata"]
+        assert drawn["created_overlay"] is False
+        assert drawn["paper_size"] == [1404, 1872]
+
+    def test_draw_seeds_a_page_without_blob(self):
+        store = _FakeSyncStore()
+        doc_id, page_id = self._seed_without_page_blob(store)
+
+        drawn = self._run(
+            store, lambda: self._client().append_page_strokes(doc_id, page_id, [_STROKE_A])
+        )
+
+        page = store.doc_blobs(doc_id)[f"{doc_id}/{page_id}.rm"]
+        assert page.startswith(b"reMarkable .lines file, version=6")
+        assert len(_page_lines(page)) == 1
+        assert drawn["created_overlay"] is True
+
+    def test_draw_on_page_missing_from_content_aborts(self):
+        from remarkable_mcp.sync import CloudWriteError
+
+        store = _FakeSyncStore()
+        doc_id, _ = self._seed(store)
+
+        with pytest.raises(CloudWriteError, match="no longer"):
+            self._run(
+                store, lambda: self._client().append_page_strokes(doc_id, "gone", [_STROKE_A])
+            )
+        assert store.committed_hashes == []
+
+    def _other_writer(self, store, doc_id, page_id, edit):
+        """Return an ``interleave`` hook that commits another client's edit once."""
+
+        def interleave():
+            other = self._client()
+            if edit == "draw":
+                other.append_page_strokes(doc_id, page_id, [_STROKE_B])
+            else:
+                interleave.added = other.add_notebook_page(doc_id)["page_id"]
+
+        return interleave
+
+    @pytest.mark.parametrize("theirs", ["draw", "add_page"])
+    @pytest.mark.parametrize("ours", ["draw", "add_page"])
+    def test_conflict_rebuilds_on_the_winning_root(self, ours, theirs):
+        store = _FakeSyncStore()
+        doc_id, page_id = self._seed(store)
+        store.conflicts = 1
+        store.interleave = self._other_writer(store, doc_id, page_id, theirs)
+        client = self._client()
+
+        if ours == "draw":
+            self._run(store, lambda: client.append_page_strokes(doc_id, page_id, [_STROKE_A]))
+        else:
+            mine = self._run(store, lambda: client.add_notebook_page(doc_id))["page_id"]
+
+        blobs = store.doc_blobs(doc_id)
+        lines = [line for _, line in _page_lines(blobs[f"{doc_id}/{page_id}.rm"])]
+        expected_lines = [ours, theirs].count("draw")
+        assert len(lines) == expected_lines
+        if ours == theirs == "draw":
+            assert {line.tool.name for line in lines} == {"FINELINER_2", "HIGHLIGHTER_2"}
+        pages = self._pages(store, doc_id)
+        expected_pages = [page_id]
+        if theirs == "add_page":
+            expected_pages.append(store.interleave.added)
+        if ours == "add_page":
+            expected_pages.append(mine)
+        assert pages == expected_pages
+        assert all(f"{doc_id}/{p}.rm" in blobs for p in pages)
+
+    def test_lost_ack_replay_draws_once(self):
+        store = _FakeSyncStore()
+        doc_id, page_id = self._seed(store)
+        store.lost_acks = 1
+
+        drawn = self._run(
+            store, lambda: self._client().append_page_strokes(doc_id, page_id, [_STROKE_A])
+        )
+
+        assert len(store.committed_hashes) == 2
+        page = store.doc_blobs(doc_id)[f"{doc_id}/{page_id}.rm"]
+        assert len(_page_lines(page)) == 1
+        assert drawn["created_overlay"] is False
+
+    def test_lost_ack_replay_adds_one_page(self):
+        store = _FakeSyncStore()
+        doc_id, page_id = self._seed(store)
+        store.lost_acks = 1
+
+        added = self._run(store, lambda: self._client().add_notebook_page(doc_id))
+
+        assert len(store.committed_hashes) == 2
+        assert self._pages(store, doc_id) == [page_id, added["page_id"]]
+        assert added["page_index"] == 2
+        assert added["total_pages"] == 2
 
 
 class TestCloudAuthorDispatch:

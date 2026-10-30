@@ -1091,6 +1091,130 @@ class RemarkableClient:
         document = self._add_new_document(doc_id, files, name, "DocumentType", parent_id)
         return {"document": document, "page_id": page_id}
 
+    def _edit_document(self, doc_id: str, edit: "Any") -> None:
+        """Rebuild one document from its current blobs and commit the root.
+
+        ``edit(read_blob)`` receives ``read_blob(filename) -> Optional[bytes]``
+        over the document as it stands in the root about to be replaced, and
+        returns ``{filename: bytes}`` for the blobs to add or replace, or
+        ``None`` when its change is already there. It runs again on every
+        generation-conflict retry against the winning root, so a change another
+        client committed in between is read back and kept, and nothing built
+        from an older root is replayed. Blobs it does not name keep their hash.
+        """
+
+        def mutate(entries):
+            entry = self._require_entry(entries, doc_id)
+            files = self._parse_index(self._get_file(entry["hash"], f"{doc_id}.docSchema"))
+            by_name = {f["id"]: f for f in files}
+
+            def read_blob(name: str) -> Optional[bytes]:
+                blob = by_name.get(name)
+                return None if blob is None else self._get_file(blob["hash"], name)
+
+            changes = edit(read_blob)
+            if not changes:
+                return entries
+            for name, content in changes.items():
+                by_name[name] = self._upload_file_blob(content, name)
+            new_entry = self._upload_doc_index(doc_id, list(by_name.values()))
+            return self._replace_root_entry(entries, new_entry)
+
+        self._sync_root(mutate)
+
+    @staticmethod
+    def _read_content(doc_id: str, read_blob: "Any") -> Dict[str, Any]:
+        """Return a document's parsed ``.content`` through an ``_edit_document`` reader."""
+        raw = read_blob(f"{doc_id}.content")
+        if raw is None:
+            raise CloudWriteError(f"Document {doc_id} has no content blob.")
+        try:
+            content = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as e:
+            raise CloudWriteError(f"Document {doc_id} has an unreadable content blob: {e}") from e
+        if not isinstance(content, dict):
+            raise CloudWriteError(f"Document {doc_id} has an unreadable content blob.")
+        return content
+
+    def add_notebook_page(self, doc_id: str) -> Dict[str, Any]:
+        """Append a blank drawable page to the end of a native notebook.
+
+        Returns ``{"page_id", "page_index", "total_pages"}`` with a 1-based
+        index. Only ``.content`` and the new ``{doc_id}/{page_id}.rm`` change.
+        The page id is fixed across retries: when a retry finds it in
+        ``cPages``, the earlier commit landed and its acknowledgement was lost,
+        so the page is not appended twice. Raises ``ValueError`` when the
+        document is not a native notebook.
+        """
+        from remarkable_mcp import notebooks as nb
+
+        page_id = nb.new_uuid()
+        page_ids: List[str] = []
+
+        def edit(read_blob):
+            content = self._read_content(doc_id, read_blob)
+            current = nb.page_ids_from_content(content)
+            if page_id in current:
+                page_ids[:] = current
+                return None
+            nb.append_page_to_content(content, page_id)
+            page_ids[:] = nb.page_ids_from_content(content)
+            page = nb.blank_page_rm_bytes(author_uuid=nb.content_author_uuid(content))
+            return {
+                f"{doc_id}.content": json.dumps(content, sort_keys=True).encode("utf-8"),
+                f"{doc_id}/{page_id}.rm": page,
+            }
+
+        self._edit_document(doc_id, edit)
+        return {
+            "page_id": page_id,
+            "page_index": page_ids.index(page_id) + 1,
+            "total_pages": len(page_ids),
+        }
+
+    def append_page_strokes(
+        self, doc_id: str, page_id: str, strokes: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Append pen strokes to one page of a document.
+
+        Returns ``{"created_overlay": bool, "paper_size": [width, height]}``.
+        Only ``{doc_id}/{page_id}.rm`` changes: its current bytes stay a
+        verbatim prefix and the strokes are appended after them, so ink another
+        client committed first is kept. A page with no ``.rm`` yet is seeded
+        with a blank drawable layer. Each attempt remembers the strokes it
+        serialized; when a retry finds them on the page, the earlier commit
+        landed and its acknowledgement was lost, so nothing is appended twice.
+        Raises ``StrokeError`` when the strokes cannot be composed.
+        """
+        from remarkable_mcp import notebooks as nb
+        from remarkable_mcp import strokes as strokes_mod
+
+        page_name = f"{doc_id}/{page_id}.rm"
+        appended: List[bytes] = []
+        drawn: Dict[str, Any] = {}
+
+        def edit(read_blob):
+            content = self._read_content(doc_id, read_blob)
+            if page_id not in nb.page_ids_from_content(content):
+                raise CloudWriteError(f"Page {page_id} is no longer in document {doc_id}.")
+            original = read_blob(page_name)
+            if original is not None and any(
+                strokes_mod.contains_appended(original, tail) for tail in appended
+            ):
+                return None
+            base = original if original is not None else nb.blank_page_rm_bytes()
+            geometry = strokes_mod.page_geometry(base)
+            new_bytes = strokes_mod.append_strokes(base, strokes)
+            appended.append(new_bytes[len(base) :])
+            drawn.update(
+                created_overlay=original is None,
+                paper_size=[geometry["paper_width"], geometry["paper_height"]],
+            )
+            return {page_name: new_bytes}
+
+        self._edit_document(doc_id, edit)
+        return drawn
+
     def rename(self, doc_id: str, new_name: str) -> None:
         """Rename a document or folder in the cloud."""
 
