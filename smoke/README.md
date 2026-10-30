@@ -56,18 +56,18 @@ tool visibility changes.
 | `remarkable_status` / `browse` / `recent` / `search` / `read` / `image` / `canvas` | PASS | PASS | PASS | PASS |
 | `remarkable_upload` | **N/A** | PASS | PASS | PASS |
 | `remarkable_mkdir` / `rename` / `move` / `delete` | **N/A** | PASS | **N/A** | PASS |
-| `remarkable_author` | **N/A** | PASS (`create_document` only) | **N/A** | PASS |
+| `remarkable_author` | **N/A** | PASS | **N/A** | PASS |
 
 USB web is read + render + upload only. It preserves the uploaded filename but
 does not accept a destination-folder parameter; the tablet web service chooses
 the folder. Its HTTP API exposes no folder/move/rename/delete endpoints, so those tools are not registered
 in that mode (shown as N/A). Local directory mode is strictly read-only (the
 folder is the desktop app's private sync cache), so no write tool registers
-there. `remarkable_author` is exposed over SSH and cloud. Over SSH the harness
-runs `create_document`, `add_page` and `draw`. In cloud mode only
-`create_document` is supported: the harness seeds the new notebook with a known
-marker, reads it back with `remarkable_read`, and records `add_page=N/A;
-draw=N/A`, since those methods modify existing `.rm` pages and stay SSH-only.
+there. `remarkable_author` is exposed over SSH and cloud, and the harness runs
+`create_document`, `add_page` and `draw` on a throwaway notebook in both. In
+cloud mode the notebook is seeded with a known marker and read back with
+`remarkable_read` after `add_page` and `draw`, so the row also shows the first
+page's text survived both appends.
 
 ### Upload is verified end-to-end (cloud/ssh)
 
