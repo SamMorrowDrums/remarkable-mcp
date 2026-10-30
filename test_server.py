@@ -3433,6 +3433,27 @@ class TestWriteTools:
             assert "remarkable_delete" not in names
 
     @pytest.mark.asyncio
+    async def test_usb_web_wins_over_ssh_for_write_tools(self):
+        """With both modes set, get_rmapi() returns the USB client, so SSH tools stay hidden."""
+        from remarkable_mcp.write_tools import _is_ssh_mode, register_write_tools
+
+        managed = [
+            "remarkable_author",
+            "remarkable_mkdir",
+            "remarkable_move",
+            "remarkable_rename",
+            "remarkable_delete",
+        ]
+        for name in managed:
+            mcp._tool_manager._tools.pop(name, None)
+        with patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1", "REMARKABLE_USE_USB_WEB": "1"}):
+            assert _is_ssh_mode() is False
+            register_write_tools()
+            names = {t.name for t in await _list_tools()}
+            assert "remarkable_upload" in names
+            assert names.isdisjoint(managed)
+
+    @pytest.mark.asyncio
     async def test_author_registered_in_ssh_and_cloud_modes(self):
         """remarkable_author is present in SSH and cloud, hidden in USB web.
 

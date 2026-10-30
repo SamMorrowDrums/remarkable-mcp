@@ -113,12 +113,17 @@ def _require_write_transport() -> Optional[str]:
 
 
 def _is_ssh_mode() -> bool:
-    """Check if SSH transport is active."""
-    return os.environ.get("REMARKABLE_USE_SSH", "").lower() in (
+    """Check if SSH transport is active.
+
+    get_rmapi() prefers the local directory, then USB web, over SSH, so SSH is
+    only active when neither of those is selected as well.
+    """
+    ssh_selected = os.environ.get("REMARKABLE_USE_SSH", "").lower() in (
         "1",
         "true",
         "yes",
     )
+    return ssh_selected and not _is_usb_web_mode() and not _is_local_dir_mode()
 
 
 def _is_usb_web_mode() -> bool:
