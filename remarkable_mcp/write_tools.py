@@ -1137,6 +1137,101 @@ def _delete_confirmation_abort(
     return None
 
 
+def _find_author_target(client, document: str) -> tuple:
+    """Return ``(target, None)`` for a document name or path, else ``(None, error)``."""
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    target = _resolve_document(document, collection, items_by_id)
+    if target:
+        return target, None
+
+    from remarkable_mcp.extract import find_similar_documents
+
+    similar = find_similar_documents(document, collection)
+    return None, make_error(
+        error_type="document_not_found",
+        message=f"Document not found: '{document}'",
+        suggestion="Use remarkable_browse() to find the correct name.",
+        did_you_mean=similar or None,
+    )
+
+
+def _parse_content(content_raw: Optional[bytes]) -> dict:
+    """Parse ``.content`` bytes, or return ``{}`` when they are missing or unreadable."""
+    try:
+        content_data = json.loads(content_raw) if content_raw else {}
+    except (ValueError, TypeError):
+        return {}
+    return content_data if isinstance(content_data, dict) else {}
+
+
+def _draw_page_ids(content_data: dict, page: int, doc_name: str) -> tuple:
+    """Return ``(page_ids, None)`` when ``page`` exists, else ``(None, error)``."""
+    from remarkable_mcp import notebooks as nb
+
+    page_ids = nb.page_ids_from_content(content_data)
+    if not page_ids:
+        return None, make_error(
+            error_type="no_pages",
+            message=f"Could not read the page list for '{doc_name}'.",
+            suggestion="The document may have no pages, or an unexpected .content format.",
+        )
+    if page < 1 or page > len(page_ids):
+        return None, make_error(
+            error_type="page_out_of_range",
+            message=f"Page {page} does not exist. Document has {len(page_ids)} page(s).",
+            suggestion=f"Use page=1 to {len(page_ids)}.",
+        )
+    return page_ids, None
+
+
+def _draw_result(
+    doc_name: str,
+    page: int,
+    page_ids: list,
+    strokes: list,
+    paper_size: list,
+    file_type: str,
+    *,
+    created_overlay: bool,
+    transport: str,
+    ui_submitted: bool,
+    refresh_pending: bool,
+) -> dict:
+    """Build the ``draw`` response payload shared by the SSH and cloud paths."""
+    result = {
+        "written": True,
+        "document": doc_name,
+        "page": page,
+        "total_pages": len(page_ids),
+        "strokes_added": len(strokes),
+        "paper_size": paper_size,
+        "file_type": file_type or "notebook",
+        "created_overlay": created_overlay,
+        "writable": True,
+        "transport": transport,
+        "ui_submitted": bool(ui_submitted),
+        "refresh_pending": refresh_pending,
+    }
+    if file_type.lower() == "epub":
+        result["caveat"] = (
+            "This is a reflowable EPUB; annotations are anchored to the "
+            "current layout and may shift if the font size or layout changes."
+        )
+    return result
+
+
+def _not_a_notebook_error(error: ValueError) -> str:
+    return make_error(
+        error_type="not_a_notebook",
+        message=str(error),
+        suggestion=(
+            "Pages can only be added to native notebooks. PDF/EPUB pages "
+            "already exist; open the page and draw on it directly."
+        ),
+    )
+
+
 def _author_draw(
     document: str,
     page: int,
@@ -1167,39 +1262,16 @@ def _author_draw(
     from remarkable_mcp import strokes as strokes_mod
 
     ssh_client = _get_ssh_client()
-    collection = ssh_client.get_meta_items()
-    items_by_id = get_items_by_id(collection)
-    target = _resolve_document(document, collection, items_by_id)
-    if not target:
-        from remarkable_mcp.extract import find_similar_documents
-
-        similar = find_similar_documents(document, collection)
-        return make_error(
-            error_type="document_not_found",
-            message=f"Document not found: '{document}'",
-            suggestion="Use remarkable_browse() to find the correct name.",
-            did_you_mean=similar or None,
-        )
+    target, error = _find_author_target(ssh_client, document)
+    if error:
+        return error
 
     doc_uuid = target.ID
     content_raw = _read_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}.content")
-    try:
-        content_data = json.loads(content_raw) if content_raw else {}
-    except (ValueError, TypeError):
-        content_data = {}
-    page_ids = nb.page_ids_from_content(content_data)
-    if not page_ids:
-        return make_error(
-            error_type="no_pages",
-            message=f"Could not read the page list for '{target.VissibleName}'.",
-            suggestion="The document may have no pages, or an unexpected .content format.",
-        )
-    if page < 1 or page > len(page_ids):
-        return make_error(
-            error_type="page_out_of_range",
-            message=f"Page {page} does not exist. Document has {len(page_ids)} page(s).",
-            suggestion=f"Use page=1 to {len(page_ids)}.",
-        )
+    content_data = _parse_content(content_raw)
+    page_ids, error = _draw_page_ids(content_data, page, target.VissibleName)
+    if error:
+        return error
 
     page_id = page_ids[page - 1]
     file_type = str(content_data.get("fileType", "") or "")
@@ -1242,25 +1314,18 @@ def _author_draw(
     _update_deferred_ssh_cache(ssh_client, restarted)
     _clear_document_extraction_cache(doc_uuid)
 
-    result = {
-        "written": True,
-        "document": target.VissibleName,
-        "page": page,
-        "total_pages": len(page_ids),
-        "strokes_added": len(strokes),
-        "paper_size": [geom["paper_width"], geom["paper_height"]],
-        "file_type": file_type or "notebook",
-        "created_overlay": not page_existed,
-        "writable": True,
-        "transport": "ssh",
-        "ui_submitted": bool(ui_submitted),
-        "refresh_pending": not restarted,
-    }
-    if file_type.lower() == "epub":
-        result["caveat"] = (
-            "This is a reflowable EPUB; annotations are anchored to the "
-            "current layout and may shift if the font size or layout changes."
-        )
+    result = _draw_result(
+        target.VissibleName,
+        page,
+        page_ids,
+        strokes,
+        [geom["paper_width"], geom["paper_height"]],
+        file_type,
+        created_overlay=not page_existed,
+        transport="ssh",
+        ui_submitted=ui_submitted,
+        refresh_pending=not restarted,
+    )
     hint = _write_result_message(
         restarted,
         (f"Appended {len(strokes)} stroke(s) to page {page} of '{target.VissibleName}'."),
@@ -1281,26 +1346,13 @@ def _author_add_page(document: str, defer_restart: bool = False) -> str:
     from remarkable_mcp import notebooks as nb
 
     ssh_client = _get_ssh_client()
-    collection = ssh_client.get_meta_items()
-    items_by_id = get_items_by_id(collection)
-    target = _resolve_document(document, collection, items_by_id)
-    if not target:
-        from remarkable_mcp.extract import find_similar_documents
-
-        similar = find_similar_documents(document, collection)
-        return make_error(
-            error_type="document_not_found",
-            message=f"Document not found: '{document}'",
-            suggestion="Use remarkable_browse() to find the correct name.",
-            did_you_mean=similar or None,
-        )
+    target, error = _find_author_target(ssh_client, document)
+    if error:
+        return error
 
     doc_uuid = target.ID
     content_raw = _read_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}.content")
-    try:
-        content_data = json.loads(content_raw) if content_raw else {}
-    except (ValueError, TypeError):
-        content_data = {}
+    content_data = _parse_content(content_raw)
     if not content_data:
         return make_error(
             error_type="no_content",
@@ -1312,14 +1364,7 @@ def _author_add_page(document: str, defer_restart: bool = False) -> str:
     try:
         updated = nb.append_page_to_content(content_data, new_page_id)
     except ValueError as e:
-        return make_error(
-            error_type="not_a_notebook",
-            message=str(e),
-            suggestion=(
-                "Pages can only be added to native notebooks. PDF/EPUB pages "
-                "already exist — open the page and draw on it directly."
-            ),
-        )
+        return _not_a_notebook_error(e)
 
     page_bytes = nb.blank_page_rm_bytes(author_uuid=nb.content_author_uuid(content_data))
 
