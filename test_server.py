@@ -4176,11 +4176,22 @@ class TestCloudAuthorDispatch:
         client.create_notebook.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_create_document_cloud_write_error_is_structured(self):
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "cloud_write_error",
+            "http_error",
+        ],
+    )
+    async def test_create_document_cloud_write_error_is_structured(self, error):
         from remarkable_mcp.sync import CloudWriteError
 
         client = self._cloud_client()
-        client.create_notebook.side_effect = CloudWriteError("Parent folder x is gone.")
+        client.create_notebook.side_effect = (
+            CloudWriteError("Parent folder x is gone.")
+            if error == "cloud_write_error"
+            else requests.HTTPError("Parent folder x is gone.")
+        )
 
         with (
             patch.dict(os.environ, self._cloud_env(), clear=True),

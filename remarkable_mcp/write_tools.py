@@ -1470,11 +1470,13 @@ def _cloud_author_create_document(
             did_you_mean=folders[:5] if folders else None,
         )
 
+    from requests import RequestException
+
     from remarkable_mcp.sync import CloudWriteError
 
     try:
         created = client.create_notebook(name, parent_id, text or "")
-    except CloudWriteError as e:
+    except (CloudWriteError, RequestException) as e:
         return make_error(
             error_type="create_document_failed",
             message=f"Failed to create notebook '{name}': {e}",
