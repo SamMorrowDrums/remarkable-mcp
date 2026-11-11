@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Nix
-        uses: cachix/install-nix-action@v31.11.1
+        uses: cachix/install-nix-action@v31.11.3
 
       - name: Check module syntax
         run: nix-instantiate --parse remarkable-mcp-bridge.nix >/dev/null
