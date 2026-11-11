@@ -783,6 +783,8 @@ def _root_path() -> str:
 
 def _resolve_root_id(collection: list) -> Optional[str]:
     """Resolve the configured root through folder IDs, not joined display names."""
+    from remarkable_mcp.tools import _is_cloud_archived
+
     root = _root_path()
     if root == "/":
         return ""
@@ -794,6 +796,7 @@ def _resolve_root_id(collection: list) -> Optional[str]:
             if item.is_folder
             and getattr(item, "Parent", "") == parent_id
             and item.VissibleName.lower() == component.lower()
+            and not _is_cloud_archived(item)
         ]
         if len(matches) != 1:
             return None
@@ -856,8 +859,14 @@ def _scoped_suggestion(suggestion: str) -> str:
 
 def _document_not_found(document: str, collection: list, items_by_id: dict) -> str:
     from remarkable_mcp.extract import find_similar_documents
+    from remarkable_mcp.tools import _is_cloud_archived
 
-    similar = find_similar_documents(document, _scoped_items(collection, items_by_id))
+    candidates = [
+        item
+        for item in _scoped_items(collection, items_by_id)
+        if not _is_cloud_archived(item, items_by_id)
+    ]
+    similar = find_similar_documents(document, candidates)
     return make_error(
         error_type="document_not_found",
         message=f"Document not found: '{document}'",
@@ -867,10 +876,12 @@ def _document_not_found(document: str, collection: list, items_by_id: dict) -> s
 
 
 def _folder_suggestions(collection: list, items_by_id: dict) -> Optional[list]:
+    from remarkable_mcp.tools import _is_cloud_archived
+
     folders = [
         _display_path(get_item_path(item, items_by_id))
         for item in _scoped_items(collection, items_by_id)
-        if item.is_folder
+        if item.is_folder and not _is_cloud_archived(item, items_by_id)
     ]
     return folders[:5] or None
 
@@ -892,9 +903,11 @@ def _resolve_parent_id(parent_path: str, items_by_id: dict, collection: list) ->
     if not parent_path or not parent_path.strip("/"):
         return _resolve_root_id(collection)
 
+    from remarkable_mcp.tools import _is_cloud_archived
+
     target = _device_path(parent_path).strip("/").lower()
     for item in _scoped_items(collection, items_by_id):
-        if not item.is_folder:
+        if not item.is_folder or _is_cloud_archived(item, items_by_id):
             continue
         item_path = get_item_path(item, items_by_id).strip("/")
         if item_path.lower() == target:
@@ -917,15 +930,25 @@ def _resolve_document(
         items_by_id: Dict mapping item IDs to items
         folders_only: If True, only match folders
 
+    Live items win. A trashed item is only matched by its explicit
+    ``/trash/...`` path (e.g. to permanently delete it over SSH), never by a
+    bare name that a live item could also carry.
+
     Returns:
         The matching item, or None
     """
+    from remarkable_mcp.tools import _is_cloud_archived
+
     target_path = _device_path(name_or_path).strip("/").lower()
     target_name = name_or_path.strip("/").lower()
     name_match = None
+    trashed = []
 
     for item in _scoped_items(collection, items_by_id):
         if folders_only and not item.is_folder:
+            continue
+        if _is_cloud_archived(item, items_by_id):
+            trashed.append(item)
             continue
         item_path = get_item_path(item, items_by_id)
         if item_path.strip("/").lower() == target_path:
@@ -933,7 +956,14 @@ def _resolve_document(
         if name_match is None and item.VissibleName.lower() == target_name:
             name_match = item
 
-    return name_match
+    if name_match is not None:
+        return name_match
+    # Trash is outside any configured root and requires an absolute path.
+    if _root_path() == "/" and name_or_path.lower().startswith("/trash/"):
+        for item in trashed:
+            if get_item_path(item, items_by_id).strip("/").lower() == target_path:
+                return item
+    return None
 
 
 def _invalidate_client_cache(client) -> None:

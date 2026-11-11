@@ -314,14 +314,23 @@ def get_items_by_parent(collection) -> Dict[str, List]:
     return items_by_parent
 
 
+TRASH_PARENT_ID = "trash"
+
+
 def get_item_path(item, items_by_id: Dict[str, Any]) -> str:
-    """Get the full path of an item."""
+    """Get the full path of an item.
+
+    Trashed items (directly, or via a trashed ancestor folder) are reported
+    under ``/trash`` so they are not mistaken for root-level items.
+    """
     path_parts = [item.VissibleName]
     parent_id = item.Parent if hasattr(item, "Parent") else ""
     while parent_id and parent_id in items_by_id:
         parent = items_by_id[parent_id]
         path_parts.insert(0, parent.VissibleName)
         parent_id = parent.Parent if hasattr(parent, "Parent") else ""
+    if parent_id == TRASH_PARENT_ID:
+        path_parts.insert(0, TRASH_PARENT_ID)
     return "/" + "/".join(path_parts)
 
 

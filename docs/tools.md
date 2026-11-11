@@ -39,6 +39,11 @@ With this configuration:
 - `remarkable_upload` and `remarkable_markdown_to_pdf` are refused in USB web mode, because that interface cannot choose a destination folder
 - `remarkable_status()` shows the configured root and document count within that folder
 
+Trashed items and descendants of trashed folders are hidden from read tools,
+canvas, resources, and document counts. Write lookup prefers live items, rejects
+trashed destinations, and only accepts explicit absolute `/trash/...` targets
+when no root is configured (for example, SSH permanent deletion).
+
 ---
 
 ## remarkable_read
