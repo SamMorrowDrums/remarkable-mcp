@@ -519,9 +519,13 @@ def _render_rm_v5_to_svg(rm_file_path: Path) -> Optional[str]:
                         opacity = ' opacity="0.35"'
                     else:
                         stroke_color = STROKE_COLORS.get(color, "black")
-                        avg_width = sum(s[2] for s in segments) / len(segments)
-                        stroke_width = max(0.5, min(avg_width * 0.8, 5.0))
-                        opacity = ""
+                        all_coords.extend((s[0], s[1]) for s in segments)
+                        paths.extend(
+                            _variable_width_pen_paths(
+                                [(s[0], s[1], s[2]) for s in segments], stroke_color
+                            )
+                        )
+                        continue
 
                     d = f"M {segments[0][0]:.1f} {segments[0][1]:.1f}"
                     d += "".join(f" L {s[0]:.1f} {s[1]:.1f}" for s in segments[1:])
@@ -636,6 +640,80 @@ def _v6_group_offsets(blocks: list, anchor_pos: dict) -> dict:
     return offsets
 
 
+# ---------------------------------------------------------------------------
+# Pen stroke width (issue #189)
+#
+# ``Point.width`` is stored in fixed point, 4x the on-page stroke width in
+# scene units. Typical pens report 7-11 (1.75-2.75 units); the old formula
+# ``max(0.5, min(avg * 0.8, 5.0))`` therefore always hit the 5.0 ceiling, so
+# every pen rendered at the same marker weight and pressure/taper was lost.
+#
+# The renderer now (a) converts raw width to scene units with the 0.25 factor
+# and (b) emits one <path> per run of points sharing a (quantized) width, so
+# the width varies along the stroke the way the device draws it. Runs overlap
+# by one point and use round caps/joins so the pieces read as one stroke.
+# ---------------------------------------------------------------------------
+PEN_WIDTH_UNITS_PER_RAW = 0.25  # fixed-point x4 -> scene units
+PEN_WIDTH_MIN = 0.5
+PEN_WIDTH_MAX = 12.0
+PEN_WIDTH_QUANTUM = 0.25  # merge points whose widths round to the same step
+# Legacy fixed-width behaviour (one average width per stroke) — kept for
+# callers that need a single width, e.g. tests or thumbnail renderers.
+PEN_WIDTH_LEGACY_CLAMP = 5.0
+
+
+def _pen_width_units(raw_width: float) -> float:
+    """Scene-unit stroke width for a raw ``Point.width`` value."""
+    return max(PEN_WIDTH_MIN, min(raw_width * PEN_WIDTH_UNITS_PER_RAW, PEN_WIDTH_MAX))
+
+
+def _variable_width_pen_paths(
+    points: list,
+    stroke_color: str,
+    *,
+    dx: float = 0.0,
+    dy: float = 0.0,
+    default_raw_width: float = 8.0,
+) -> list:
+    """SVG <path> strings for one pen stroke with per-point width.
+
+    ``points`` is a sequence of (x, y, raw_width) tuples; ``raw_width`` may be
+    None when the format did not carry one, in which case ``default_raw_width``
+    (a typical fineliner) is used.
+    """
+    pts = [
+        (x + dx, y + dy, _pen_width_units(w if w is not None else default_raw_width))
+        for x, y, w in points
+    ]
+    if not pts:
+        return []
+    q = PEN_WIDTH_QUANTUM
+    widths = [round(w / q) * q for _, _, w in pts]
+
+    paths = []
+    start = 0
+    n = len(pts)
+    for i in range(1, n + 1):
+        if i < n and widths[i] == widths[start]:
+            continue
+        run = pts[start:i]
+        if start > 0:
+            run = [pts[start - 1]] + run  # overlap one point so runs join seamlessly
+        if len(run) == 1:
+            run = run + run  # zero-length line with round caps = a dot
+        d = f"M {run[0][0]:.1f} {run[0][1]:.1f}" + "".join(
+            f" L {x:.1f} {y:.1f}" for x, y, _ in run[1:]
+        )
+        paths.append(
+            f'<path d="{d}" stroke="{stroke_color}" '
+            f'stroke-width="{widths[start]:.2f}" '
+            f'fill="none" stroke-linecap="round" '
+            f'stroke-linejoin="round"/>'
+        )
+        start = i
+    return paths
+
+
 def _v6_paths_from_blocks(blocks: list, anchor_pos: Optional[dict] = None) -> Tuple[list, list]:
     """Build SVG ``<path>`` strings + a flat coordinate list from v6 blocks.
 
@@ -716,13 +794,18 @@ def _v6_paths_from_blocks(blocks: list, anchor_pos: Optional[dict] = None) -> Tu
             stroke_width = max(10.0, min(avg_width * 2.0, 40.0))
             opacity = ' opacity="0.35"'
         else:
-            avg_width = (
-                sum(p.width for p in line.points) / len(line.points)
-                if all(hasattr(p, "width") for p in line.points)
-                else 2.0
+            # Pen: width varies point to point (pressure, tilt, tip). Emit
+            # per-run paths instead of one clamped average (#189).
+            all_coords.extend((p.x + dx, p.y + dy) for p in line.points)
+            paths.extend(
+                _variable_width_pen_paths(
+                    [(p.x, p.y, getattr(p, "width", None)) for p in line.points],
+                    stroke_color,
+                    dx=dx,
+                    dy=dy,
+                )
             )
-            stroke_width = max(0.5, min(avg_width * 0.8, 5.0))
-            opacity = ""
+            continue
 
         d = f"M {line.points[0].x + dx:.1f} {line.points[0].y + dy:.1f}"
         d += "".join(f" L {p.x + dx:.1f} {p.y + dy:.1f}" for p in line.points[1:])
