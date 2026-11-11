@@ -248,6 +248,11 @@ def get_rmapi():
     return _get_cloud_client()
 
 
+def is_cloud_fallback_active() -> bool:
+    """Return True if a device transport was unreachable and get_rmapi() switched to cloud."""
+    return _fell_back_to_cloud
+
+
 def get_active_transport() -> str:
     """Return the transport actually in use ("cloud", "ssh", "usb-web", or "local-dir").
 

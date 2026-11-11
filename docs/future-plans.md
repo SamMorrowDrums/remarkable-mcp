@@ -12,8 +12,10 @@ Track intermittent large-library SSH failures in
 
 ### Cloud authoring
 
-Add native notebook creation to cloud mode before considering page mutation.
-See [#118](https://github.com/SamMorrowDrums/remarkable-mcp/issues/118).
+Cloud mode creates native notebooks (`remarkable_author` `create_document`).
+Page mutation (`draw`, `add_page`) stays SSH-only until an append-only
+download-modify-upload path is independently safe. See
+[#118](https://github.com/SamMorrowDrums/remarkable-mcp/issues/118).
 
 ### Export
 

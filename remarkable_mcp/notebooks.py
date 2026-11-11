@@ -24,8 +24,10 @@ import uuid as _uuid
 from typing import Optional
 
 from rmscene import simple_text_document, write_blocks
+from rmscene.scene_stream import RootTextBlock
 
 from remarkable_mcp.strokes import WRITE_VERSION
+from remarkable_mcp.text_styles import parse_paragraphs, styled_root_text
 
 # reMarkable 1/2 portrait stroke space. simple_text_document emits no SceneInfo,
 # so render + write both fall back to this; keep them consistent.
@@ -55,11 +57,18 @@ def page_rm_bytes(text: str = "", author_uuid: Optional[str] = None) -> bytes:
     """Return serialized ``.rm`` bytes for a single drawable page.
 
     With ``text=""`` this is a blank page; with text it is seeded with typed
-    paragraphs (split on newlines). The result always contains a drawable layer
-    node, so :func:`remarkable_mcp.strokes.append_strokes` works on it.
+    paragraphs (split on newlines), styled from Markdown line prefixes as
+    :func:`remarkable_mcp.text_styles.parse_paragraphs` describes. The result
+    always contains a drawable layer node, so
+    :func:`remarkable_mcp.strokes.append_strokes` works on it.
     """
     au = _author_uuid(author_uuid)
-    blocks = list(simple_text_document(text, author_uuid=au))
+    paragraphs = parse_paragraphs(text)
+    body = "\n".join(content for _, content in paragraphs)
+    blocks = [
+        styled_root_text(block, paragraphs) if isinstance(block, RootTextBlock) else block
+        for block in simple_text_document(body, author_uuid=au)
+    ]
     buf = io.BytesIO()
     write_blocks(buf, blocks, options={"version": WRITE_VERSION})
     return buf.getvalue()

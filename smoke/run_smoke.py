@@ -14,7 +14,8 @@ mode that writes to the device filesystem) runs LAST, after the USB-web checks
 are done.
 
 The server HIDES tools a transport cannot support (e.g. mkdir/move/rename/delete
-are not registered over USB web; remarkable_author is SSH-only). The harness is
+are not registered over USB web; remarkable_author is SSH and cloud only, and
+cloud supports its create_document method only). The harness is
 therefore ``tools/list``-driven: it asks each running server which tools it
 actually exposes and only exercises those. Any tool in the master list that a
 mode does not expose is reported as N/A for that mode -- which is the *correct*
@@ -68,6 +69,8 @@ FIXTURE_PDF = HERE / "fixtures" / "smoke-doc.pdf"
 # "PASS" on upload means the bytes are actually retrievable -- not just that the
 # upload call returned without error.
 FIXTURE_MARKER = "reMarkable MCP Smoke Test"
+# Typed text seeded into the cloud-authored notebook and read back the same way.
+AUTHOR_MARKER = "reMarkable MCP Smoke Notebook"
 SNAP_DIR = HERE / "snapshots"
 USB_HOST = "10.11.99.1"
 
@@ -555,18 +558,18 @@ def _detail_for(tool, payload):
     return None
 
 
-async def verify_upload_roundtrip(session, doc_path):
-    """Read a just-uploaded fixture back and confirm its known text survived.
+async def verify_read_roundtrip(session, doc_path, marker, content_type):
+    """Read a just-written document back and confirm its known text survived.
 
-    Returns ``(ok, note)``. This makes the upload check end-to-end: the cloud
+    Returns ``(ok, note)``. This makes write checks end-to-end: the cloud
     client invalidates its in-memory document cache on every root commit and
-    blobs are content-addressed (immutable), so a managed upload is readable in
+    blobs are content-addressed (immutable), so a managed write is readable in
     the same session with no eventual-consistency window to wait on.
     """
     payload, is_err, exc = await call_tool(
         session,
         "remarkable_read",
-        {"document": doc_path, "content_type": "raw", "page": 1},
+        {"document": doc_path, "content_type": content_type, "page": 1},
         TIMEOUTS["_default"],
     )
     if exc:
@@ -575,7 +578,7 @@ async def verify_upload_roundtrip(session, doc_path):
     if err_type:
         return False, f"read-back error: {err_type}"
     content = payload.get("content", "") if isinstance(payload, dict) else ""
-    if FIXTURE_MARKER in content:
+    if marker in content:
         return True, "round-trip OK (read-back content matched)"
     return False, "read-back found the doc but its known text was missing/garbled"
 
@@ -803,7 +806,9 @@ async def run_write_phase(session, mode, rec, registered):
                 # End-to-end check: read the just-uploaded fixture back and
                 # confirm its known text survived. A successful-but-unreadable
                 # upload is a real failure worth surfacing on this row.
-                ok, rt_note = await verify_upload_roundtrip(session, uploaded_path)
+                ok, rt_note = await verify_read_roundtrip(
+                    session, uploaded_path, FIXTURE_MARKER, "raw"
+                )
                 if ok:
                     note = f"uploaded to {uploaded_path}; {rt_note}"
                 else:
@@ -868,23 +873,29 @@ async def run_write_phase(session, mode, rec, registered):
             else:
                 rec.record(mode, "remarkable_move", SKIP, "no document to move")
 
-        # --- author (SSH only) ------------------------------------------
+        # --- author (all methods over SSH, create_document in cloud) -----
         if "remarkable_author" in registered:
             nb_name = f"{runid}-nb"
+            create_args = {"method": "create_document", "name": nb_name, "folder": folder_path}
+            if is_ssh:
+                create_args["defer_restart"] = True
+            else:
+                create_args["text"] = AUTHOR_MARKER
             payload, is_err, exc = await call_tool(
                 session,
                 "remarkable_author",
-                {
-                    "method": "create_document",
-                    "name": nb_name,
-                    "folder": folder_path,
-                    "defer_restart": True,
-                },
+                create_args,
                 TIMEOUTS["remarkable_author"],
             )
             state, note = classify_ok(payload, is_err, exc)
             nb_path = f"{folder_path}/{nb_name}"
-            if state == PASS:
+            if state == PASS and not is_ssh:
+                created.insert(0, ("doc", nb_path))  # delete before its folder
+                ok, rt_note = await verify_read_roundtrip(session, nb_path, AUTHOR_MARKER, "text")
+                final = PASS if ok else FAIL
+                sub = f"create_document={final} ({rt_note}); add_page=N/A; draw=N/A"
+                rec.record(mode, "remarkable_author", final, sub)
+            elif state == PASS:
                 created.insert(0, ("doc", nb_path))  # delete before its folder
                 ap_payload, ap_err, ap_exc = await call_tool(
                     session,
