@@ -12,8 +12,8 @@ for backward compatibility but are now no-ops (write is the default). --write an
 --read-only are mutually exclusive.
 
 Write support by transport:
-- Cloud mode: upload, mkdir, move, rename, delete (-> trash)
-- SSH mode:   upload, mkdir, move, rename, delete
+- Cloud mode: upload, mkdir, move, rename, delete (-> trash), author (all methods)
+- SSH mode:   upload, mkdir, move, rename, delete, author (all methods)
 - USB web mode: upload only (via POST /upload endpoint)
 
 Inspired by PR #70 from @McSchnizzle. SSH operations use the tablet filesystem,
@@ -42,6 +42,7 @@ from remarkable_mcp.api import (
     get_item_path,
     get_items_by_id,
     get_rmapi,
+    is_cloud_fallback_active,
 )
 from remarkable_mcp.capabilities import client_supports_elicitation
 from remarkable_mcp.responses import make_error, make_response
@@ -107,12 +108,17 @@ def _require_write_transport() -> Optional[str]:
 
 
 def _is_ssh_mode() -> bool:
-    """Check if SSH transport is active."""
-    return os.environ.get("REMARKABLE_USE_SSH", "").lower() in (
+    """Check if SSH transport is active.
+
+    get_rmapi() prefers the local directory, then USB web, over SSH, so SSH is
+    only active when neither of those is selected as well.
+    """
+    ssh_selected = os.environ.get("REMARKABLE_USE_SSH", "").lower() in (
         "1",
         "true",
         "yes",
     )
+    return ssh_selected and not _is_usb_web_mode() and not _is_local_dir_mode()
 
 
 def _is_usb_web_mode() -> bool:
@@ -682,23 +688,6 @@ def _write_result_message(
     return f"{done} Restart deferred — call remarkable_refresh() once your batch is done."
 
 
-def _page_ids_from_content(content_data: dict) -> list:
-    """Return ordered page ids from a parsed ``.content`` file.
-
-    Handles both the modern ``cPages.pages[].id`` schema (native notebooks) and
-    the legacy flat ``pages`` UUID list (PDF/EPUB-backed documents).
-    """
-    cpages = content_data.get("cPages")
-    if isinstance(cpages, dict) and isinstance(cpages.get("pages"), list):
-        ids = [p.get("id") for p in cpages["pages"] if isinstance(p, dict) and p.get("id")]
-        if ids:
-            return ids
-    pages = content_data.get("pages")
-    if isinstance(pages, list) and all(isinstance(p, str) for p in pages):
-        return list(pages)
-    return []
-
-
 def _read_remote_bytes(ssh_client: SSHClient, remote_path: str) -> Optional[bytes]:
     """Download a remote file's bytes, or None if it does not exist / fails."""
     try:
@@ -1143,6 +1132,101 @@ def _delete_confirmation_abort(
     return None
 
 
+def _find_author_target(client, document: str) -> tuple:
+    """Return ``(target, None)`` for a document name or path, else ``(None, error)``."""
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    target = _resolve_document(document, collection, items_by_id)
+    if target:
+        return target, None
+
+    from remarkable_mcp.extract import find_similar_documents
+
+    similar = find_similar_documents(document, collection)
+    return None, make_error(
+        error_type="document_not_found",
+        message=f"Document not found: '{document}'",
+        suggestion="Use remarkable_browse() to find the correct name.",
+        did_you_mean=similar or None,
+    )
+
+
+def _parse_content(content_raw: Optional[bytes]) -> dict:
+    """Parse ``.content`` bytes, or return ``{}`` when they are missing or unreadable."""
+    try:
+        content_data = json.loads(content_raw) if content_raw else {}
+    except (ValueError, TypeError):
+        return {}
+    return content_data if isinstance(content_data, dict) else {}
+
+
+def _draw_page_ids(content_data: dict, page: int, doc_name: str) -> tuple:
+    """Return ``(page_ids, None)`` when ``page`` exists, else ``(None, error)``."""
+    from remarkable_mcp import notebooks as nb
+
+    page_ids = nb.page_ids_from_content(content_data)
+    if not page_ids:
+        return None, make_error(
+            error_type="no_pages",
+            message=f"Could not read the page list for '{doc_name}'.",
+            suggestion="The document may have no pages, or an unexpected .content format.",
+        )
+    if page < 1 or page > len(page_ids):
+        return None, make_error(
+            error_type="page_out_of_range",
+            message=f"Page {page} does not exist. Document has {len(page_ids)} page(s).",
+            suggestion=f"Use page=1 to {len(page_ids)}.",
+        )
+    return page_ids, None
+
+
+def _draw_result(
+    doc_name: str,
+    page: int,
+    page_ids: list,
+    strokes: list,
+    paper_size: list,
+    file_type: str,
+    *,
+    created_overlay: bool,
+    transport: str,
+    ui_submitted: bool,
+    refresh_pending: bool,
+) -> dict:
+    """Build the ``draw`` response payload shared by the SSH and cloud paths."""
+    result = {
+        "written": True,
+        "document": doc_name,
+        "page": page,
+        "total_pages": len(page_ids),
+        "strokes_added": len(strokes),
+        "paper_size": paper_size,
+        "file_type": file_type or "notebook",
+        "created_overlay": created_overlay,
+        "writable": True,
+        "transport": transport,
+        "ui_submitted": bool(ui_submitted),
+        "refresh_pending": refresh_pending,
+    }
+    if file_type.lower() == "epub":
+        result["caveat"] = (
+            "This is a reflowable EPUB; annotations are anchored to the "
+            "current layout and may shift if the font size or layout changes."
+        )
+    return result
+
+
+def _not_a_notebook_error(error: Exception) -> str:
+    return make_error(
+        error_type="not_a_notebook",
+        message=str(error),
+        suggestion=(
+            "Pages can only be added to native notebooks. PDF/EPUB pages "
+            "already exist; open the page and draw on it directly."
+        ),
+    )
+
+
 def _author_draw(
     document: str,
     page: int,
@@ -1173,39 +1257,16 @@ def _author_draw(
     from remarkable_mcp import strokes as strokes_mod
 
     ssh_client = _get_ssh_client()
-    collection = ssh_client.get_meta_items()
-    items_by_id = get_items_by_id(collection)
-    target = _resolve_document(document, collection, items_by_id)
-    if not target:
-        from remarkable_mcp.extract import find_similar_documents
-
-        similar = find_similar_documents(document, collection)
-        return make_error(
-            error_type="document_not_found",
-            message=f"Document not found: '{document}'",
-            suggestion="Use remarkable_browse() to find the correct name.",
-            did_you_mean=similar or None,
-        )
+    target, error = _find_author_target(ssh_client, document)
+    if error:
+        return error
 
     doc_uuid = target.ID
     content_raw = _read_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}.content")
-    try:
-        content_data = json.loads(content_raw) if content_raw else {}
-    except (ValueError, TypeError):
-        content_data = {}
-    page_ids = _page_ids_from_content(content_data)
-    if not page_ids:
-        return make_error(
-            error_type="no_pages",
-            message=f"Could not read the page list for '{target.VissibleName}'.",
-            suggestion="The document may have no pages, or an unexpected .content format.",
-        )
-    if page < 1 or page > len(page_ids):
-        return make_error(
-            error_type="page_out_of_range",
-            message=f"Page {page} does not exist. Document has {len(page_ids)} page(s).",
-            suggestion=f"Use page=1 to {len(page_ids)}.",
-        )
+    content_data = _parse_content(content_raw)
+    page_ids, error = _draw_page_ids(content_data, page, target.VissibleName)
+    if error:
+        return error
 
     page_id = page_ids[page - 1]
     file_type = str(content_data.get("fileType", "") or "")
@@ -1248,25 +1309,18 @@ def _author_draw(
     _update_deferred_ssh_cache(ssh_client, restarted)
     _clear_document_extraction_cache(doc_uuid)
 
-    result = {
-        "written": True,
-        "document": target.VissibleName,
-        "page": page,
-        "total_pages": len(page_ids),
-        "strokes_added": len(strokes),
-        "paper_size": [geom["paper_width"], geom["paper_height"]],
-        "file_type": file_type or "notebook",
-        "created_overlay": not page_existed,
-        "writable": True,
-        "transport": "ssh",
-        "ui_submitted": bool(ui_submitted),
-        "refresh_pending": not restarted,
-    }
-    if file_type.lower() == "epub":
-        result["caveat"] = (
-            "This is a reflowable EPUB; annotations are anchored to the "
-            "current layout and may shift if the font size or layout changes."
-        )
+    result = _draw_result(
+        target.VissibleName,
+        page,
+        page_ids,
+        strokes,
+        [geom["paper_width"], geom["paper_height"]],
+        file_type,
+        created_overlay=not page_existed,
+        transport="ssh",
+        ui_submitted=ui_submitted,
+        refresh_pending=not restarted,
+    )
     hint = _write_result_message(
         restarted,
         (f"Appended {len(strokes)} stroke(s) to page {page} of '{target.VissibleName}'."),
@@ -1287,26 +1341,13 @@ def _author_add_page(document: str, defer_restart: bool = False) -> str:
     from remarkable_mcp import notebooks as nb
 
     ssh_client = _get_ssh_client()
-    collection = ssh_client.get_meta_items()
-    items_by_id = get_items_by_id(collection)
-    target = _resolve_document(document, collection, items_by_id)
-    if not target:
-        from remarkable_mcp.extract import find_similar_documents
-
-        similar = find_similar_documents(document, collection)
-        return make_error(
-            error_type="document_not_found",
-            message=f"Document not found: '{document}'",
-            suggestion="Use remarkable_browse() to find the correct name.",
-            did_you_mean=similar or None,
-        )
+    target, error = _find_author_target(ssh_client, document)
+    if error:
+        return error
 
     doc_uuid = target.ID
     content_raw = _read_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}.content")
-    try:
-        content_data = json.loads(content_raw) if content_raw else {}
-    except (ValueError, TypeError):
-        content_data = {}
+    content_data = _parse_content(content_raw)
     if not content_data:
         return make_error(
             error_type="no_content",
@@ -1314,29 +1355,13 @@ def _author_add_page(document: str, defer_restart: bool = False) -> str:
             suggestion="The document may be missing or have an unexpected format.",
         )
 
-    # Reuse the notebook's existing author uuid so CRDT author ids stay aligned.
-    author_uuid = None
-    uuids = content_data.get("cPages", {}).get("uuids")
-    if isinstance(uuids, list) and uuids and isinstance(uuids[0], dict):
-        author_uuid = uuids[0].get("first")
-
     new_page_id = nb.new_uuid()
     try:
         updated = nb.append_page_to_content(content_data, new_page_id)
     except ValueError as e:
-        return make_error(
-            error_type="not_a_notebook",
-            message=str(e),
-            suggestion=(
-                "Pages can only be added to native notebooks. PDF/EPUB pages "
-                "already exist — open the page and draw on it directly."
-            ),
-        )
+        return _not_a_notebook_error(e)
 
-    try:
-        page_bytes = nb.blank_page_rm_bytes(author_uuid=author_uuid)
-    except (ValueError, TypeError):
-        page_bytes = nb.blank_page_rm_bytes()
+    page_bytes = nb.blank_page_rm_bytes(author_uuid=nb.content_author_uuid(content_data))
 
     _write_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}/{new_page_id}.rm", page_bytes)
     _write_content_file(ssh_client, doc_uuid, updated["content"])
@@ -1438,6 +1463,156 @@ def _author_create_document(
     return make_response(result, hint)
 
 
+def _cloud_author_create_document(
+    client,
+    name: str,
+    text: Optional[str],
+    folder: Optional[str],
+) -> str:
+    """Create a new native notebook in the reMarkable cloud."""
+    from remarkable_mcp import notebooks as nb
+
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    parent_id = _resolve_parent_id(folder or "/", items_by_id, collection)
+    if parent_id is None:
+        folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
+        return make_error(
+            error_type="folder_not_found",
+            message=f"Folder not found: '{folder}'",
+            suggestion="Use remarkable_browse('/') to see available folders.",
+            did_you_mean=folders[:5] if folders else None,
+        )
+
+    from requests import RequestException
+
+    from remarkable_mcp.sync import CloudWriteError
+
+    try:
+        created = client.create_notebook(name, parent_id, text or "")
+    except (CloudWriteError, RequestException) as e:
+        return make_error(
+            error_type="create_document_failed",
+            message=f"Failed to create notebook '{name}': {e}",
+            suggestion="Use remarkable_browse('/') to check the destination folder, then retry.",
+        )
+    _invalidate_client_cache(client)
+    result = {
+        "created": True,
+        "document": name,
+        "document_id": created["document"].id,
+        "page_id": created["page_id"],
+        "total_pages": 1,
+        "paper_size": list(nb.DEFAULT_PAPER),
+        "has_text": bool(text),
+        "folder": folder or "/",
+        "transport": "cloud",
+        "refresh_pending": False,
+    }
+    return make_response(
+        result,
+        f"Created notebook '{name}' in the reMarkable cloud; the tablet picks it up "
+        f"on its next sync. Call remarkable_read('{name}') to verify.",
+    )
+
+
+def _cloud_author_draw(
+    client,
+    document: str,
+    page: int,
+    strokes: list,
+    ui_submitted: bool,
+) -> str:
+    """Append strokes to a page of a cloud document."""
+    from requests import RequestException
+
+    from remarkable_mcp.sync import CloudWriteError
+
+    target, error = _find_author_target(client, document)
+    if error:
+        return error
+    content_data = _parse_content(client.download_raw_file(target, "content"))
+    page_ids, error = _draw_page_ids(content_data, page, target.VissibleName)
+    if error:
+        return error
+
+    try:
+        drawn = client.append_page_strokes(target.ID, page_ids[page - 1], strokes)
+    # ValueError covers StrokeError and pages rmscene cannot read.
+    except (CloudWriteError, RequestException, ValueError) as e:
+        return make_error(
+            error_type="stroke_write_failed",
+            message=f"Failed to write strokes to page {page} of '{target.VissibleName}': {e}",
+            suggestion=(
+                "Check the stroke format (points normalized [0,1]) and use "
+                "remarkable_browse() to check the document, then retry."
+            ),
+        )
+    _invalidate_client_cache(client)
+    _clear_document_extraction_cache(target.ID)
+
+    result = _draw_result(
+        target.VissibleName,
+        page,
+        page_ids,
+        strokes,
+        drawn["paper_size"],
+        str(content_data.get("fileType", "") or ""),
+        created_overlay=drawn["created_overlay"],
+        transport="cloud",
+        ui_submitted=ui_submitted,
+        refresh_pending=False,
+    )
+    return make_response(
+        result,
+        f"Appended {len(strokes)} stroke(s) to page {page} of '{target.VissibleName}' in "
+        "the reMarkable cloud; the tablet picks them up on its next sync. Call "
+        "remarkable_canvas(document, page) to view the updated page.",
+    )
+
+
+def _cloud_author_add_page(client, document: str) -> str:
+    """Append a blank, drawable page to the end of a cloud notebook."""
+    from requests import RequestException
+
+    from remarkable_mcp import notebooks as nb
+    from remarkable_mcp.sync import CloudWriteError, NotANotebookError
+
+    target, error = _find_author_target(client, document)
+    if error:
+        return error
+
+    try:
+        added = client.add_notebook_page(target.ID)
+    except NotANotebookError as e:
+        return _not_a_notebook_error(e)
+    # ValueError covers blob indexes and pages that cannot be parsed.
+    except (CloudWriteError, RequestException, ValueError) as e:
+        return make_error(
+            error_type="add_page_failed",
+            message=f"Failed to add a page to '{target.VissibleName}': {e}",
+            suggestion="Use remarkable_browse() to check the document, then retry.",
+        )
+    _invalidate_client_cache(client)
+    _clear_document_extraction_cache(target.ID)
+
+    result = {
+        "added": True,
+        "document": target.VissibleName,
+        "page_added": added["page_index"],
+        "total_pages": added["total_pages"],
+        "paper_size": list(nb.DEFAULT_PAPER),
+        "transport": "cloud",
+        "refresh_pending": False,
+    }
+    return make_response(
+        result,
+        f"Added a blank page (now page {added['page_index']} of {added['total_pages']}) "
+        "in the reMarkable cloud; the tablet picks it up on its next sync. Call "
+        f"remarkable_canvas('{target.VissibleName}', {added['page_index']}) to draw on it.",
+    )
+
+
 def register_write_tools():
     """Register all write tools with the MCP server."""
     # Imported lazily to break a circular import: server.py imports this module
@@ -1466,10 +1641,19 @@ def register_write_tools():
         ＋Page → add_page, new notebook → create_document) AND model-driven markup
         (highlighting, underlining, marking) — the model composes the strokes.</usecase>
         <instructions>
-        Requires SSH mode (the default tablet-filesystem transport for write-back)
-        and write mode (the default; disabled with --read-only). All methods are
-        non-destructive (draw appends to existing ink and backs the page up to
-        {pageId}.rm.bak the first time), so no confirmation prompt is required.
+        Requires write mode (the default; disabled with --read-only). Support by
+        transport:
+        - SSH: all three methods.
+        - Cloud: all three methods, also when an SSH configuration fell back to
+          the cloud because the tablet was unreachable. The tablet picks the
+          change up on its next sync. draw and add_page re-read the document
+          on every commit attempt and only append, so ink or pages another
+          device already synced to the cloud are kept. Edits a tablet has not
+          synced yet are outside this guarantee.
+        - USB web: not available (the tool is not registered).
+        All methods are non-destructive (draw appends to existing ink; over SSH
+        it also backs the page up to {pageId}.rm.bak the first time), so no
+        confirmation prompt is required.
 
         Pick the method, then pass only that method's parameters:
 
@@ -1509,12 +1693,17 @@ def register_write_tools():
         - name: Title of the new notebook (create_document).
         - text: Optional typed text for the first page (create_document). Omit it
             unless the user explicitly requested specific content; never fabricate
-            placeholder text. Paragraphs split on newlines.
+            placeholder text. Paragraphs split on newlines; a line prefix sets the
+            native paragraph style: "# " title, "## " heading, "### " subheading,
+            "- " or "* " bullet, "  - " second-level bullet, "1. " numbered item
+            (the device renumbers), "- [ ] " checkbox, "- [x] " checked checkbox.
+            Other lines are body text. Inline bold/italic is not supported.
         - folder: Destination folder path (create_document; default "/").
         - ui_submitted: Set by the canvas app when the user clicked Save. Models omit it.
-        - defer_restart: Skip the xochitl restart for this write. Call
+        - defer_restart: SSH only. Skip the xochitl restart for this write. Call
           remarkable_refresh() once after the batch. The response sets
-          refresh_pending=true while a refresh is owed.
+          refresh_pending=true while a refresh is owed. Ignored in cloud mode
+          (no xochitl; the tablet picks the change up on its next sync).
         </parameters>
         <examples>
         - remarkable_author(method="draw", document="Ideas", page=1,
@@ -1523,6 +1712,8 @@ def register_write_tools():
         - remarkable_author(method="create_document", name="Sketches")
         - remarkable_author(method="create_document", name="Meeting notes",
             text="Agenda\nFollow-ups")  # only when the user supplied that text
+        - remarkable_author(method="create_document", name="Sprint",
+            text="# Sprint 12\n- Ship export\n- [ ] Review PR\n- [x] Fix CI")
         </examples>
         """
 
@@ -1540,6 +1731,17 @@ def register_write_tools():
             error = _require_write_transport()
             if error:
                 return error
+
+            # An SSH config whose tablet was unreachable has fallen back to the
+            # cloud client by now (_get_ssh_client() below resolves it first),
+            # so the SSH methods must not run against it.
+            if _is_cloud_mode() or is_cloud_fallback_active():
+                client = _get_ssh_client()
+                if method == "draw":
+                    return _cloud_author_draw(client, document, page, strokes, ui_submitted)
+                if method == "add_page":
+                    return _cloud_author_add_page(client, document)
+                return _cloud_author_create_document(client, name, text, folder)
 
             if method == "draw":
                 return _author_draw(document, page, strokes, ui_submitted, defer_restart)
@@ -1559,11 +1761,10 @@ def register_write_tools():
             )
         return await asyncio.to_thread(_impl)
 
-    # Native ink/notebook authoring is SSH-only today (cloud/USB-web write-back
-    # is not implemented yet), so only expose the tool in SSH mode rather than
-    # registering it everywhere and erroring at call time. Clients on other
-    # transports simply don't see a tool they couldn't use.
-    if _is_ssh_mode():
+    # USB web has no write-back path for native notebooks, so the tool is only
+    # exposed over SSH and cloud. Clients on USB web don't see a tool they
+    # couldn't use.
+    if _is_ssh_mode() or _is_cloud_mode():
         mcp.tool(annotations=WRITE_ANNOTATIONS)(remarkable_author)
 
     @mcp.tool(annotations=UPLOAD_ANNOTATIONS)

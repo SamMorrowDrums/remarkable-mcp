@@ -364,6 +364,27 @@ def append_strokes(original_bytes: bytes, strokes: list[dict]) -> bytes:
     return original_bytes + appended
 
 
+def _line_items(data: bytes) -> list:
+    return [
+        (b.item.item_id, b.item.value)
+        for b in read_blocks(io.BytesIO(data))
+        if isinstance(b, SceneLineItemBlock)
+    ]
+
+
+def contains_appended(page_bytes: bytes, appended: bytes) -> bool:
+    """Return True if every stroke in ``appended`` is already on ``page_bytes``.
+
+    ``appended`` is the headerless tail that :func:`append_strokes` added to a
+    page. A stroke matches on its CRDT item id *and* its line: a concurrent
+    writer that appended from the same base page allocates the same ids for
+    different strokes, which must not count as ours.
+    """
+    wanted = _line_items(HEADER_V6 + appended)
+    present = _line_items(page_bytes)
+    return bool(wanted) and all(item in present for item in wanted)
+
+
 def page_geometry(original_bytes: bytes) -> dict:
     """Return paper size + center-origin info for an existing page (read-only)."""
     blocks = list(read_blocks(io.BytesIO(original_bytes)))

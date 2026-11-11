@@ -1386,7 +1386,7 @@ def render_page_full_page_from_document_zip(
     ``render_page_from_document_zip`` in two ways that matter for write-back:
 
     1. Pages are addressed by the ``.content`` cPages order — the SAME index
-       the write tool (``_page_ids_from_content``) uses — so "page N" means the
+       the write tool (``notebooks.page_ids_from_content``) uses — so "page N" means the
        same page in the viewer and the writer even when blank pages (which may
        have no ``.rm`` file) are present.
     2. The page is rendered full-bleed using its own ``SceneInfo.paper_size``,
