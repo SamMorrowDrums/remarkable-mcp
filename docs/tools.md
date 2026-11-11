@@ -118,7 +118,8 @@ remarkable_read("/Work/Projects/Q4 Planning")
 ### Pagination
 
 - `total_pages` reports physical document pages, matching `remarkable_image`,
-  and `total_pages_known` says whether that count was available.
+  and `total_pages_known` says whether that count was available. An authoritative
+  empty page list reports `0`; an unavailable count reports `null`.
 - `content_pages` reports extracted-text pagination units. PDF/EPUB source text
   uses ~8000-character chunks; notebook OCR may produce fewer content pages than
   physical pages when blank pages have no text.
@@ -483,6 +484,7 @@ available when the server runs with `--read-only`.
   but cannot be separated into annotation-only layers.
 - A page render failure is represented by a labeled placeholder at the same page
   ordinal and reported with `status: "partial"`; pages are never silently skipped.
+- A document with no visible pages returns `no_pages` instead of a PDF.
 - EPUB source pages use a transport-native PDF when one is available. Otherwise
   available annotation pages are exported with an explicit partial warning.
 

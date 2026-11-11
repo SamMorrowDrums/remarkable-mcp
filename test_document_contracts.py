@@ -401,6 +401,67 @@ class TestLiveDocumentLookup:
 class TestReadPageCounts:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
+        ("metadata", "expected"),
+        [
+            ({"cPages": {"pages": [{"id": "deleted", "deleted": {"value": 1}}]}}, 0),
+            ({"pages": []}, 0),
+            ({"formatVersion": 1}, None),
+        ],
+    )
+    async def test_real_archive_distinguishes_empty_from_unknown(self, metadata, expected):
+        import remarkable_mcp.tools as tools
+
+        document = _document("Empty notebook", "empty-notebook")
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            archive.writestr("doc.content", json.dumps(metadata))
+            if expected == 0:
+                archive.writestr("deleted.rm", b"deleted data")
+        client.download.return_value = output.getvalue()
+
+        with (
+            patch.object(tools, "get_rmapi", return_value=client),
+            patch.object(tools, "get_file_type", return_value="notebook"),
+            patch.object(tools, "get_cached_ocr_result", return_value=None),
+        ):
+            result = await _call_tool(
+                "remarkable_read", {"document": document.VissibleName, "include_ocr": True}
+            )
+
+        data = _response_json(result)
+        assert data["total_pages"] == expected
+        assert data["total_pages_known"] is (expected is not None)
+        assert data["content"] == ""
+
+    @pytest.mark.asyncio
+    async def test_raw_epub_preserves_authoritative_zero(self):
+        import remarkable_mcp.tools as tools
+
+        document = _document("Empty EPUB", "empty-epub")
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            archive.writestr("doc.content", json.dumps({"cPages": {"pages": []}}))
+        client.download.return_value = output.getvalue()
+        with (
+            patch.object(tools, "get_rmapi", return_value=client),
+            patch.object(tools, "get_file_type", return_value="epub"),
+            patch.object(tools, "download_raw_file", return_value=b"source"),
+            patch.object(tools, "extract_text_from_epub", return_value="source text"),
+        ):
+            result = await _call_tool(
+                "remarkable_read", {"document": document.VissibleName, "content_type": "raw"}
+            )
+        data = _response_json(result)
+        assert data["content"] == "source text"
+        assert data["total_pages"] == 0
+        assert data["total_pages_known"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
         ("label", "typed_text", "handwritten_text", "expected_content_pages", "expected_more"),
         [
             ("typed", ["typed notes"], None, 1, False),

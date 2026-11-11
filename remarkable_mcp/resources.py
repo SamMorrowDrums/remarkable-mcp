@@ -597,7 +597,9 @@ async def handle_completion(ref, argument, context):
                             tmp.write(raw_doc)
                             tmp_path = Path(tmp.name)
                         try:
-                            page_count = get_document_page_count(tmp_path)
+                            count = get_document_page_count(tmp_path)
+                            if count is not None:
+                                page_count = count
                         finally:
                             tmp_path.unlink(missing_ok=True)
                     except Exception as e:

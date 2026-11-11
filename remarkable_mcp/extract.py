@@ -1923,7 +1923,7 @@ def render_merged_page_from_extracted_document(
         return annotation_only("Compositing failed")
 
 
-def get_document_page_count(zip_path: Path) -> int:
+def get_document_page_count(zip_path: Path) -> Optional[int]:
     """
     Get the number of pages in a reMarkable document zip.
 
@@ -1934,7 +1934,7 @@ def get_document_page_count(zip_path: Path) -> int:
         zip_path: Path to the document zip file
 
     Returns:
-        Number of pages (0 if unable to determine)
+        Number of pages, or None if unable to determine
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -1947,7 +1947,8 @@ def get_document_page_count(zip_path: Path) -> int:
             return len(page_order)
 
         # Fallback to counting .rm files
-        return len(list(tmpdir_path.glob("**/*.rm")))
+        count = len(list(tmpdir_path.glob("**/*.rm")))
+        return count if count else None
 
 
 def get_document_file_type(zip_path: Path) -> str:
