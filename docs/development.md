@@ -4,7 +4,7 @@ This guide covers setting up a development environment for contributing to remar
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
 - A reMarkable tablet (for testing)
 
@@ -65,6 +65,32 @@ uv run pytest -v --cov=remarkable_mcp
 
 Tests use `pytest-asyncio` for async testing. All async tests use the `@pytest.mark.asyncio` decorator.
 
+## Dependency Updates
+
+Dependabot checks the `uv` and `github-actions` ecosystems weekly. Keep dependency
+bounds in `pyproject.toml` and the resolved versions in `uv.lock` in sync, within the
+MCP SDK's `<3` and PyMuPDF's `<2` compatibility boundaries.
+
+Python 3.11+ is required because Pillow 13, which carries security fixes that 12.x
+does not, does not support Python 3.10. PyMuPDF 2.x is deferred until it has been
+reviewed, because it adds several heavy dependencies (including onnxruntime and numpy).
+
+```bash
+uv lock --upgrade
+uv sync --all-extras --frozen
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest -v
+uv build
+
+# Audit the locked runtime, optional OCR, and development dependencies.
+uv export --all-extras --frozen --no-emit-project -o /tmp/remarkable-mcp-audit.txt
+uv tool run pip-audit -r /tmp/remarkable-mcp-audit.txt --no-deps --disable-pip
+rm /tmp/remarkable-mcp-audit.txt
+```
+
+Review major upgrades individually, and document any deferred upgrades in the PR.
+
 ## Code Quality
 
 Before committing, always run:
@@ -124,6 +150,7 @@ EXAMPLE_ANNOTATIONS = ToolAnnotations(
     destructive_hint=False,
     idempotent_hint=True,
 )
+
 
 @mcp.tool(annotations=EXAMPLE_ANNOTATIONS)
 def remarkable_example(param: str) -> str:
