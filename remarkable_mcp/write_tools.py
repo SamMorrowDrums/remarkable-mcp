@@ -774,8 +774,81 @@ def _upload_via_usb_web(local_path: str, document_name: Optional[str] = None) ->
             raise RuntimeError(f"USB web upload failed: {e}")
 
 
+def _root_path() -> str:
+    # Imported lazily: tools imports the server module, which imports this one.
+    from remarkable_mcp.tools import _get_root_path
+
+    return _get_root_path()
+
+
+def _in_root_scope(item_path: str, root: str) -> bool:
+    """Whether a tablet path is writable under the root (the root folder itself is not)."""
+    if root == "/":
+        return True
+    from remarkable_mcp.tools import _is_within_root
+
+    return item_path.lower() != root.lower() and _is_within_root(item_path, root)
+
+
+def _device_path(path: str) -> str:
+    """Translate a root-relative path (leading slash optional) to a tablet path."""
+    from remarkable_mcp.tools import _resolve_root_path
+
+    relative = path.strip("/") if path else ""
+    return _resolve_root_path("/" + relative if relative else "/")
+
+
+def _display_path(path: str) -> str:
+    """Show a tablet path relative to the root, matching the read tools."""
+    from remarkable_mcp.tools import _apply_root_filter
+
+    return _apply_root_filter(path)
+
+
+def _scoped_items(collection: list, items_by_id: dict) -> list:
+    """Items that write tools may target under REMARKABLE_ROOT_PATH."""
+    root = _root_path()
+    if root == "/":
+        return list(collection)
+    return [item for item in collection if _in_root_scope(get_item_path(item, items_by_id), root)]
+
+
+def _scoped_suggestion(suggestion: str) -> str:
+    root = _root_path()
+    if root == "/":
+        return suggestion
+    return (
+        f"{suggestion} Paths are relative to REMARKABLE_ROOT_PATH ('{root}'); "
+        "items outside it cannot be changed."
+    )
+
+
+def _document_not_found(document: str, collection: list, items_by_id: dict) -> str:
+    from remarkable_mcp.extract import find_similar_documents
+
+    similar = find_similar_documents(document, _scoped_items(collection, items_by_id))
+    return make_error(
+        error_type="document_not_found",
+        message=f"Document not found: '{document}'",
+        suggestion=_scoped_suggestion("Use remarkable_browse() to find the correct name."),
+        did_you_mean=similar or None,
+    )
+
+
+def _folder_suggestions(collection: list, items_by_id: dict) -> Optional[list]:
+    folders = [
+        _display_path(get_item_path(item, items_by_id))
+        for item in _scoped_items(collection, items_by_id)
+        if item.is_folder
+    ]
+    return folders[:5] or None
+
+
 def _resolve_parent_id(parent_path: str, items_by_id: dict, collection: list) -> Optional[str]:
     """Resolve a folder path to its UUID.
+
+    Paths are relative to REMARKABLE_ROOT_PATH when it is set, so "/" is the
+    root folder and folders outside the root never resolve.
 
     Args:
         parent_path: Path like "/" or "/Folder/Subfolder"
@@ -783,19 +856,17 @@ def _resolve_parent_id(parent_path: str, items_by_id: dict, collection: list) ->
         collection: Full list of items
 
     Returns:
-        The UUID of the folder, "" for root, or None if not found
+        The UUID of the folder, "" for the tablet's top level, or None if not found
     """
-    if not parent_path or parent_path == "/":
+    target = _device_path(parent_path).strip("/").lower()
+    if not target:
         return ""
-
-    # Normalize
-    parent_path = parent_path.strip("/")
 
     for item in collection:
         if not item.is_folder:
             continue
         item_path = get_item_path(item, items_by_id).strip("/")
-        if item_path.lower() == parent_path.lower():
+        if item_path.lower() == target:
             return item.ID
 
     return None
@@ -806,6 +877,9 @@ def _resolve_document(
 ) -> Optional[object]:
     """Find a document or folder by name or path.
 
+    Only items inside REMARKABLE_ROOT_PATH can match, and paths are relative to
+    it. An exact path match wins over a display-name match.
+
     Args:
         name_or_path: Document name or full path
         collection: Full list of items
@@ -815,20 +889,23 @@ def _resolve_document(
     Returns:
         The matching item, or None
     """
-    target = name_or_path.lower().strip("/")
+    root = _root_path()
+    target_path = _device_path(name_or_path).strip("/").lower()
+    target_name = name_or_path.strip("/").lower()
+    name_match = None
 
     for item in collection:
         if folders_only and not item.is_folder:
             continue
-        # Match by name
-        if item.VissibleName.lower() == target:
+        item_path = get_item_path(item, items_by_id)
+        if not _in_root_scope(item_path, root):
+            continue
+        if item_path.strip("/").lower() == target_path:
             return item
-        # Match by path
-        item_path = get_item_path(item, items_by_id).strip("/")
-        if item_path.lower() == target:
-            return item
+        if name_match is None and item.VissibleName.lower() == target_name:
+            name_match = item
 
-    return None
+    return name_match
 
 
 def _invalidate_client_cache(client) -> None:
@@ -919,7 +996,8 @@ def _cloud_mkdir(folder_name: str, parent: str) -> str:
         return make_error(
             error_type="folder_not_found",
             message=f"Parent folder not found: '{parent}'",
-            suggestion="Use remarkable_browse('/') to see available folders.",
+            suggestion=_scoped_suggestion("Use remarkable_browse('/') to see available folders."),
+            did_you_mean=_folder_suggestions(collection, items_by_id),
         )
     doc = client.create_folder(folder_name, parent_id)
     _invalidate_client_cache(client)
@@ -943,22 +1021,15 @@ def _cloud_move(document: str, dest_folder: str) -> str:
 
     target = _resolve_document(document, collection, items_by_id)
     if not target:
-        from remarkable_mcp.extract import find_similar_documents
-
-        similar = find_similar_documents(document, collection)
-        return make_error(
-            error_type="document_not_found",
-            message=f"Document not found: '{document}'",
-            suggestion="Use remarkable_browse() to find the correct name.",
-            did_you_mean=similar if similar else None,
-        )
+        return _document_not_found(document, collection, items_by_id)
 
     dest_id = _resolve_parent_id(dest_folder, items_by_id, collection)
     if dest_id is None:
         return make_error(
             error_type="folder_not_found",
             message=f"Destination folder not found: '{dest_folder}'",
-            suggestion="Use remarkable_browse('/') to see available folders.",
+            suggestion=_scoped_suggestion("Use remarkable_browse('/') to see available folders."),
+            did_you_mean=_folder_suggestions(collection, items_by_id),
         )
 
     # Prevent moving a folder into itself or one of its descendants
@@ -979,7 +1050,7 @@ def _cloud_move(document: str, dest_folder: str) -> str:
                 )
             check_id = getattr(items_by_id[check_id], "Parent", "")
 
-    old_path = get_item_path(target, items_by_id)
+    old_path = _display_path(get_item_path(target, items_by_id))
     client.move(target.ID, dest_id)
     _invalidate_client_cache(client)
     return make_response(
@@ -1002,15 +1073,7 @@ def _cloud_rename(document: str, new_name: str) -> str:
 
     target = _resolve_document(document, collection, items_by_id)
     if not target:
-        from remarkable_mcp.extract import find_similar_documents
-
-        similar = find_similar_documents(document, collection)
-        return make_error(
-            error_type="document_not_found",
-            message=f"Document not found: '{document}'",
-            suggestion="Use remarkable_browse() to find the correct name.",
-            did_you_mean=similar if similar else None,
-        )
+        return _document_not_found(document, collection, items_by_id)
 
     old_name = target.VissibleName
     client.rename(target.ID, new_name)
@@ -1034,17 +1097,9 @@ def _cloud_delete(document: str) -> str:
 
     target = _resolve_document(document, collection, items_by_id)
     if not target:
-        from remarkable_mcp.extract import find_similar_documents
+        return _document_not_found(document, collection, items_by_id)
 
-        similar = find_similar_documents(document, collection)
-        return make_error(
-            error_type="document_not_found",
-            message=f"Document not found: '{document}'",
-            suggestion="Use remarkable_browse() to find the correct name.",
-            did_you_mean=similar if similar else None,
-        )
-
-    doc_path = get_item_path(target, items_by_id)
+    doc_path = _display_path(get_item_path(target, items_by_id))
     client.delete(target.ID)
     _invalidate_client_cache(client)
     return make_response(
@@ -1177,15 +1232,7 @@ def _author_draw(
     items_by_id = get_items_by_id(collection)
     target = _resolve_document(document, collection, items_by_id)
     if not target:
-        from remarkable_mcp.extract import find_similar_documents
-
-        similar = find_similar_documents(document, collection)
-        return make_error(
-            error_type="document_not_found",
-            message=f"Document not found: '{document}'",
-            suggestion="Use remarkable_browse() to find the correct name.",
-            did_you_mean=similar or None,
-        )
+        return _document_not_found(document, collection, items_by_id)
 
     doc_uuid = target.ID
     content_raw = _read_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}.content")
@@ -1291,15 +1338,7 @@ def _author_add_page(document: str, defer_restart: bool = False) -> str:
     items_by_id = get_items_by_id(collection)
     target = _resolve_document(document, collection, items_by_id)
     if not target:
-        from remarkable_mcp.extract import find_similar_documents
-
-        similar = find_similar_documents(document, collection)
-        return make_error(
-            error_type="document_not_found",
-            message=f"Document not found: '{document}'",
-            suggestion="Use remarkable_browse() to find the correct name.",
-            did_you_mean=similar or None,
-        )
+        return _document_not_found(document, collection, items_by_id)
 
     doc_uuid = target.ID
     content_raw = _read_remote_bytes(ssh_client, f"{XOCHITL_PATH}/{doc_uuid}.content")
@@ -1385,12 +1424,11 @@ def _author_create_document(
     items_by_id = get_items_by_id(collection)
     parent_id = _resolve_parent_id(folder or "/", items_by_id, collection)
     if parent_id is None:
-        folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
         return make_error(
             error_type="folder_not_found",
             message=f"Folder not found: '{folder}'",
-            suggestion="Use remarkable_browse('/') to see available folders.",
-            did_you_mean=folders[:5] if folders else None,
+            suggestion=_scoped_suggestion("Use remarkable_browse('/') to see available folders."),
+            did_you_mean=_folder_suggestions(collection, items_by_id),
         )
 
     doc_uuid = nb.new_uuid()
@@ -1640,12 +1678,13 @@ def register_write_tools():
                     items_by_id = get_items_by_id(collection)
                     parent_id = _resolve_parent_id(parent_folder, items_by_id, collection)
                     if parent_id is None:
-                        folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
                         return make_error(
                             error_type="folder_not_found",
                             message=f"Folder not found: '{parent_folder}'",
-                            suggestion="Use remarkable_browse('/') to see available folders.",
-                            did_you_mean=folders[:5] if folders else None,
+                            suggestion=_scoped_suggestion(
+                                "Use remarkable_browse('/') to see available folders."
+                            ),
+                            did_you_mean=_folder_suggestions(collection, items_by_id),
                         )
 
                     name = document_name or os.path.splitext(os.path.basename(file_path))[0]
@@ -1667,6 +1706,21 @@ def register_write_tools():
 
                 # USB web mode: simple HTTP upload
                 if _is_usb_web_mode():
+                    root = _root_path()
+                    if root != "/":
+                        return make_error(
+                            error_type="root_path_unsupported",
+                            message=(
+                                "USB web uploads cannot be kept inside "
+                                f"REMARKABLE_ROOT_PATH ('{root}')."
+                            ),
+                            suggestion=(
+                                "The USB web interface has no folder argument, so the "
+                                "tablet chooses the destination. Use SSH or cloud mode "
+                                "to upload while REMARKABLE_ROOT_PATH is set."
+                            ),
+                        )
+
                     _upload_via_usb_web(file_path, document_name)
 
                     name = document_name or os.path.splitext(os.path.basename(file_path))[0]
@@ -1701,12 +1755,13 @@ def register_write_tools():
                 # Resolve parent folder
                 parent_id = _resolve_parent_id(parent_folder, items_by_id, collection)
                 if parent_id is None:
-                    folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
                     return make_error(
                         error_type="folder_not_found",
                         message=f"Folder not found: '{parent_folder}'",
-                        suggestion="Use remarkable_browse('/') to see available folders.",
-                        did_you_mean=folders[:5] if folders else None,
+                        suggestion=_scoped_suggestion(
+                            "Use remarkable_browse('/') to see available folders."
+                        ),
+                        did_you_mean=_folder_suggestions(collection, items_by_id),
                     )
 
                 # Generate UUID and set name
@@ -1924,7 +1979,10 @@ def register_write_tools():
                         return make_error(
                             error_type="folder_not_found",
                             message=f"Parent folder not found: '{parent}'",
-                            suggestion="Use remarkable_browse('/') to see available folders.",
+                            suggestion=_scoped_suggestion(
+                                "Use remarkable_browse('/') to see available folders."
+                            ),
+                            did_you_mean=_folder_suggestions(collection, items_by_id),
                         )
 
                     # Generate UUID
@@ -2036,15 +2094,7 @@ def register_write_tools():
                     # Find the document
                     target = _resolve_document(document, collection, items_by_id)
                     if not target:
-                        from remarkable_mcp.extract import find_similar_documents
-
-                        similar = find_similar_documents(document, collection)
-                        return make_error(
-                            error_type="document_not_found",
-                            message=f"Document not found: '{document}'",
-                            suggestion="Use remarkable_browse() to find the correct name.",
-                            did_you_mean=similar if similar else None,
-                        )
+                        return _document_not_found(document, collection, items_by_id)
 
                     # Find the destination folder
                     dest_id = _resolve_parent_id(dest_folder, items_by_id, collection)
@@ -2052,7 +2102,10 @@ def register_write_tools():
                         return make_error(
                             error_type="folder_not_found",
                             message=f"Destination folder not found: '{dest_folder}'",
-                            suggestion="Use remarkable_browse('/') to see available folders.",
+                            suggestion=_scoped_suggestion(
+                                "Use remarkable_browse('/') to see available folders."
+                            ),
+                            did_you_mean=_folder_suggestions(collection, items_by_id),
                         )
 
                     # Prevent moving a folder into itself or a descendant
@@ -2082,7 +2135,7 @@ def register_write_tools():
                     meta_content = ssh_client._scp_download(f"{XOCHITL_PATH}/{target.ID}.metadata")
                     metadata = json.loads(meta_content.decode("utf-8"))
 
-                    old_path = get_item_path(target, items_by_id)
+                    old_path = _display_path(get_item_path(target, items_by_id))
 
                     # Update parent
                     metadata["parent"] = dest_id
@@ -2172,15 +2225,7 @@ def register_write_tools():
                     # Find the document
                     target = _resolve_document(document, collection, items_by_id)
                     if not target:
-                        from remarkable_mcp.extract import find_similar_documents
-
-                        similar = find_similar_documents(document, collection)
-                        return make_error(
-                            error_type="document_not_found",
-                            message=f"Document not found: '{document}'",
-                            suggestion="Use remarkable_browse() to find the correct name.",
-                            did_you_mean=similar if similar else None,
-                        )
+                        return _document_not_found(document, collection, items_by_id)
 
                     # Read existing metadata
                     meta_content = ssh_client._scp_download(f"{XOCHITL_PATH}/{target.ID}.metadata")
@@ -2301,17 +2346,9 @@ def register_write_tools():
                     # Find the document
                     target = _resolve_document(document, collection, items_by_id)
                     if not target:
-                        from remarkable_mcp.extract import find_similar_documents
+                        return _document_not_found(document, collection, items_by_id)
 
-                        similar = find_similar_documents(document, collection)
-                        return make_error(
-                            error_type="document_not_found",
-                            message=f"Document not found: '{document}'",
-                            suggestion="Use remarkable_browse() to find the correct name.",
-                            did_you_mean=similar if similar else None,
-                        )
-
-                    doc_path = get_item_path(target, items_by_id)
+                    doc_path = _display_path(get_item_path(target, items_by_id))
 
                     if permanent:
                         if target.is_folder and any(

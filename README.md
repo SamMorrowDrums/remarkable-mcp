@@ -798,6 +798,8 @@ With this configuration:
 - `remarkable_browse("/")` shows contents of `/Work`
 - `remarkable_browse("/Projects")` shows `/Work/Projects`
 - Documents outside `/Work` are not accessible
+- Write tools stay inside `/Work`: `remarkable_upload(..., parent_folder="/")` lands in `/Work`, and move, rename, and delete cannot reach anything outside it
+- USB web uploads are refused while a root is set, because that interface cannot choose a folder
 
 Useful for:
 - Focusing on work documents during office hours
