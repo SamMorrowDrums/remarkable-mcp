@@ -19,7 +19,10 @@ from remarkable_mcp.export_resources import ExportResourceStore
 from remarkable_mcp.exporters import (
     ExportMetadata,
     RenderedPage,
+    parse_page_selection,
     render_archive_pages,
+    selection_label,
+    write_archive_pdf_export,
     write_markdown_export,
     write_native_pdf_export,
     write_rendered_pdf_export,
@@ -115,6 +118,33 @@ class TestPdfExporters:
             assert "Original subject" in document.metadata["subject"]
             assert _metadata().document_id in document.metadata["subject"]
 
+    def test_native_pdf_page_selection_writes_subset(self, tmp_path):
+        destination = tmp_path / "native-subset.pdf"
+        result = write_native_pdf_export(
+            _source_pdf(),
+            destination,
+            _metadata(source_type="pdf", pages=2),
+            pages=(2,),
+        )
+
+        assert result.status == "complete"
+        assert result.pages == 1
+        with fitz.open(destination) as document:
+            assert [page.get_text().strip() for page in document] == ["second source page"]
+
+    def test_native_pdf_page_selection_accepts_full_document(self, tmp_path):
+        destination = tmp_path / "native-full.pdf"
+        result = write_native_pdf_export(
+            _source_pdf(),
+            destination,
+            _metadata(source_type="pdf", pages=2),
+            pages=(1, 2),
+        )
+
+        assert result.pages == 2
+        with fitz.open(destination) as document:
+            assert len(document) == 2
+
     def test_rendered_pdf_rejects_non_sequential_pages(self, tmp_path):
         with pytest.raises(ValueError, match="expected 2"):
             write_rendered_pdf_export(
@@ -125,6 +155,122 @@ class TestPdfExporters:
                     RenderedPage(page=3, image=_png("white")),
                 ],
             )
+
+    def test_subset_export_renumbers_placeholders_and_warnings(self, tmp_path):
+        destination = tmp_path / "subset.pdf"
+        result = write_rendered_pdf_export(
+            destination,
+            _metadata(pages=5),
+            [
+                RenderedPage(page=1, image=_png("red"), physical_page=2),
+                RenderedPage(page=2, image=None, error="synthetic render failure", physical_page=4),
+            ],
+        )
+
+        assert result.status == "partial"
+        assert result.pages == 2
+        assert result.failed_pages == (2,)
+        assert "physical page 4, export page 2: synthetic render failure" in result.warnings
+
+        with fitz.open(destination) as document:
+            assert len(document) == 2
+            placeholder = document[1].get_text()
+            assert "Physical page 4 could not be" in placeholder
+            assert "It is page 2 of this export." in placeholder
+            assert "synthetic render failure" in placeholder
+
+    def test_subset_export_skips_page_count_invariant(self, tmp_path):
+        destination = tmp_path / "subset.pdf"
+        result = write_rendered_pdf_export(
+            destination,
+            _metadata(pages=5),
+            [RenderedPage(page=1, image=_png("white"), physical_page=3)],
+        )
+
+        assert result.status == "complete"
+        assert result.pages == 1
+
+    def test_leading_page_subset_skips_page_count_invariant(self, tmp_path):
+        # Regression: a subset starting at physical page 1 renumbers its export
+        # ordinals identically, so subset detection cannot rely on ordinal
+        # differences alone.
+        destination = tmp_path / "leading.pdf"
+        result = write_rendered_pdf_export(
+            destination,
+            _metadata(pages=3),
+            [RenderedPage(page=1, image=_png("white"), physical_page=1)],
+        )
+
+        assert result.status == "complete"
+        assert result.pages == 1
+
+    def test_leading_range_subset_skips_page_count_invariant(self, tmp_path):
+        destination = tmp_path / "leading-range.pdf"
+        result = write_rendered_pdf_export(
+            destination,
+            _metadata(pages=5),
+            [
+                RenderedPage(page=1, image=_png("white"), physical_page=1),
+                RenderedPage(page=2, image=_png("white"), physical_page=2),
+            ],
+        )
+
+        assert result.status == "complete"
+        assert result.pages == 2
+
+    def test_archive_selection_covering_all_pages_passes_invariant(self, tmp_path):
+        archive_path = _archive(
+            tmp_path / "notebook.zip",
+            {"fileType": "notebook", "pages": ["p1", "p2", "p3"]},
+        )
+
+        def render(root, page, background_color):
+            return _png("white"), (1404.0, 1872.0)
+
+        with patch(
+            "remarkable_mcp.exporters.render_page_full_page_from_extracted_document",
+            side_effect=render,
+        ):
+            result = write_archive_pdf_export(
+                archive_path,
+                tmp_path / "full.pdf",
+                _metadata(pages=3),
+                pages=(1, 2, 3),
+            )
+
+        assert result.status == "complete"
+        assert result.pages == 3
+
+    def test_complete_export_still_enforces_page_count_invariant(self, tmp_path):
+        with pytest.raises(ValueError, match="metadata declares"):
+            write_rendered_pdf_export(
+                tmp_path / "mismatch.pdf",
+                _metadata(pages=5),
+                [RenderedPage(page=1, image=_png("white"))],
+            )
+
+    def test_archive_pages_subset_renumbers_and_keeps_physical_pages(self, tmp_path):
+        archive_path = _archive(
+            tmp_path / "notebook.zip",
+            {"fileType": "notebook", "pages": ["p1", "p2", "p3"]},
+        )
+        rendered_physical = []
+
+        def render(root, page, background_color):
+            rendered_physical.append(page)
+            return _png("white"), (1404.0, 1872.0)
+
+        with patch(
+            "remarkable_mcp.exporters.render_page_full_page_from_extracted_document",
+            side_effect=render,
+        ):
+            pages = list(
+                render_archive_pages(archive_path, _metadata(), pdf_mode="merged", pages=(2, 3))
+            )
+
+        assert [page.page for page in pages] == [1, 2]
+        assert [page.physical_page for page in pages] == [2, 3]
+        assert rendered_physical == [2, 3]
 
     def test_archive_pages_extract_once_and_preserve_physical_order(self, tmp_path):
         archive_path = _archive(
@@ -256,6 +402,74 @@ class TestMarkdownExporter:
 
         assert result.status == "complete"
         assert "_OCR was not requested for this export._" in destination.read_text()
+
+
+class TestPageSelectionParsing:
+    def test_single_integer_and_equivalent_string(self):
+        assert parse_page_selection(5) == (5,)
+        assert parse_page_selection("5") == (5,)
+        assert parse_page_selection(" 7 ") == (7,)
+
+    def test_ranges_and_mixed_lists_are_sorted_and_deduplicated(self):
+        assert parse_page_selection("5-9,10-14") == tuple(range(5, 15))
+        assert parse_page_selection("3,1,2") == (1, 2, 3)
+        assert parse_page_selection("4-6,2,6,1") == (1, 2, 4, 5, 6)
+        assert parse_page_selection("2-4,3-5") == (2, 3, 4, 5)
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            "",
+            "   ",
+            ",",
+            "5,,7",
+            "0",
+            "-3",
+            "5-2",
+            "1-0",
+            "abc",
+            "5--7",
+            "5;7",
+            "5..7",
+            "5.0",
+            "2+3",
+            0,
+            -1,
+        ],
+    )
+    def test_invalid_selections_raise_value_error(self, spec):
+        with pytest.raises(ValueError):
+            parse_page_selection(spec)
+
+    def test_huge_range_is_rejected(self):
+        with pytest.raises(ValueError, match="maximum"):
+            parse_page_selection("1-1000000")
+
+    def test_huge_range_is_rejected_before_expansion(self):
+        # A billion-page range must be rejected by the cap check on the range
+        # bounds, not by materializing the selection first.
+        with pytest.raises(ValueError, match="the maximum is 64"):
+            parse_page_selection("1-1000000000")
+
+    def test_cap_applies_across_accumulated_tokens(self):
+        with pytest.raises(ValueError, match="the maximum is 64"):
+            parse_page_selection("1-32,33-64,65")
+
+    def test_cap_applies_to_single_range_beyond_limit(self):
+        with pytest.raises(ValueError, match="the maximum is 64"):
+            parse_page_selection("1,2,70-200")
+
+    def test_selection_at_exact_cap_is_accepted(self):
+        assert len(parse_page_selection("1-64")) == 64
+
+    def test_bool_is_rejected(self):
+        with pytest.raises(ValueError):
+            parse_page_selection(True)
+
+    def test_selection_label_compacts_consecutive_runs(self):
+        assert selection_label([1, 2, 5]) == "1-2, 5"
+        assert selection_label([3]) == "3"
+        assert selection_label([1, 2, 3, 4]) == "1-4"
 
 
 class TestExportResourceStore:
