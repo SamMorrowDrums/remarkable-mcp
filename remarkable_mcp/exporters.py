@@ -268,6 +268,7 @@ def render_archive_pages(
                     extracted,
                     page=page_number,
                     background_color=background_color,
+                    include_out_of_bounds_ink=True,
                 )
                 warning = None
                 partial = False

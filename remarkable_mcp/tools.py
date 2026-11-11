@@ -1742,6 +1742,7 @@ async def _render_png_page(
             tmp_path,
             page,
             background_color=background,
+            include_out_of_bounds_ink=True,
         )
         if full is not None:
             png_data = full[0]
