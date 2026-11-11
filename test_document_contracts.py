@@ -958,6 +958,56 @@ class TestPdfRenderingDefault:
 
 class TestCanvasArchivedLookup:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("metadata", "error_type"),
+        [
+            ({"fileType": "pdf", "formatVersion": 1}, "page_count_unavailable"),
+            (
+                {"fileType": "pdf", "cPages": {"pages": [{"id": "d", "deleted": {"value": 1}}]}},
+                "no_pages",
+            ),
+        ],
+    )
+    async def test_canvas_public_tool_distinguishes_unknown_and_empty(self, metadata, error_type):
+        import remarkable_mcp.api as api
+
+        document = _document("Canvas PDF", "canvas-pdf")
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w") as archive:
+            archive.writestr("doc.content", json.dumps(metadata))
+            archive.writestr("doc.pdf", _pdf_bytes())
+            if error_type == "no_pages":
+                archive.writestr("d.rm", b"deleted data")
+        client.download.return_value = archive_bytes.getvalue()
+        with (
+            patch.object(api, "get_rmapi", return_value=client),
+            patch.object(api, "download_raw_file") as raw_pdf,
+        ):
+            result = await _call_tool("remarkable_canvas", {"document": document.VissibleName})
+        assert _response_json(result)["_error"]["type"] == error_type
+        raw_pdf.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_canvas_public_tool_preserves_mapped_pdf_fallback(self):
+        import remarkable_mcp.api as api
+        import remarkable_mcp.extract as extract
+
+        document = _document("Canvas PDF", "canvas-pdf")
+        client = Mock()
+        client.get_meta_items.return_value = [document]
+        client.download.return_value = _pdf_archive(annotated=False, user_added=False)
+        with (
+            patch.object(api, "get_rmapi", return_value=client),
+            patch.object(api, "get_active_transport", return_value="cloud"),
+            patch.object(extract, "render_page_full_page_from_document_zip", return_value=None),
+        ):
+            result = await _call_tool("remarkable_canvas", {"document": document.VissibleName})
+        assert result.structured_content["total_pages"] == 1
+        assert result.structured_content["render_source"] == "tablet_pdf"
+
+    @pytest.mark.asyncio
     async def test_canvas_resolves_live_namesake(self, monkeypatch):
         from PIL import Image
 

@@ -333,7 +333,8 @@ def test_export_renders_visible_pages_in_order(tmp_path):
     zip_path = _make_zip(tmp_path, content, rm_ids=["p1", "p2", "deleted"])
     metadata = ExportMetadata("doc", "Doc", "/", "notebook", get_document_page_count(zip_path))
 
-    def render(extracted, page, background_color):
+    def render(extracted, page, background_color, include_out_of_bounds_ink):
+        assert include_out_of_bounds_ink is True
         order = _get_page_order(extracted)
         return order[page - 1].encode(), (1.0, 1.0)
 
