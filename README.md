@@ -27,6 +27,7 @@ OpenWebUI, and other compatible tools.
 ### Prerequisite: install `uv`
 
 The commands below use `uvx`, which is included with [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
+Python 3.11 or later is required. If needed, install it with `uv python install 3.11`.
 Page images are rasterized with PyMuPDF; no system Cairo, browser, or graphics
 runtime needs to be installed on macOS, Linux, or Windows.
 

@@ -6364,6 +6364,139 @@ class TestFullPageRender:
         finally:
             rm_path.unlink(missing_ok=True)
 
+    @pytest.mark.parametrize(
+        "stroke_x,stroke_y,paper_width,paper_height,fixed_size",
+        [
+            pytest.param(-250.0, -50.0, 400.0, 800.0, (936, 1872), id="negative-left-top"),
+            pytest.param(100.0, 4474.0, 1620.0, 2160.0, (1404, 1872), id="below-paper"),
+        ],
+    )
+    def test_read_export_render_includes_out_of_bounds_strokes(
+        self, stroke_x, stroke_y, paper_width, paper_height, fixed_size
+    ):
+        import io as _io
+
+        from PIL import Image
+
+        from remarkable_mcp import extract
+
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as rm_tmp:
+            rm_tmp.write(b"synthetic scene")
+            rm_path = Path(rm_tmp.name)
+        path = (
+            f'<path d="M {stroke_x:g} {stroke_y:g} L {stroke_x:g} {stroke_y:g}" '
+            'stroke="black" stroke-width="40" fill="none" stroke-linecap="round"/>'
+        )
+        try:
+            with (
+                patch.object(extract, "_v6_blocks", return_value=[]),
+                patch.object(extract, "_v6_text_elements_with_bounds", return_value=([], [], {})),
+                patch.object(
+                    extract,
+                    "_v6_paths_from_blocks",
+                    return_value=([path], [(stroke_x, stroke_y)]),
+                ),
+                patch.object(
+                    extract,
+                    "_v6_paper_size",
+                    return_value=(paper_width, paper_height),
+                ),
+                _cairo_unavailable(),
+            ):
+                fixed = extract.render_rm_file_full_page_png(rm_path, background_color="#FFFFFF")
+                extended = extract.render_rm_file_full_page_png(
+                    rm_path,
+                    background_color="#FFFFFF",
+                    include_out_of_bounds_ink=True,
+                )
+
+            assert fixed is not None
+            assert extended is not None
+            fixed_image = Image.open(_io.BytesIO(fixed[0])).convert("L")
+            extended_image = Image.open(_io.BytesIO(extended[0])).convert("L")
+            assert fixed_image.size == fixed_size
+            assert sum(fixed_image.histogram()[:128]) == 0
+            assert extended_image.size != fixed_size
+            assert sum(extended_image.histogram()[:128]) > 0
+        finally:
+            rm_path.unlink(missing_ok=True)
+
+    @pytest.mark.parametrize(
+        "stroke_x,stroke_y,paper_width,paper_height,fixed_size",
+        [
+            pytest.param(-250.0, -50.0, 400.0, 800.0, (936, 1872), id="negative-left-top"),
+            pytest.param(100.0, 4474.0, 1620.0, 2160.0, (1404, 1872), id="below-paper"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_image_merged_fallback_renders_out_of_bounds_ink(
+        self, stroke_x, stroke_y, paper_width, paper_height, fixed_size
+    ):
+        import io as _io
+        import json as _json
+        import zipfile as _zip
+
+        import fitz
+        from PIL import Image
+
+        from remarkable_mcp import extract
+        from remarkable_mcp.tools import _render_png_page
+
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as archive_tmp:
+            archive_path = Path(archive_tmp.name)
+        pdf_document = fitz.open()
+        pdf_document.new_page()
+        pdf_bytes = pdf_document.tobytes()
+        pdf_document.close()
+        path = (
+            f'<path d="M {stroke_x:g} {stroke_y:g} L {stroke_x:g} {stroke_y:g}" '
+            'stroke="black" stroke-width="40" fill="none" stroke-linecap="round"/>'
+        )
+        try:
+            with _zip.ZipFile(archive_path, "w") as archive:
+                archive.writestr(
+                    "doc.content",
+                    _json.dumps({"cPages": {"pages": [{"id": "p1"}]}}),
+                )
+                archive.writestr("doc.pdf", pdf_bytes)
+                archive.writestr("p1.rm", b"synthetic scene")
+
+            with (
+                patch.object(extract, "_v6_blocks", return_value=[]),
+                patch.object(extract, "_v6_text_elements_with_bounds", return_value=([], [], {})),
+                patch.object(
+                    extract,
+                    "_v6_paths_from_blocks",
+                    return_value=([path], [(stroke_x, stroke_y)]),
+                ),
+                patch.object(
+                    extract,
+                    "_v6_paper_size",
+                    return_value=(paper_width, paper_height),
+                ),
+                _cairo_unavailable(),
+            ):
+                png, note, merged, _ = await _render_png_page(
+                    None,
+                    None,
+                    archive_path,
+                    1,
+                    "#FFFFFF",
+                    render_merged=True,
+                    allow_pdf_fallback=False,
+                )
+
+            assert png is not None
+            assert note == (
+                "Page has no PDF underlay (user-added page); returned full-page annotation render."
+            )
+            assert merged is False
+            image = Image.open(_io.BytesIO(png)).convert("L")
+            assert image.size != fixed_size
+            assert sum(image.histogram()[:128]) > 0
+        finally:
+            archive_path.unlink(missing_ok=True)
+
     def test_full_page_render_is_cpages_indexed_and_renders_blank_pages(self):
         import io as _io
         import json as _json

@@ -989,21 +989,52 @@ def render_rm_file_to_png(
             tmp_svg_path.unlink(missing_ok=True)
 
 
-def _svg_full_page(paths: list, paper_w: float, paper_h: float) -> str:
+def _full_page_viewbox(
+    paper_w: float,
+    paper_h: float,
+    ink_coords: Optional[list] = None,
+    ink_padding: float = 0.0,
+) -> Tuple[float, float, float, float]:
+    min_x = -paper_w / 2.0
+    min_y = 0.0
+    max_x = paper_w / 2.0
+    max_y = paper_h
+    if ink_coords:
+        min_x = min(min_x, min(x for x, _ in ink_coords) - ink_padding)
+        min_y = min(min_y, min(y for _, y in ink_coords) - ink_padding)
+        max_x = max(max_x, max(x for x, _ in ink_coords) + ink_padding)
+        max_y = max(max_y, max(y for _, y in ink_coords) + ink_padding)
+    return min_x, min_y, max_x - min_x, max_y - min_y
+
+
+def _svg_full_page(
+    paths: list,
+    paper_w: float,
+    paper_h: float,
+    ink_coords: Optional[list] = None,
+    ink_padding: float = 0.0,
+) -> str:
     """Wrap paths in an SVG whose viewBox spans the WHOLE page in stroke units.
 
     The page coordinate system is center-origin in X (x in [-W/2, W/2]) and
     top-origin in Y (y in [0, H]) — the same mapping ``strokes._map_point``
     uses (``rm_x = (nx-0.5)*W``, ``rm_y = ny*H``). So a point drawn at
     normalized (nx, ny) over the rendered image lands at exactly the stroke
-    coordinate the write tool will use. Empty ``paths`` yields a blank page.
+    coordinate the write tool will use. Optional ink bounds extend the viewBox
+    for read/export renders without changing the interactive canvas frame.
+    Empty ``paths`` yields a blank page.
     """
-    min_x = -paper_w / 2.0
+    min_x, min_y, width, height = _full_page_viewbox(
+        paper_w,
+        paper_h,
+        ink_coords=ink_coords,
+        ink_padding=ink_padding,
+    )
     return (
         f'<?xml version="1.0" encoding="UTF-8"?>'
         f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'viewBox="{min_x:.0f} 0 {paper_w:.0f} {paper_h:.0f}" '
-        f'width="{paper_w:.0f}" height="{paper_h:.0f}">'
+        f'viewBox="{min_x:g} {min_y:g} {width:g} {height:g}" '
+        f'width="{width:g}" height="{height:g}">'
         f"{''.join(paths)}</svg>"
     )
 
@@ -1078,7 +1109,9 @@ def _svg_string_to_png(
 
 
 def render_rm_file_full_page_png(
-    rm_file_path: Path, background_color: Optional[str] = None
+    rm_file_path: Path,
+    background_color: Optional[str] = None,
+    include_out_of_bounds_ink: bool = False,
 ) -> Optional[Tuple[bytes, Tuple[float, float]]]:
     """Render a v6 .rm page to a FULL-PAGE PNG (not cropped to ink).
 
@@ -1087,7 +1120,9 @@ def render_rm_file_full_page_png(
     page's own ``SceneInfo.paper_size``. That makes the displayed image map
     linearly to the page's coordinate system, so the interactive drawing
     overlay places strokes exactly where the write tool will, and blank pages
-    render as a blank page instead of returning ``None``.
+    render as a blank page instead of returning ``None``. Read/export callers
+    may set ``include_out_of_bounds_ink`` to extend the raster viewBox while
+    keeping this default fixed-size frame for the interactive canvas.
 
     Returns ``(png_bytes, (paper_w, paper_h))`` or ``None`` if the file is not
     v6 or rendering dependencies are unavailable (callers should fall back).
@@ -1096,18 +1131,36 @@ def render_rm_file_full_page_png(
     if blocks is None:
         return None
     try:
-        text_elements, _, anchor_pos = _v6_text_elements_with_bounds(blocks)
-        paths, _ = _v6_paths_from_blocks(blocks, anchor_pos)
+        text_elements, text_coords, anchor_pos = _v6_text_elements_with_bounds(blocks)
+        paths, path_coords = _v6_paths_from_blocks(blocks, anchor_pos)
         paper_w, paper_h = _v6_paper_size(blocks)
     except Exception:
         return None
 
     # Typed text is drawn first so handwritten strokes layer on top of it,
     # matching the device's compositing order.
-    svg = _svg_full_page(text_elements + paths, paper_w, paper_h)
-    scale = FULL_PAGE_TARGET_LONG_EDGE / max(paper_w, paper_h)
-    output_width = max(1, round(paper_w * scale))
-    output_height = max(1, round(paper_h * scale))
+    ink_coords = text_coords + path_coords if include_out_of_bounds_ink else None
+    ink_padding = 0.0
+    if include_out_of_bounds_ink and paths:
+        import re
+
+        stroke_widths = [
+            float(width) for width in re.findall(r'stroke-width="([\d.]+)"', "".join(paths))
+        ]
+        if stroke_widths:
+            # Include round caps/joins and a small rasterization margin.
+            ink_padding = max(stroke_widths) / 2.0 + 1.0
+    viewbox = _full_page_viewbox(paper_w, paper_h, ink_coords, ink_padding)
+    svg = _svg_full_page(
+        text_elements + paths,
+        paper_w,
+        paper_h,
+        ink_coords=ink_coords,
+        ink_padding=ink_padding,
+    )
+    scale = FULL_PAGE_TARGET_LONG_EDGE / max(viewbox[2], viewbox[3])
+    output_width = max(1, round(viewbox[2] * scale))
+    output_height = max(1, round(viewbox[3] * scale))
 
     png = _svg_string_to_png(svg, output_width, output_height, background_color)
     if png is None:
@@ -1358,7 +1411,10 @@ def _document_paper_size(rm_files: List[Path]) -> Tuple[float, float]:
 
 
 def render_page_full_page_from_document_zip(
-    zip_path: Path, page: int = 1, background_color: Optional[str] = None
+    zip_path: Path,
+    page: int = 1,
+    background_color: Optional[str] = None,
+    include_out_of_bounds_ink: bool = False,
 ) -> Optional[Tuple[bytes, Tuple[float, float]]]:
     """Full-page render of a page, addressed by cPages index.
 
@@ -1384,11 +1440,15 @@ def render_page_full_page_from_document_zip(
             tmpdir_path,
             page=page,
             background_color=background_color,
+            include_out_of_bounds_ink=include_out_of_bounds_ink,
         )
 
 
 def render_page_full_page_from_extracted_document(
-    tmpdir_path: Path, page: int = 1, background_color: Optional[str] = None
+    tmpdir_path: Path,
+    page: int = 1,
+    background_color: Optional[str] = None,
+    include_out_of_bounds_ink: bool = False,
 ) -> Optional[Tuple[bytes, Tuple[float, float]]]:
     """Render a full page from an already extracted document archive."""
     rm_files = _get_ordered_rm_files(tmpdir_path)
@@ -1405,7 +1465,11 @@ def render_page_full_page_from_extracted_document(
         rm_file = rm_files[page - 1]
 
     if rm_file is not None and rm_file.exists():
-        return render_rm_file_full_page_png(rm_file, background_color=background_color)
+        return render_rm_file_full_page_png(
+            rm_file,
+            background_color=background_color,
+            include_out_of_bounds_ink=include_out_of_bounds_ink,
+        )
 
     # The page exists in cPages but has no .rm layer yet (a blank page):
     # render a blank full page at the document's paper size so the viewer
@@ -1779,6 +1843,7 @@ def render_merged_page_from_extracted_document(
             tmpdir_path,
             page=page,
             background_color=background_color,
+            include_out_of_bounds_ink=True,
         )
         if full_page is None:
             return None, f"Page {page} has no renderable annotation layer."
@@ -1812,6 +1877,7 @@ def render_merged_page_from_extracted_document(
             tmpdir_path,
             page=page,
             background_color=background_color,
+            include_out_of_bounds_ink=True,
         )
         if full_page is None:
             return None, f"{reason}; page has no renderable annotation layer."
