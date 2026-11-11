@@ -726,7 +726,9 @@ remarkable_refresh()
 # Append pen/highlighter strokes to a page (coordinates normalized [0,1] from
 # the page's top-left). The interactive canvas Save button calls this too.
 remarkable_author(
-    method="draw", document="Ideas", page=1,
+    method="draw",
+    document="Ideas",
+    page=1,
     strokes=[{"points": [[0.1, 0.2], [0.8, 0.2]], "tool": "highlighter", "color": "yellow"}],
 )
 
@@ -796,6 +798,8 @@ With this configuration:
 - `remarkable_browse("/")` shows contents of `/Work`
 - `remarkable_browse("/Projects")` shows `/Work/Projects`
 - Documents outside `/Work` are not accessible
+- Write tools stay inside `/Work`: `remarkable_upload(..., parent_folder="/")` lands in `/Work`, and move, rename, and delete cannot reach anything outside it. The configured root must identify a single existing folder; otherwise writes return a not-found error
+- USB web uploads are refused while a root is set, because that interface cannot choose a folder
 
 Useful for:
 - Focusing on work documents during office hours
@@ -897,6 +901,10 @@ uv run pytest -v
 ```
 
 [Development guide](docs/development.md)
+
+Dependabot checks Python dependencies and `uv.lock` through the `uv` ecosystem,
+and GitHub Actions, weekly. Dependency updates are audited with `pip-audit`;
+see the development guide for the full update and validation commands.
 
 ### Multi-transport smoke test
 

@@ -210,8 +210,9 @@ async def test_something():
     data = json.loads(result[0][0].text)
     assert "expected_key" in data
 
+
 # Mocking the API client
-@patch('remarkable_mcp.tools.get_rmapi')
+@patch("remarkable_mcp.tools.get_rmapi")
 async def test_with_mock(mock_get_rmapi):
     mock_client = Mock()
     mock_get_rmapi.return_value = mock_client
