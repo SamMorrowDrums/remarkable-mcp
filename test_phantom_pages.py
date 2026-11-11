@@ -16,10 +16,12 @@ import json
 import tempfile
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from remarkable_mcp.extract import (
+    _get_ordered_rm_files,
     _get_page_order,
     _is_page_deleted,
     _read_cpages_entries,
@@ -27,6 +29,8 @@ from remarkable_mcp.extract import (
     _visible_cpages_entries,
     extract_text_from_document_zip,
     get_document_page_count,
+    render_merged_page_from_extracted_document,
+    render_page_full_page_from_extracted_document,
 )
 
 
@@ -257,3 +261,82 @@ def test_tombstone_value_semantics(deleted_value, expected):
     entry = _entry("d1")
     entry["deleted"] = {"timestamp": "3:1", "value": deleted_value}
     assert len(_visible_cpages_entries([_entry("p1"), entry])) == expected
+
+
+def test_extraction_excludes_deleted_and_orphan_strokes_from_text_annotations_and_ocr(tmp_path):
+    entries = [_entry("p2"), _entry("deleted", True), _entry("blank"), _entry("p1")]
+    zip_path = _make_zip(
+        tmp_path, {"cPages": {"pages": entries}}, rm_ids=["p1", "p2", "deleted", "orphan"]
+    )
+    with (
+        patch("remarkable_mcp.extract.extract_text_from_rm_file", side_effect=lambda p: [p.stem]),
+        patch(
+            "remarkable_mcp.extract._extract_page_annotations",
+            side_effect=lambda p: ([p.stem], True),
+        ),
+        patch(
+            "remarkable_mcp.extract.extract_handwriting_ocr",
+            side_effect=lambda files: ([p.stem for p in files], "test"),
+        ),
+    ):
+        result = extract_text_from_document_zip(zip_path, include_ocr=True)
+
+    assert result["pages"] == 3
+    assert result["page_ids"] == ["p2", "blank", "p1"]
+    assert (
+        result["typed_text"] == result["highlights"] == result["handwritten_text"] == ["p2", "p1"]
+    )
+    assert [(p["page"], p["page_id"]) for p in result["annotated_pages"]] == [(1, "p2"), (3, "p1")]
+
+
+def test_all_deleted_does_not_fall_back_to_stale_metadata_or_files(tmp_path):
+    import fitz
+
+    from remarkable_mcp.write_tools import _page_ids_from_content
+
+    content = {
+        "cPages": {"pages": [_entry("deleted", True)]},
+        "pages": ["deleted"],
+        "redirectionPageMap": [0],
+    }
+    zip_path = _make_zip(tmp_path, content, rm_ids=["deleted"])
+    extracted = _extract(zip_path)
+    with fitz.open() as pdf:
+        pdf.new_page()
+        (extracted / "doc.pdf").write_bytes(pdf.tobytes())
+
+    with patch("remarkable_mcp.extract.extract_text_from_rm_file") as parse:
+        result = extract_text_from_document_zip(zip_path, include_ocr=True)
+    parse.assert_not_called()
+    assert result["pages"] == 0
+    assert result["page_ids"] == result["annotated_pages"] == []
+    assert _get_ordered_rm_files(extracted) == []
+    assert _page_ids_from_content(content) == []
+    assert _resolve_pdf_page_index(extracted, 1) is None
+    assert render_page_full_page_from_extracted_document(extracted, 1) is None
+    assert render_merged_page_from_extracted_document(extracted, 1)[0] is None
+
+
+def test_missing_page_metadata_retains_rm_fallback(tmp_path):
+    zip_path = _make_zip(tmp_path, {"formatVersion": 1}, rm_ids=["p1"])
+    with patch("remarkable_mcp.extract.extract_text_from_rm_file", return_value=["text"]):
+        result = extract_text_from_document_zip(zip_path)
+    assert result["pages"] == 1
+    assert result["page_ids"] == ["p1"]
+    assert result["typed_text"] == ["text"]
+
+
+def test_export_renders_visible_pages_in_order(tmp_path):
+    from remarkable_mcp.exporters import ExportMetadata, render_archive_pages
+
+    content = {"cPages": {"pages": [_entry("p2"), _entry("deleted", True), _entry("p1")]}}
+    zip_path = _make_zip(tmp_path, content, rm_ids=["p1", "p2", "deleted"])
+    metadata = ExportMetadata("doc", "Doc", "/", "notebook", get_document_page_count(zip_path))
+
+    def render(extracted, page, background_color):
+        order = _get_page_order(extracted)
+        return order[page - 1].encode(), (1.0, 1.0)
+
+    with patch("remarkable_mcp.exporters.render_page_full_page_from_extracted_document", render):
+        pages = list(render_archive_pages(zip_path, metadata))
+    assert [(page.page, page.image) for page in pages] == [(1, b"p2"), (2, b"p1")]

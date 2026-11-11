@@ -697,13 +697,11 @@ def _page_ids_from_content(content_data: dict) -> list:
     if isinstance(cpages, dict) and isinstance(cpages.get("pages"), list):
         from remarkable_mcp.extract import _visible_cpages_entries
 
-        ids = [
+        return [
             p.get("id")
             for p in _visible_cpages_entries(cpages["pages"])
             if isinstance(p, dict) and p.get("id")
         ]
-        if ids:
-            return ids
     pages = content_data.get("pages")
     if isinstance(pages, list) and all(isinstance(p, str) for p in pages):
         return list(pages)
