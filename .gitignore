@@ -78,3 +78,15 @@ BLOG_DRAFT.md
 
 # Smoke-test run artifacts (regenerated on every run)
 smoke/snapshots/
+
+# Urban Forest local runtime artifacts (never commit)
+.cloud-cache/
+logs/
+cloud-verification/
+verification/
+tunnel/
+.tools/
+*.rmapi
+.rmapi
+.dev.vars
+*-state.json
