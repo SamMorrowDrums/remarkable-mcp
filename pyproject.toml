@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "MCP server for accessing reMarkable tablet data"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     { name = "Sam Morrow" }
 ]
@@ -14,29 +14,30 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 
 dependencies = [
-    "mcp>=2.2.0,<3.0.0",
+    "mcp>=2.3.0,<3.0.0",
     "rmscene>=0.8.0",
     "pytesseract>=0.3.13",
-    "Pillow>=12.3.0",
+    "Pillow>=13.0.0",
     "requests>=2.34.2",
-    "pymupdf>=1.28.2",
-    "ebooklib>=0.20",
+    "pymupdf>=1.28.2,<2",
+    "ebooklib>=0.21",
     "beautifulsoup4>=4.15.0",
-    "markdown-it-py>=4.2.0",
+    "markdown-it-py>=4.3.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=9.1.1",
-    "pytest-asyncio>=1.4.0",
-    "black>=26.5.1",
-    "ruff>=0.16.10",
+    "pytest-asyncio>=1.4.1",
+    "black>=26.10.1",
+    "ruff>=0.17.4",
 ]
 ocr = [
     "google-cloud-vision>=3.16.0",
@@ -67,6 +68,6 @@ asyncio_default_fixture_loop_scope = "function"
 
 [dependency-groups]
 dev = [
-    "pytest-asyncio>=1.4.0",
-    "ruff>=0.16.10",
+    "pytest-asyncio>=1.4.1",
+    "ruff>=0.17.4",
 ]
