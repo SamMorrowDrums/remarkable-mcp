@@ -2641,6 +2641,23 @@ class TestUSBWebInterface:
         finally:
             client.close()
 
+    @pytest.mark.asyncio
+    async def test_usb_upload_refused_when_root_path_set(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("REMARKABLE_USE_USB_WEB", "1")
+        monkeypatch.delenv("REMARKABLE_USE_SSH", raising=False)
+        monkeypatch.setenv("REMARKABLE_ROOT_PATH", "/Claude")
+        path = tmp_path / "doc.pdf"
+        path.write_bytes(b"%PDF")
+
+        with (
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=Mock()),
+            patch("remarkable_mcp.write_tools._upload_via_usb_web") as upload,
+        ):
+            result = await _call_tool("remarkable_upload", {"file_path": str(path)})
+
+        assert json.loads(result.content[0].text)["_error"]["type"] == "root_path_unsupported"
+        upload.assert_not_called()
+
 
 # =============================================================================
 # Test Retry Backoff
@@ -3926,6 +3943,175 @@ class TestCloudWriteDispatch:
                 client.delete.assert_not_called()
             finally:
                 self._cleanup()
+
+    def _rooted_library(self):
+        root = self._make_item("root", "Claude", is_folder=True)
+        outside = self._make_item("out-1", "Delete Probe")
+        inside = self._make_item("in-1", "Delete Probe", parent="root")
+        archive = self._make_item("arch", "Archive", parent="root", is_folder=True)
+        stray = self._make_item("out-2", "Write Test")
+        return [root, outside, inside, archive, stray]
+
+    @pytest.mark.asyncio
+    async def test_root_path_bare_name_delete_stays_inside_root(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        env = {
+            **self._cloud_env(),
+            "REMARKABLE_SKIP_CONFIRM": "1",
+            "REMARKABLE_ROOT_PATH": "/Claude",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            try:
+                client = Mock(spec=["get_meta_items", "delete"])
+                client.get_meta_items.return_value = self._rooted_library()
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await _call_tool("remarkable_delete", {"document": "Delete Probe"})
+                data = json.loads(result.content[0].text)
+                assert data["deleted"] is True
+                assert data["path"] == "/Delete Probe"
+                client.delete.assert_called_once_with("in-1")
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_root_path_hides_documents_outside_root_from_move(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        env = {**self._cloud_env(), "REMARKABLE_ROOT_PATH": "/Claude"}
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            try:
+                client = Mock(spec=["get_meta_items", "move"])
+                client.get_meta_items.return_value = self._rooted_library()
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await _call_tool(
+                        "remarkable_move",
+                        {"document": "Write Test", "dest_folder": "/Archive"},
+                    )
+                error = json.loads(result.content[0].text)["_error"]
+                assert error["type"] == "document_not_found"
+                assert "Write Test" not in error.get("did_you_mean", [])
+                assert "REMARKABLE_ROOT_PATH" in error["suggestion"]
+                client.move.assert_not_called()
+            finally:
+                self._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_root_path_maps_parent_folder_to_root(self):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        env = {**self._cloud_env(), "REMARKABLE_ROOT_PATH": "/Claude"}
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            try:
+                new_folder = Mock()
+                new_folder.id = "folder-xyz"
+                client = Mock(spec=["get_meta_items", "create_folder"])
+                client.get_meta_items.return_value = self._rooted_library()
+                client.create_folder.return_value = new_folder
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    await _call_tool("remarkable_mkdir", {"folder_name": "Top", "parent": "/"})
+                    await _call_tool(
+                        "remarkable_mkdir", {"folder_name": "Nested", "parent": "/Archive"}
+                    )
+                assert client.create_folder.call_args_list == [
+                    (("Top", "root"),),
+                    (("Nested", "arch"),),
+                ]
+            finally:
+                self._cleanup()
+
+    def test_resolve_document_prefers_exact_path_and_excludes_root_folder(self, monkeypatch):
+        from remarkable_mcp.api import get_items_by_id
+        from remarkable_mcp.write_tools import _resolve_document
+
+        monkeypatch.setenv("REMARKABLE_ROOT_PATH", "/Claude")
+        root = self._make_item("root", "Claude", is_folder=True)
+        sub = self._make_item("sub", "Sub", parent="root", is_folder=True)
+        nested = self._make_item("nested", "Doc", parent="sub")
+        top = self._make_item("top", "Doc", parent="root")
+        collection = [root, sub, nested, top]
+        items_by_id = get_items_by_id(collection)
+
+        assert _resolve_document("/Doc", collection, items_by_id) is top
+        assert _resolve_document("Sub/Doc", collection, items_by_id) is nested
+        assert _resolve_document("Claude", collection, items_by_id) is None
+        assert _resolve_document("/", collection, items_by_id) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool", "arguments", "method"),
+        [
+            ("remarkable_delete", {}, "delete"),
+            ("remarkable_rename", {"new_name": "Renamed"}, "rename"),
+            ("remarkable_move", {"dest_folder": "/"}, "move"),
+        ],
+    )
+    async def test_root_path_rejects_spoofed_document_paths(self, tool, arguments, method):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        env = {
+            **self._cloud_env(),
+            "REMARKABLE_SKIP_CONFIRM": "1",
+            "REMARKABLE_ROOT_PATH": "/Claude",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            try:
+                root = self._make_item("root", "Claude", is_folder=True)
+                spoofed = self._make_item("outside", "Claude/Doc")
+                client = Mock(spec=["get_meta_items", method])
+                client.get_meta_items.return_value = [spoofed, root]
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await _call_tool(tool, {"document": "/Doc", **arguments})
+                error = json.loads(result.content[0].text)["_error"]
+                assert error["type"] == "document_not_found"
+                assert not error.get("did_you_mean")
+                getattr(client, method).assert_not_called()
+            finally:
+                self._cleanup()
+
+    def test_root_path_destinations_and_suggestions_require_ancestry(self, monkeypatch):
+        from remarkable_mcp.api import get_items_by_id
+        from remarkable_mcp.write_tools import _folder_suggestions, _resolve_parent_id
+
+        monkeypatch.setenv("REMARKABLE_ROOT_PATH", "/Claude")
+        root = self._make_item("root", "Claude", is_folder=True)
+        spoofed = self._make_item("outside", "Claude/Archive", is_folder=True)
+        outside_child = self._make_item("child", "Nested", parent="outside", is_folder=True)
+        archive = self._make_item("archive", "Archive", parent="root", is_folder=True)
+        collection = [spoofed, outside_child, root, archive]
+        items_by_id = get_items_by_id(collection)
+
+        assert _resolve_parent_id("/", items_by_id, collection) == "root"
+        assert _resolve_parent_id("/Archive", items_by_id, collection) == "archive"
+        assert _resolve_parent_id("/Archive/Nested", items_by_id, collection) is None
+        assert _folder_suggestions(collection, items_by_id) == ["/Archive"]
+
+    @pytest.mark.parametrize("root_state", ["unique", "missing", "ambiguous"])
+    def test_root_path_resolves_nested_root_by_hierarchy(self, monkeypatch, root_state):
+        from remarkable_mcp.api import get_items_by_id
+        from remarkable_mcp.write_tools import _resolve_document, _resolve_parent_id
+
+        monkeypatch.setenv("REMARKABLE_ROOT_PATH", "/Work/Claude")
+        spoofed_root = self._make_item("outside", "Work/Claude", is_folder=True)
+        outside_doc = self._make_item("out-doc", "Doc", parent="outside")
+        work = self._make_item("work", "Work", is_folder=True)
+        root = self._make_item("root", "Claude", parent="work", is_folder=True)
+        doc = self._make_item("doc", "Doc", parent="root")
+        collection = [spoofed_root, outside_doc, work, doc]
+        if root_state != "missing":
+            collection.append(root)
+        if root_state == "ambiguous":
+            collection.append(self._make_item("duplicate", "Claude", parent="work", is_folder=True))
+        items_by_id = get_items_by_id(collection)
+
+        expected_root = "root" if root_state == "unique" else None
+        expected_doc = doc if root_state == "unique" else None
+        assert _resolve_parent_id("/", items_by_id, collection) == expected_root
+        assert _resolve_document("Doc", collection, items_by_id) is expected_doc
 
 
 class TestConcurrentToolDispatch:

@@ -537,8 +537,11 @@ Documents are automatically registered as MCP resources:
 | `remarkablesvg:///{path}.page-{N}.svg` | SVG vector image of page N (notebooks only) |
 | `remarkableexport:///{format}/{id}` | Temporary generated PDF or Markdown export |
 
-Trashed documents are excluded from tool, canvas, and resource lookup, so a
-trashed item cannot shadow a live document with the same name.
+Trashed documents, including descendants of trashed folders, are excluded from
+read tools, canvas, resources, and live document counts. Write tools prefer live
+namesakes and never use trashed destinations. With no configured root, an explicit
+absolute `/trash/...` write target remains available for SSH permanent deletion;
+it cannot bypass `REMARKABLE_ROOT_PATH`.
 
 `remarkable_export` returns a `ResourceLink` instead of embedding potentially
 large file content in the tool response. The server stores the file in a private
@@ -798,6 +801,8 @@ With this configuration:
 - `remarkable_browse("/")` shows contents of `/Work`
 - `remarkable_browse("/Projects")` shows `/Work/Projects`
 - Documents outside `/Work` are not accessible
+- Write tools stay inside `/Work`: `remarkable_upload(..., parent_folder="/")` lands in `/Work`, and move, rename, and delete cannot reach anything outside it. The configured root must identify a single existing folder; otherwise writes return a not-found error
+- USB web uploads are refused while a root is set, because that interface cannot choose a folder
 
 Useful for:
 - Focusing on work documents during office hours

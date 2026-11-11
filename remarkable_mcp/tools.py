@@ -1089,6 +1089,8 @@ async def remarkable_browse(
                 found_document = None
 
                 for item in items_by_parent.get(current_parent, []):
+                    if _is_cloud_archived(item, items_by_id):
+                        continue
                     if item.VissibleName.lower() == part_lower:
                         if item.is_folder:
                             current_parent = item.ID
@@ -1133,12 +1135,12 @@ async def remarkable_browse(
                     available_folders = [
                         item.VissibleName
                         for item in items_by_parent.get(current_parent, [])
-                        if item.is_folder
+                        if item.is_folder and not _is_cloud_archived(item, items_by_id)
                     ]
                     available_docs = [
                         item.VissibleName
                         for item in items_by_parent.get(current_parent, [])
-                        if not item.is_folder
+                        if not item.is_folder and not _is_cloud_archived(item, items_by_id)
                     ]
                     suggestion = "Use remarkable_browse('/') to see root folder contents."
                     if available_docs:

@@ -190,6 +190,21 @@ class TestTrashedAncestorFolders:
         names = [entry["name"] for entry in _response_json(result)[key]]
         assert names == ["Live Notes"]
 
+    @pytest.mark.asyncio
+    async def test_browse_cannot_navigate_or_suggest_archived_folders(self):
+        import remarkable_mcp.tools as tools
+
+        old = _folder("Old", "old")
+        old.is_cloud_archived = True
+        child = _folder("Nested", "nested", parent="old")
+        client = Mock()
+        client.get_meta_items.return_value = [old, child]
+        with patch.object(tools, "get_rmapi", return_value=client):
+            result = await _call_tool("remarkable_browse", {"path": "/Old/Nested"})
+        error = _response_json(result)["_error"]
+        assert error["type"] == "folder_not_found"
+        assert not error.get("did_you_mean")
+
 
 class TestStatusDocumentCount:
     @pytest.mark.asyncio
@@ -209,6 +224,86 @@ class TestStatusDocumentCount:
             result = await _call_tool("remarkable_status", {})
 
         assert _response_json(result)["document_count"] == 1
+
+
+class TestRootedTrashWrites:
+    @pytest.mark.parametrize("root_path", ["/Work", "/trash/Work"])
+    def test_rooted_lookup_rejects_trash_and_spoofed_paths(self, monkeypatch, root_path):
+        from remarkable_mcp.api import get_items_by_id
+        from remarkable_mcp.write_tools import (
+            _document_not_found,
+            _folder_suggestions,
+            _resolve_document,
+            _resolve_parent_id,
+        )
+
+        monkeypatch.setenv("REMARKABLE_ROOT_PATH", root_path)
+        user_trash = _folder("trash", "user-trash")
+        root = _folder("Work", "root", parent="user-trash" if "/trash/" in root_path else "")
+        old_root = _folder("Work", "old-root", parent="trash")
+        old_folder = _folder("Archive", "old-folder", parent="old-root")
+        old_notes = _document("Notes", "old-notes", parent="old-folder")
+        spoofed = _document(root_path.strip("/") + "/Notes", "spoofed")
+        live = _document("Notes", "live", parent="root")
+        archive = _folder("Archive", "archive", parent="root")
+        # Archived metadata can also mark an item without reparenting it.
+        archived = _folder("Hidden", "hidden", parent="root")
+        archived.is_cloud_archived = True
+        hidden_child = _document("Hidden Notes", "hidden-child", parent="hidden")
+        collection = [
+            old_root,
+            old_folder,
+            old_notes,
+            spoofed,
+            archived,
+            hidden_child,
+            user_trash,
+            root,
+            live,
+            archive,
+        ]
+        by_id = get_items_by_id(collection)
+
+        assert _resolve_document("Notes", collection, by_id) is live
+        assert _resolve_document("/Notes", collection, by_id) is live
+        for path in ["/trash/Work/Archive/Notes", "Archive/Notes", "Hidden Notes", "Work", "/"]:
+            assert _resolve_document(path, collection, by_id) is None
+        assert _resolve_parent_id("/", by_id, collection) == "root"
+        assert _resolve_parent_id("/Archive", by_id, collection) == "archive"
+        assert _resolve_parent_id("/Hidden", by_id, collection) is None
+        assert _resolve_parent_id("/trash/Work/Archive", by_id, collection) is None
+        assert _folder_suggestions(collection, by_id) == ["/Archive"]
+        with patch("remarkable_mcp.extract.find_similar_documents", return_value=[]) as similar:
+            _document_not_found("Missing", collection, by_id)
+        assert similar.call_args.args[1] == [live, archive]
+
+    @pytest.mark.parametrize("archived_ancestor", [False, True])
+    def test_archived_configured_root_is_not_writable(self, monkeypatch, archived_ancestor):
+        from remarkable_mcp.api import get_items_by_id
+        from remarkable_mcp.write_tools import _resolve_document, _resolve_parent_id
+
+        monkeypatch.setenv("REMARKABLE_ROOT_PATH", "/Work/Project")
+        work = _folder("Work", "work")
+        project = _folder("Project", "project", parent="work")
+        doc = _document("Notes", "notes", parent="project")
+        (work if archived_ancestor else project).is_cloud_archived = True
+        collection = [work, project, doc]
+        by_id = get_items_by_id(collection)
+        assert _resolve_document("Notes", collection, by_id) is None
+        assert _resolve_parent_id("/", by_id, collection) is None
+
+    def test_unrooted_explicit_trash_path_reaches_nested_item_only(self):
+        from remarkable_mcp.api import get_items_by_id
+        from remarkable_mcp.write_tools import _resolve_document, _resolve_parent_id
+
+        old = _folder("Old", "old", parent="trash")
+        notes = _document("Notes", "notes", parent="old")
+        collection = [old, notes]
+        by_id = get_items_by_id(collection)
+        assert _resolve_document("/trash/Old/Notes", collection, by_id) is notes
+        assert _resolve_document("trash/Old/Notes", collection, by_id) is None
+        assert _resolve_document("Notes", collection, by_id) is None
+        assert _resolve_parent_id("/trash/Old", by_id, collection) is None
 
 
 class TestLiveDocumentLookup:
@@ -838,15 +933,17 @@ class TestCanvasArchivedLookup:
         client.download.assert_called_once_with(live)
 
     @pytest.mark.asyncio
-    async def test_canvas_excludes_trash_from_suggestions(self, monkeypatch):
+    @pytest.mark.parametrize("nested", [False, True])
+    async def test_canvas_excludes_trash_from_suggestions(self, monkeypatch, nested):
         import remarkable_mcp.api as api
         import remarkable_mcp.extract as extract
         from remarkable_mcp.app_canvas import _render_canvas_page
 
-        trashed = _document("Meeting notes trash", "trash", parent="trash")
+        folder = _folder("Old", "old", parent="trash")
+        trashed = _document("Meeting notes trash", "trashed", parent="old" if nested else "trash")
         live = _document("Meeting notes live", "live")
         client = Mock()
-        client.get_meta_items.return_value = [trashed, live]
+        client.get_meta_items.return_value = [folder, trashed, live]
         candidates = []
 
         monkeypatch.setattr(api, "get_rmapi", lambda: client)
@@ -894,15 +991,17 @@ def resource_registry(monkeypatch):
 
 
 class TestArchivedResourceRegistration:
-    def test_synchronous_registration_skips_trash(self, monkeypatch, resource_registry):
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_synchronous_registration_skips_trash(self, monkeypatch, resource_registry, nested):
         import remarkable_mcp.api as api
 
         resources, recorder = resource_registry
-        trashed = _document("Duplicate", "trash", parent="trash")
+        folder = _folder("Old", "old", parent="trash")
+        trashed = _document("Duplicate", "trashed", parent="old" if nested else "trash")
         live = _document("Duplicate", "live")
         client = Mock()
-        client.get_meta_items.return_value = [trashed, live]
-        client.get_all_file_types.return_value = {"trash": "notebook", "live": "notebook"}
+        client.get_meta_items.return_value = [folder, trashed, live]
+        client.get_all_file_types.return_value = {"trashed": "notebook", "live": "notebook"}
         monkeypatch.setattr(api, "get_rmapi", lambda: client)
 
         assert resources.load_all_documents_sync() == 1
@@ -910,14 +1009,18 @@ class TestArchivedResourceRegistration:
         assert all("_1" not in uri for uri in recorder.uris)
 
     @pytest.mark.asyncio
-    async def test_background_registration_skips_trash(self, monkeypatch, resource_registry):
+    @pytest.mark.parametrize("nested", [False, True])
+    async def test_background_registration_skips_trash(
+        self, monkeypatch, resource_registry, nested
+    ):
         import remarkable_mcp.api as api
 
         resources, recorder = resource_registry
-        trashed = _document("Archived notes", "trash", parent="trash")
+        folder = _folder("Old", "old", parent="trash")
+        trashed = _document("Archived notes", "trashed", parent="old" if nested else "trash")
         live = _document("Live notes", "live")
         client = Mock()
-        client.get_meta_items.return_value = [trashed, live]
+        client.get_meta_items.return_value = [folder, trashed, live]
         monkeypatch.setattr(api, "get_rmapi", lambda: client)
 
         await resources._load_documents_background(asyncio.Event())

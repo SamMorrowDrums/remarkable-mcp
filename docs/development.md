@@ -4,7 +4,7 @@ This guide covers setting up a development environment for contributing to remar
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
 - A reMarkable tablet (for testing)
 
@@ -68,8 +68,12 @@ Tests use `pytest-asyncio` for async testing. All async tests use the `@pytest.m
 ## Dependency Updates
 
 Dependabot checks the `uv` and `github-actions` ecosystems weekly. Keep dependency
-bounds in `pyproject.toml` and the resolved versions in `uv.lock` in sync, retaining
-Python 3.10 support and the MCP SDK's `<3` compatibility boundary.
+bounds in `pyproject.toml` and the resolved versions in `uv.lock` in sync, within the
+MCP SDK's `<3` and PyMuPDF's `<2` compatibility boundaries.
+
+Python 3.11+ is required because Pillow 13, which carries security fixes that 12.x
+does not, does not support Python 3.10. PyMuPDF 2.x is deferred until it has been
+reviewed, because it adds several heavy dependencies (including onnxruntime and numpy).
 
 ```bash
 uv lock --upgrade

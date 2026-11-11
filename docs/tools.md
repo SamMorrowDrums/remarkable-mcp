@@ -34,7 +34,15 @@ All tools respect the `REMARKABLE_ROOT_PATH` environment variable. When configur
 With this configuration:
 - Paths in responses are relative to the root (e.g., `/Work/Project` appears as `/Project`)
 - Documents outside the root are not accessible
+- Write tools resolve paths and bare names inside the root only (e.g., `parent="/"` means `/Work`); items outside it, and the root folder itself, cannot be moved, renamed, or deleted
+- Write scope is checked through folder IDs and parent ancestry, not display-name prefixes. A missing or ambiguous configured root returns a not-found error
+- `remarkable_upload` and `remarkable_markdown_to_pdf` are refused in USB web mode, because that interface cannot choose a destination folder
 - `remarkable_status()` shows the configured root and document count within that folder
+
+Trashed items and descendants of trashed folders are hidden from read tools,
+canvas, resources, and document counts. Write lookup prefers live items, rejects
+trashed destinations, and only accepts explicit absolute `/trash/...` targets
+when no root is configured (for example, SSH permanent deletion).
 
 ---
 
