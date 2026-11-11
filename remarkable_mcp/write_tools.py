@@ -781,13 +781,41 @@ def _root_path() -> str:
     return _get_root_path()
 
 
-def _in_root_scope(item_path: str, root: str) -> bool:
-    """Whether a tablet path is writable under the root (the root folder itself is not)."""
+def _resolve_root_id(collection: list) -> Optional[str]:
+    """Resolve the configured root through folder IDs, not joined display names."""
+    root = _root_path()
     if root == "/":
-        return True
-    from remarkable_mcp.tools import _is_within_root
+        return ""
+    parent_id = ""
+    for component in root.strip("/").split("/"):
+        matches = [
+            item
+            for item in collection
+            if item.is_folder
+            and getattr(item, "Parent", "") == parent_id
+            and item.VissibleName.lower() == component.lower()
+        ]
+        if len(matches) != 1:
+            return None
+        parent_id = matches[0].ID
+    return parent_id
 
-    return item_path.lower() != root.lower() and _is_within_root(item_path, root)
+
+def _in_root_scope(item, root_id: str, items_by_id: dict) -> bool:
+    """Only descendants of the root UUID are writable, never the root itself."""
+    if item.ID == root_id:
+        return False
+    seen = {item.ID}
+    parent_id = getattr(item, "Parent", "")
+    while parent_id and parent_id not in seen:
+        if parent_id == root_id:
+            return True
+        seen.add(parent_id)
+        parent = items_by_id.get(parent_id)
+        if parent is None or not parent.is_folder:
+            return False
+        parent_id = getattr(parent, "Parent", "")
+    return False
 
 
 def _device_path(path: str) -> str:
@@ -807,10 +835,12 @@ def _display_path(path: str) -> str:
 
 def _scoped_items(collection: list, items_by_id: dict) -> list:
     """Items that write tools may target under REMARKABLE_ROOT_PATH."""
-    root = _root_path()
-    if root == "/":
+    root_id = _resolve_root_id(collection)
+    if root_id is None:
+        return []
+    if root_id == "":
         return list(collection)
-    return [item for item in collection if _in_root_scope(get_item_path(item, items_by_id), root)]
+    return [item for item in collection if _in_root_scope(item, root_id, items_by_id)]
 
 
 def _scoped_suggestion(suggestion: str) -> str:
@@ -819,7 +849,8 @@ def _scoped_suggestion(suggestion: str) -> str:
         return suggestion
     return (
         f"{suggestion} Paths are relative to REMARKABLE_ROOT_PATH ('{root}'); "
-        "items outside it cannot be changed."
+        "items outside it cannot be changed. "
+        "Check that the configured root exists and identifies a single folder."
     )
 
 
@@ -858,11 +889,11 @@ def _resolve_parent_id(parent_path: str, items_by_id: dict, collection: list) ->
     Returns:
         The UUID of the folder, "" for the tablet's top level, or None if not found
     """
-    target = _device_path(parent_path).strip("/").lower()
-    if not target:
-        return ""
+    if not parent_path or not parent_path.strip("/"):
+        return _resolve_root_id(collection)
 
-    for item in collection:
+    target = _device_path(parent_path).strip("/").lower()
+    for item in _scoped_items(collection, items_by_id):
         if not item.is_folder:
             continue
         item_path = get_item_path(item, items_by_id).strip("/")
@@ -889,17 +920,14 @@ def _resolve_document(
     Returns:
         The matching item, or None
     """
-    root = _root_path()
     target_path = _device_path(name_or_path).strip("/").lower()
     target_name = name_or_path.strip("/").lower()
     name_match = None
 
-    for item in collection:
+    for item in _scoped_items(collection, items_by_id):
         if folders_only and not item.is_folder:
             continue
         item_path = get_item_path(item, items_by_id)
-        if not _in_root_scope(item_path, root):
-            continue
         if item_path.strip("/").lower() == target_path:
             return item
         if name_match is None and item.VissibleName.lower() == target_name:

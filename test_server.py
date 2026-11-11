@@ -3959,6 +3959,79 @@ class TestCloudWriteDispatch:
         assert _resolve_document("Claude", collection, items_by_id) is None
         assert _resolve_document("/", collection, items_by_id) is None
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool", "arguments", "method"),
+        [
+            ("remarkable_delete", {}, "delete"),
+            ("remarkable_rename", {"new_name": "Renamed"}, "rename"),
+            ("remarkable_move", {"dest_folder": "/"}, "move"),
+        ],
+    )
+    async def test_root_path_rejects_spoofed_document_paths(self, tool, arguments, method):
+        from remarkable_mcp.write_tools import register_write_tools
+
+        env = {
+            **self._cloud_env(),
+            "REMARKABLE_SKIP_CONFIRM": "1",
+            "REMARKABLE_ROOT_PATH": "/Claude",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            try:
+                root = self._make_item("root", "Claude", is_folder=True)
+                spoofed = self._make_item("outside", "Claude/Doc")
+                client = Mock(spec=["get_meta_items", method])
+                client.get_meta_items.return_value = [spoofed, root]
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                    result = await _call_tool(tool, {"document": "/Doc", **arguments})
+                error = json.loads(result.content[0].text)["_error"]
+                assert error["type"] == "document_not_found"
+                assert not error.get("did_you_mean")
+                getattr(client, method).assert_not_called()
+            finally:
+                self._cleanup()
+
+    def test_root_path_destinations_and_suggestions_require_ancestry(self, monkeypatch):
+        from remarkable_mcp.api import get_items_by_id
+        from remarkable_mcp.write_tools import _folder_suggestions, _resolve_parent_id
+
+        monkeypatch.setenv("REMARKABLE_ROOT_PATH", "/Claude")
+        root = self._make_item("root", "Claude", is_folder=True)
+        spoofed = self._make_item("outside", "Claude/Archive", is_folder=True)
+        outside_child = self._make_item("child", "Nested", parent="outside", is_folder=True)
+        archive = self._make_item("archive", "Archive", parent="root", is_folder=True)
+        collection = [spoofed, outside_child, root, archive]
+        items_by_id = get_items_by_id(collection)
+
+        assert _resolve_parent_id("/", items_by_id, collection) == "root"
+        assert _resolve_parent_id("/Archive", items_by_id, collection) == "archive"
+        assert _resolve_parent_id("/Archive/Nested", items_by_id, collection) is None
+        assert _folder_suggestions(collection, items_by_id) == ["/Archive"]
+
+    @pytest.mark.parametrize("root_state", ["unique", "missing", "ambiguous"])
+    def test_root_path_resolves_nested_root_by_hierarchy(self, monkeypatch, root_state):
+        from remarkable_mcp.api import get_items_by_id
+        from remarkable_mcp.write_tools import _resolve_document, _resolve_parent_id
+
+        monkeypatch.setenv("REMARKABLE_ROOT_PATH", "/Work/Claude")
+        spoofed_root = self._make_item("outside", "Work/Claude", is_folder=True)
+        outside_doc = self._make_item("out-doc", "Doc", parent="outside")
+        work = self._make_item("work", "Work", is_folder=True)
+        root = self._make_item("root", "Claude", parent="work", is_folder=True)
+        doc = self._make_item("doc", "Doc", parent="root")
+        collection = [spoofed_root, outside_doc, work, doc]
+        if root_state != "missing":
+            collection.append(root)
+        if root_state == "ambiguous":
+            collection.append(self._make_item("duplicate", "Claude", parent="work", is_folder=True))
+        items_by_id = get_items_by_id(collection)
+
+        expected_root = "root" if root_state == "unique" else None
+        expected_doc = doc if root_state == "unique" else None
+        assert _resolve_parent_id("/", items_by_id, collection) == expected_root
+        assert _resolve_document("Doc", collection, items_by_id) is expected_doc
+
 
 class TestConcurrentToolDispatch:
     """Regression: tool calls must not serialize on the event loop.
