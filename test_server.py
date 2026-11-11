@@ -6252,7 +6252,16 @@ class TestFullPageRender:
         finally:
             rm_path.unlink(missing_ok=True)
 
-    def test_read_export_render_includes_negative_out_of_bounds_strokes(self):
+    @pytest.mark.parametrize(
+        "stroke_x,stroke_y,paper_width,paper_height,fixed_size",
+        [
+            pytest.param(-250.0, -50.0, 400.0, 800.0, (936, 1872), id="negative-left-top"),
+            pytest.param(100.0, 4474.0, 1620.0, 2160.0, (1404, 1872), id="below-paper"),
+        ],
+    )
+    def test_read_export_render_includes_out_of_bounds_strokes(
+        self, stroke_x, stroke_y, paper_width, paper_height, fixed_size
+    ):
         import io as _io
 
         from PIL import Image
@@ -6263,8 +6272,8 @@ class TestFullPageRender:
             rm_tmp.write(b"synthetic scene")
             rm_path = Path(rm_tmp.name)
         path = (
-            '<path d="M -250 -50 L -250 -50" stroke="black" stroke-width="40" '
-            'fill="none" stroke-linecap="round"/>'
+            f'<path d="M {stroke_x:g} {stroke_y:g} L {stroke_x:g} {stroke_y:g}" '
+            'stroke="black" stroke-width="40" fill="none" stroke-linecap="round"/>'
         )
         try:
             with (
@@ -6273,9 +6282,13 @@ class TestFullPageRender:
                 patch.object(
                     extract,
                     "_v6_paths_from_blocks",
-                    return_value=([path], [(-250, -50)]),
+                    return_value=([path], [(stroke_x, stroke_y)]),
                 ),
-                patch.object(extract, "_v6_paper_size", return_value=(400.0, 800.0)),
+                patch.object(
+                    extract,
+                    "_v6_paper_size",
+                    return_value=(paper_width, paper_height),
+                ),
                 _cairo_unavailable(),
             ):
                 fixed = extract.render_rm_file_full_page_png(rm_path, background_color="#FFFFFF")
@@ -6289,15 +6302,24 @@ class TestFullPageRender:
             assert extended is not None
             fixed_image = Image.open(_io.BytesIO(fixed[0])).convert("L")
             extended_image = Image.open(_io.BytesIO(extended[0])).convert("L")
-            assert fixed_image.size == (936, 1872)
+            assert fixed_image.size == fixed_size
             assert sum(fixed_image.histogram()[:128]) == 0
-            assert extended_image.width > fixed_image.width
+            assert extended_image.size != fixed_size
             assert sum(extended_image.histogram()[:128]) > 0
         finally:
             rm_path.unlink(missing_ok=True)
 
+    @pytest.mark.parametrize(
+        "stroke_x,stroke_y,paper_width,paper_height,fixed_size",
+        [
+            pytest.param(-250.0, -50.0, 400.0, 800.0, (936, 1872), id="negative-left-top"),
+            pytest.param(100.0, 4474.0, 1620.0, 2160.0, (1404, 1872), id="below-paper"),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_image_merged_fallback_renders_out_of_bounds_ink(self):
+    async def test_image_merged_fallback_renders_out_of_bounds_ink(
+        self, stroke_x, stroke_y, paper_width, paper_height, fixed_size
+    ):
         import io as _io
         import json as _json
         import zipfile as _zip
@@ -6315,8 +6337,8 @@ class TestFullPageRender:
         pdf_bytes = pdf_document.tobytes()
         pdf_document.close()
         path = (
-            '<path d="M -250 -50 L -250 -50" stroke="black" stroke-width="40" '
-            'fill="none" stroke-linecap="round"/>'
+            f'<path d="M {stroke_x:g} {stroke_y:g} L {stroke_x:g} {stroke_y:g}" '
+            'stroke="black" stroke-width="40" fill="none" stroke-linecap="round"/>'
         )
         try:
             with _zip.ZipFile(archive_path, "w") as archive:
@@ -6333,9 +6355,13 @@ class TestFullPageRender:
                 patch.object(
                     extract,
                     "_v6_paths_from_blocks",
-                    return_value=([path], [(-250, -50)]),
+                    return_value=([path], [(stroke_x, stroke_y)]),
                 ),
-                patch.object(extract, "_v6_paper_size", return_value=(400.0, 800.0)),
+                patch.object(
+                    extract,
+                    "_v6_paper_size",
+                    return_value=(paper_width, paper_height),
+                ),
                 _cairo_unavailable(),
             ):
                 png, note, merged, _ = await _render_png_page(
@@ -6354,7 +6380,7 @@ class TestFullPageRender:
             )
             assert merged is False
             image = Image.open(_io.BytesIO(png)).convert("L")
-            assert image.width > 936
+            assert image.size != fixed_size
             assert sum(image.histogram()[:128]) > 0
         finally:
             archive_path.unlink(missing_ok=True)

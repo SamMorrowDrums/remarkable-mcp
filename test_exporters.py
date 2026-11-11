@@ -195,7 +195,16 @@ class TestPdfExporters:
         assert pages[1].warning is None
         assert pages[2].partial is True
 
-    def test_pdf_export_preserves_out_of_bounds_ink_on_user_added_page(self, tmp_path):
+    @pytest.mark.parametrize(
+        "stroke_x,stroke_y,paper_width,paper_height",
+        [
+            pytest.param(-250.0, -50.0, 400.0, 800.0, id="negative-left-top"),
+            pytest.param(100.0, 4474.0, 1620.0, 2160.0, id="below-paper"),
+        ],
+    )
+    def test_pdf_export_preserves_out_of_bounds_ink_on_user_added_page(
+        self, tmp_path, stroke_x, stroke_y, paper_width, paper_height
+    ):
         from remarkable_mcp import extract
 
         archive_path = tmp_path / "pdf-with-user-page.zip"
@@ -208,15 +217,23 @@ class TestPdfExporters:
             archive.writestr("p1.rm", b"synthetic scene")
 
         path = (
-            '<path d="M -250 -50 L -250 -50" stroke="black" stroke-width="40" '
-            'fill="none" stroke-linecap="round"/>'
+            f'<path d="M {stroke_x:g} {stroke_y:g} L {stroke_x:g} {stroke_y:g}" '
+            'stroke="black" stroke-width="40" fill="none" stroke-linecap="round"/>'
         )
         destination = tmp_path / "export.pdf"
         with (
             patch.object(extract, "_v6_blocks", return_value=[]),
             patch.object(extract, "_v6_text_elements_with_bounds", return_value=([], [], {})),
-            patch.object(extract, "_v6_paths_from_blocks", return_value=([path], [(-250, -50)])),
-            patch.object(extract, "_v6_paper_size", return_value=(400.0, 800.0)),
+            patch.object(
+                extract,
+                "_v6_paths_from_blocks",
+                return_value=([path], [(stroke_x, stroke_y)]),
+            ),
+            patch.object(
+                extract,
+                "_v6_paper_size",
+                return_value=(paper_width, paper_height),
+            ),
         ):
             result = write_archive_pdf_export(
                 archive_path,
@@ -230,7 +247,7 @@ class TestPdfExporters:
         with fitz.open(destination) as document:
             assert len(document) == 1
             page = document[0]
-            assert page.rect.width / page.rect.height > 0.5
+            assert page.rect.width / page.rect.height != pytest.approx(paper_width / paper_height)
             pixmap = page.get_pixmap(alpha=False)
             assert any(value < 255 for value in pixmap.samples)
 
