@@ -20,6 +20,7 @@ from remarkable_mcp.exporters import (
     ExportMetadata,
     RenderedPage,
     render_archive_pages,
+    write_archive_pdf_export,
     write_markdown_export,
     write_native_pdf_export,
     write_rendered_pdf_export,
@@ -133,8 +134,9 @@ class TestPdfExporters:
         )
         extracted_roots = []
 
-        def render(root, page, background_color):
+        def render(root, page, background_color, include_out_of_bounds_ink=False):
             assert (root / "doc.content").is_file()
+            assert include_out_of_bounds_ink is True
             extracted_roots.append(root)
             if page == 2:
                 raise ValueError("corrupt page")
@@ -192,6 +194,62 @@ class TestPdfExporters:
         assert pages[1].partial is False
         assert pages[1].warning is None
         assert pages[2].partial is True
+
+    @pytest.mark.parametrize(
+        "stroke_x,stroke_y,paper_width,paper_height",
+        [
+            pytest.param(-250.0, -50.0, 400.0, 800.0, id="negative-left-top"),
+            pytest.param(100.0, 4474.0, 1620.0, 2160.0, id="below-paper"),
+        ],
+    )
+    def test_pdf_export_preserves_out_of_bounds_ink_on_user_added_page(
+        self, tmp_path, stroke_x, stroke_y, paper_width, paper_height
+    ):
+        from remarkable_mcp import extract
+
+        archive_path = tmp_path / "pdf-with-user-page.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr(
+                "doc.content",
+                json.dumps({"cPages": {"pages": [{"id": "p1"}]}}),
+            )
+            archive.writestr("doc.pdf", _source_pdf())
+            archive.writestr("p1.rm", b"synthetic scene")
+
+        path = (
+            f'<path d="M {stroke_x:g} {stroke_y:g} L {stroke_x:g} {stroke_y:g}" '
+            'stroke="black" stroke-width="40" fill="none" stroke-linecap="round"/>'
+        )
+        destination = tmp_path / "export.pdf"
+        with (
+            patch.object(extract, "_v6_blocks", return_value=[]),
+            patch.object(extract, "_v6_text_elements_with_bounds", return_value=([], [], {})),
+            patch.object(
+                extract,
+                "_v6_paths_from_blocks",
+                return_value=([path], [(stroke_x, stroke_y)]),
+            ),
+            patch.object(
+                extract,
+                "_v6_paper_size",
+                return_value=(paper_width, paper_height),
+            ),
+        ):
+            result = write_archive_pdf_export(
+                archive_path,
+                destination,
+                _metadata(source_type="pdf", pages=1),
+                pdf_mode="merged",
+                background_color="#FFFFFF",
+            )
+
+        assert result.status == "complete"
+        with fitz.open(destination) as document:
+            assert len(document) == 1
+            page = document[0]
+            assert page.rect.width / page.rect.height != pytest.approx(paper_width / paper_height)
+            pixmap = page.get_pixmap(alpha=False)
+            assert any(value < 255 for value in pixmap.samples)
 
 
 class TestMarkdownExporter:
