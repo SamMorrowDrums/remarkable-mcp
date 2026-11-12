@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "remarkable": {
+      "command": "<REPO>\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "remarkable_mcp.cli"],
+      "env": {
+        "PYTHONPATH": "<REPO>",
+        "PYTHONUNBUFFERED": "1",
+        "REMARKABLE_USE_USB_WEB": "0",
+        "REMARKABLE_USE_SSH": "0",
+        "REMARKABLE_USE_LOCAL_DIR": "0",
+        "REMARKABLE_LOCAL_DIR": "",
+        "REMARKABLE_READ_ONLY": "0",
+        "REMARKABLE_DISABLE_CLOUD_FALLBACK": "1",
+        "REMARKABLE_ROOT_PATH": "",
+        "REMARKABLE_TOKEN": "",
+        "REMARKABLE_SKIP_CONFIRM": "0",
+        "REMARKABLE_OCR_BACKEND": "tesseract",
+        "REMARKABLE_CACHE_DIR": "<REPO>\\scripts\\local\\.cloud-cache",
+        "NO_PROXY": "127.0.0.1,localhost"
+      }
+    }
+  }
+}
