@@ -449,11 +449,13 @@ disable them. See [Write Tools](#write-tools-by-transport). Clients that support
   counts extracted-text chunks, and `more` / `next_page` continue those chunks.
   Raw PDF reads count pages from the already-downloaded PDF. If a raw EPUB's
   separate archive cannot be read, its text still returns with
-  `total_pages: null` and `total_pages_known: false`.
+  `total_pages: null` and `total_pages_known: false`. A known empty page list
+  reports `total_pages: 0` instead.
 - PNG images of PDF-backed pages merge the source page and annotations
   automatically; pass `render_merged=False` for the annotation layer alone.
 - PDF exports preserve physical page order and merge mapped source underlays with
-  annotations by default. Markdown exports keep fixed source/typed/annotation/
+  annotations by default; documents with no visible pages return `no_pages`.
+  Markdown exports keep fixed source/typed/annotation/
   highlight/OCR sections without guessing document structure.
 - OCR uses Google Vision when configured and otherwise runs locally with Tesseract.
 - Browse and search accept tag filters.

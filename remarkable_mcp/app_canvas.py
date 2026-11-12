@@ -713,6 +713,12 @@ async def _render_canvas_page_impl(document: str, page: int, ctx: Optional[Conte
     try:
         total_pages = await run_blocking(get_document_page_count, tmp_path)
         file_type = await run_blocking(get_document_file_type, tmp_path)
+        if total_pages is None:
+            return make_error(
+                error_type="page_count_unavailable",
+                message=f"Page count unavailable for document '{target_doc.VissibleName}'.",
+                suggestion="Try another transport or use remarkable_read() to extract text.",
+            )
         if total_pages == 0:
             return make_error(
                 error_type="no_pages",

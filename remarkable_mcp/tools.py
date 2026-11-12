@@ -376,6 +376,8 @@ async def remarkable_read(
     - "total_pages" is the physical document count; "content_pages" is the
       extracted-text count used by page/more/next_page
     - "total_pages_known" reports whether the physical count was available.
+      An authoritative empty page list reports total_pages=0; an unavailable
+      count reports total_pages=null.
       Raw PDF reads count the downloaded PDF directly. If a raw EPUB archive
       cannot be read, content still returns with total_pages=null.
     - If older USB firmware returns only a native PDF, "text" returns source
@@ -447,7 +449,7 @@ async def remarkable_read(
                 archive_bytes = await run_blocking(client.download, target_doc)
             return archive_bytes
 
-        async def count_archive_pages() -> int:
+        async def count_archive_pages() -> Optional[int]:
             raw_doc = await load_archive()
             if _is_pdf_payload(raw_doc):
                 return await run_blocking(_count_pdf_pages, raw_doc)
@@ -658,8 +660,8 @@ async def remarkable_read(
                         text_parts.append("\n\n=== Annotations ===\n")
                     text_parts.extend(annotation_parts)
 
-        physical_pages = int(content.get("pages") or 0) if content else 0
-        if physical_pages <= 0 and page_count_note is None:
+        physical_pages = int(content["pages"]) if content and content.get("pages") else None
+        if physical_pages is None and page_count_note is None:
             if content_type == "raw" and file_type == "pdf":
                 try:
                     physical_pages = await run_blocking(_count_pdf_pages, raw_data)
@@ -679,15 +681,11 @@ async def remarkable_read(
                         "Physical page count unavailable because the document archive "
                         "could not be read; raw EPUB content was returned."
                     )
-        raw_page_count_unknown = (
-            physical_pages <= 0 and content_type == "raw" and file_type in ("pdf", "epub")
-        )
-        if raw_page_count_unknown and page_count_note is None:
+        if physical_pages is None and page_count_note is None:
             page_count_note = (
-                f"Physical page count unavailable; raw {file_type.upper()} content was returned."
+                "Physical page count unavailable; the document has no page metadata or page files."
             )
-        page_count_unknown = physical_pages <= 0 and page_count_note is not None
-        total_pages = None if page_count_unknown else max(1, physical_pages)
+        total_pages = None if page_count_note is not None else physical_pages
         total_pages_known = total_pages is not None
         physical_page_summary = (
             f"document has {total_pages} physical page(s)"
@@ -827,7 +825,12 @@ async def remarkable_read(
         end_idx = start_idx + page_size
 
         # Handle empty content case - auto-retry with OCR if not already enabled
-        if total_chars == 0 and not include_ocr and file_type not in ("pdf", "epub"):
+        if (
+            total_chars == 0
+            and not include_ocr
+            and file_type not in ("pdf", "epub")
+            and total_pages != 0
+        ):
             # Auto-retry with OCR for notebooks
             import json
 
@@ -1906,6 +1909,13 @@ async def remarkable_image(
                     file_type = await run_blocking(get_file_type, client, target_doc)
             use_merged = render_merged is True or (render_merged is None and file_type == "pdf")
 
+            if total_pages is None:
+                return make_error(
+                    error_type="page_count_unavailable",
+                    message=f"Page count unavailable for document '{target_doc.VissibleName}'.",
+                    suggestion="Try another transport or use remarkable_read() to extract text.",
+                )
+
             if total_pages == 0:
                 return make_error(
                     error_type="no_pages",
@@ -2280,10 +2290,17 @@ def _publish_document_export(
             resolved = replace(
                 metadata,
                 source_type=archive_type or "notebook",
-                page_count=page_count if page_count > 0 else None,
+                page_count=page_count,
             )
 
             if output_format == "pdf":
+                if resolved.page_count == 0:
+                    raise _ExportRequestError(
+                        "no_pages",
+                        "The document has no visible pages to export.",
+                        "Add or restore a page before exporting it as a PDF.",
+                    )
+
                 # USB web can expose a firmware-rendered PDF for notebooks and
                 # EPUBs. Prefer it in merged mode because it includes source
                 # underlays that the local archive cannot reconstruct.
@@ -2300,9 +2317,11 @@ def _publish_document_export(
                             pdf_mode=pdf_mode,
                         )
 
+                source_pdf_bytes = None
                 if resolved.page_count is None and resolved.source_type == "pdf":
                     source_pdf = download_raw_file(client, target_doc, "pdf")
                     if _is_pdf_payload(source_pdf):
+                        source_pdf_bytes = source_pdf
                         resolved = replace(resolved, page_count=_count_pdf_pages(source_pdf))
 
                 if resolved.page_count is None:
@@ -2321,6 +2340,7 @@ def _publish_document_export(
                     resolved,
                     pdf_mode=pdf_mode,
                     background_color=background_color,
+                    source_pdf_bytes=source_pdf_bytes,
                 )
                 return _DocumentExportResult(
                     build=build,

@@ -1272,63 +1272,43 @@ def _get_ordered_rm_files(tmpdir_path: Path) -> List[Path]:
     Returns:
         List of .rm file paths in correct page order
     """
-    # Get page order from .content file
-    page_order = []
-    for content_file in tmpdir_path.glob("*.content"):
-        try:
-            data = json.loads(content_file.read_text())
-            # New format: cPages.pages array
-            if "cPages" in data and "pages" in data["cPages"]:
-                page_order = [p["id"] for p in data["cPages"]["pages"]]
-            # Fallback: pages array directly
-            elif "pages" in data and isinstance(data["pages"], list):
-                page_order = data["pages"]
-        except Exception:
-            # Ignore errors reading/parsing .content file; fallback to default page order
-            pass
-        break
-
+    page_order = _get_page_order(tmpdir_path)
     rm_files = list(tmpdir_path.glob("**/*.rm"))
 
-    # Sort rm_files by page order if available
-    if page_order:
-        rm_by_id = {}
-        for rm_file in rm_files:
-            page_id = rm_file.stem
-            rm_by_id[page_id] = rm_file
-
-        ordered_rm_files = []
-        for page_id in page_order:
-            if page_id in rm_by_id:
-                ordered_rm_files.append(rm_by_id[page_id])
-        # Add any remaining files not in page order
-        for rm_file in rm_files:
-            if rm_file not in ordered_rm_files:
-                ordered_rm_files.append(rm_file)
-        return ordered_rm_files
+    if page_order is not None:
+        rm_by_id = {rm_file.stem: rm_file for rm_file in rm_files}
+        return [rm_by_id[page_id] for page_id in page_order if page_id in rm_by_id]
 
     return rm_files
 
 
-def _get_page_order(tmpdir_path: Path) -> List[str]:
+def _get_page_order(tmpdir_path: Path) -> Optional[List[str]]:
     """Return the ordered list of page ids from the .content file.
 
     formatVersion 2 stores them under ``cPages.pages[].id``; formatVersion 1 as
-    a flat ``pages`` list of ids. Returns an empty list if unavailable. This is
+    a flat ``pages`` list of ids. Returns None if unavailable. This is
     the full page order (including pages that have no strokes), unlike
     ``_get_ordered_rm_files`` which is compacted to pages that do.
+
+    Deletion tombstones are excluded: the firmware leaves deleted pages in
+    ``cPages.pages`` with a ``deleted`` register set (see
+    ``_is_page_deleted``) while hiding them in the UI, so the returned list is
+    the document's visible page order — the authoritative basis for page
+    counts, page addressing, and export page ranges.
     """
     for content_file in tmpdir_path.glob("*.content"):
         try:
             data = json.loads(content_file.read_text())
-            if "cPages" in data and "pages" in data["cPages"]:
-                return [p.get("id") for p in data["cPages"]["pages"] if p.get("id")]
+            cpages = data.get("cPages")
+            if isinstance(cpages, dict) and isinstance(cpages.get("pages"), list):
+                entries = _visible_cpages_entries(cpages["pages"])
+                return [page_id for entry in entries if (page_id := entry.get("id"))]
             if isinstance(data.get("pages"), list):
                 return [p for p in data["pages"] if isinstance(p, str)]
         except Exception:
             pass
         break
-    return []
+    return None
 
 
 def _select_rm_file_for_page(tmpdir_path: Path, rm_files: List[Path], page: int) -> Optional[Path]:
@@ -1342,7 +1322,7 @@ def _select_rm_file_for_page(tmpdir_path: Path, rm_files: List[Path], page: int)
     out of range; callers should treat None as "no annotation layer".
     """
     page_order = _get_page_order(tmpdir_path)
-    if page_order:
+    if page_order is not None:
         if 1 <= page <= len(page_order):
             page_id = page_order[page - 1]
             return next((p for p in rm_files if p.stem == page_id), None)
@@ -1474,7 +1454,7 @@ def render_page_full_page_from_extracted_document(
     rm_files = _get_ordered_rm_files(tmpdir_path)
     page_order = _get_page_order(tmpdir_path)
 
-    if page_order:
+    if page_order is not None:
         if page < 1 or page > len(page_order):
             return None
         rm_file = _select_rm_file_for_page(tmpdir_path, rm_files, page)
@@ -1522,25 +1502,67 @@ def document_zip_has_pdf_underlay(zip_path: Path) -> bool:
         return False
 
 
-def _read_cpages_entries(tmpdir_path: Path) -> List[Dict[str, Any]]:
+def _read_cpages_entries(
+    tmpdir_path: Path, include_deleted: bool = False
+) -> Optional[List[Dict[str, Any]]]:
     """Read cPages.pages entries from the .content metadata file.
 
     Args:
         tmpdir_path: Path to the extracted document directory
+        include_deleted: When True, return the raw entry list including
+            firmware deletion tombstones (see ``_is_page_deleted``). Pages
+            tombstoned on the tablet stay in ``cPages.pages`` while the UI
+            hides them, so callers that count or address pages by position
+            should keep the default, which matches what the tablet shows.
 
     Returns:
-        List of cPages page entries, or empty list if not found
+        List of cPages page entries, or None if not found
     """
     content_file = next(tmpdir_path.glob("*.content"), None)
     if content_file is None:
-        return []
+        return None
     try:
         data = json.loads(content_file.read_text())
-        if "cPages" in data and "pages" in data["cPages"]:
-            return data["cPages"]["pages"]
+        cpages = data.get("cPages")
+        if isinstance(cpages, dict) and isinstance(cpages.get("pages"), list):
+            entries = cpages["pages"]
+            return entries if include_deleted else _visible_cpages_entries(entries)
     except Exception:
         pass
-    return []
+    return None
+
+
+def _is_page_deleted(entry: Dict[str, Any]) -> bool:
+    """Whether a cPages entry is a deletion tombstone (firmware-marked).
+
+    reMarkable firmware never removes entries from ``cPages.pages`` when a
+    page is deleted; it writes a last-writer-wins ``deleted`` register into
+    the entry (e.g. ``{"timestamp": "3:1", "value": 1}``) and hides it in the
+    UI. The entry — and its position in the array — persists indefinitely, so
+    raw array length overcounts documents whose pages were ever deleted.
+
+    Treats the register's ``value`` as truthy (deleted) or falsy (kept, e.g.
+    an undo writing ``value: 0``); a missing register means the page was
+    never deleted.
+    """
+    if not isinstance(entry, dict):
+        return False
+
+    deleted = entry.get("deleted")
+    if deleted is None:
+        return False
+    if isinstance(deleted, dict):
+        return bool(deleted.get("value"))
+    return bool(deleted)
+
+
+def _visible_cpages_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filter deletion tombstones out of a cPages.pages entry list.
+
+    This is the authoritative definition of the document's visible pages:
+    the tablet UI shows exactly these entries, in this order.
+    """
+    return [e for e in entries if isinstance(e, dict) and not _is_page_deleted(e)]
 
 
 def _pdf_page_index_for_cpages_entry(entry: Dict[str, Any]) -> Optional[int]:
@@ -1604,9 +1626,11 @@ def _resolve_pdf_page_index(tmpdir_path: Path, page: int) -> Optional[int]:
     v1->v2 migrated document may still carry — its stale, order-shifted indices
     could composite the wrong PDF page under a user-added page.
     """
-    # formatVersion 2 (cPages) — authoritative when present
+    # formatVersion 2 (cPages) — authoritative when present. Deleted pages
+    # are excluded so ``page`` addresses the visible page sequence, matching
+    # the tablet UI (see _read_cpages_entries).
     entries = _read_cpages_entries(tmpdir_path)
-    if entries:
+    if entries is not None:
         if 1 <= page <= len(entries):
             return _pdf_page_index_for_cpages_entry(entries[page - 1])
         return None
@@ -1831,8 +1855,9 @@ def render_merged_page_from_extracted_document(
     pdf_bytes = pdf_path.read_bytes()
 
     rm_files = _get_ordered_rm_files(tmpdir_path)
-    total_pages = len(_get_page_order(tmpdir_path)) or len(rm_files)
-    if total_pages == 0:
+    page_order = _get_page_order(tmpdir_path)
+    total_pages = len(page_order) if page_order is not None else len(rm_files)
+    if page_order is None and total_pages == 0:
         try:
             with fitz.open(stream=pdf_bytes, filetype="pdf") as pdf_document:
                 total_pages = len(pdf_document)
@@ -1964,7 +1989,7 @@ def render_merged_page_from_extracted_document(
         return annotation_only("Compositing failed")
 
 
-def get_document_page_count(zip_path: Path) -> int:
+def get_document_page_count(zip_path: Path) -> Optional[int]:
     """
     Get the number of pages in a reMarkable document zip.
 
@@ -1975,7 +2000,7 @@ def get_document_page_count(zip_path: Path) -> int:
         zip_path: Path to the document zip file
 
     Returns:
-        Number of pages (0 if unable to determine)
+        Number of pages, or None if unable to determine
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -1983,20 +2008,13 @@ def get_document_page_count(zip_path: Path) -> int:
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(tmpdir_path)
 
-        # Try .content metadata first — it's the authoritative page list
-        for content_file in tmpdir_path.glob("*.content"):
-            try:
-                data = json.loads(content_file.read_text())
-                if "cPages" in data and "pages" in data["cPages"]:
-                    return len(data["cPages"]["pages"])
-                if "pages" in data and isinstance(data["pages"], list):
-                    return len(data["pages"])
-            except Exception:
-                pass
-            break
+        page_order = _get_page_order(tmpdir_path)
+        if page_order is not None:
+            return len(page_order)
 
         # Fallback to counting .rm files
-        return len(list(tmpdir_path.glob("**/*.rm")))
+        count = len(list(tmpdir_path.glob("**/*.rm")))
+        return count if count else None
 
 
 def get_document_file_type(zip_path: Path) -> str:
@@ -2120,47 +2138,14 @@ def extract_text_from_document_zip(
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(tmpdir_path)
 
-        # Get page order from .content file
-        page_order = []
-        for content_file in tmpdir_path.glob("*.content"):
-            try:
-                data = json.loads(content_file.read_text())
-                # New format: cPages.pages array
-                if "cPages" in data and "pages" in data["cPages"]:
-                    page_order = [p["id"] for p in data["cPages"]["pages"]]
-                # Fallback: pages array directly
-                elif "pages" in data and isinstance(data["pages"], list):
-                    page_order = data["pages"]
-            except Exception:
-                # Malformed .content file - continue without page order
-                pass
-            break  # Only process first .content file
-
-        rm_files = list(tmpdir_path.glob("**/*.rm"))
-
-        # If we have page order, sort rm_files accordingly
-        if page_order:
-            # Create mapping of page_id -> rm_file
-            rm_by_id = {}
-            for rm_file in rm_files:
-                page_id = rm_file.stem  # filename without extension
-                rm_by_id[page_id] = rm_file
-
-            # Sort rm_files by page order
-            ordered_rm_files = []
-            for page_id in page_order:
-                if page_id in rm_by_id:
-                    ordered_rm_files.append(rm_by_id[page_id])
-            # Add any remaining files not in page order
-            for rm_file in rm_files:
-                if rm_file not in ordered_rm_files:
-                    ordered_rm_files.append(rm_file)
-            rm_files = ordered_rm_files
+        page_order = _get_page_order(tmpdir_path)
+        rm_files = _get_ordered_rm_files(tmpdir_path)
+        if page_order is not None:
             result["page_ids"] = page_order
         else:
             result["page_ids"] = [f.stem for f in rm_files]
 
-        result["pages"] = len(page_order) or len(rm_files)
+        result["pages"] = len(result["page_ids"])
 
         # Extract typed text from .rm files using rmscene
         for rm_file in rm_files:
@@ -2172,7 +2157,7 @@ def extract_text_from_document_zip(
         # the annotated pages / the highlighted text" without paging through the
         # whole document. (The legacy .highlights JSON scanned below only covers
         # older firmware exports.)
-        page_pos = {pid: i for i, pid in enumerate(page_order)}
+        page_pos = {pid: i for i, pid in enumerate(page_order or [])}
         for order_pos, rm_file in enumerate(rm_files):
             page_num = page_pos.get(rm_file.stem, order_pos) + 1
             page_highlights, has_strokes = _extract_page_annotations(rm_file)
