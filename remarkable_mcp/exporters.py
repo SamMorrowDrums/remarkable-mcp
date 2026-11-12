@@ -16,9 +16,13 @@ import fitz
 from PIL import Image
 
 from remarkable_mcp.extract import (
+    _get_page_order,
+    _read_cpages_entries,
+    _read_redirection_page_map,
     _resolve_pdf_page_index,
     render_merged_page_from_extracted_document,
     render_page_full_page_from_extracted_document,
+    render_tablet_pdf_page_to_png,
 )
 
 PdfMode = Literal["merged", "annotations"]
@@ -232,6 +236,7 @@ def render_archive_pages(
     *,
     pdf_mode: PdfMode = "merged",
     background_color: str | None = None,
+    source_pdf_bytes: bytes | None = None,
 ) -> Iterator[RenderedPage]:
     """Render every physical page from one archive extraction in device order."""
     if metadata.page_count is None or metadata.page_count <= 0:
@@ -243,6 +248,37 @@ def render_archive_pages(
             archive.extractall(extracted)
 
         has_source_pdf = any(extracted.glob("**/*.pdf"))
+        page_order = _get_page_order(extracted)
+        can_use_source_order = (
+            pdf_mode == "merged"
+            and metadata.source_type == "pdf"
+            and page_order is None
+            and _read_cpages_entries(extracted) is None
+            and not _read_redirection_page_map(extracted)
+            and not any(extracted.glob("**/*.rm"))
+        )
+        if can_use_source_order and (has_source_pdf or source_pdf_bytes):
+            content_stems = {path.stem for path in extracted.glob("*.content")}
+            matching_pdfs = [
+                path for path in extracted.glob("**/*.pdf") if path.stem in content_stems
+            ]
+            archive_pdfs = sorted(extracted.glob("**/*.pdf"))
+            archive_pdf = (
+                matching_pdfs[0] if matching_pdfs else (archive_pdfs[0] if archive_pdfs else None)
+            )
+            pdf_bytes = archive_pdf.read_bytes() if archive_pdf is not None else source_pdf_bytes
+            if pdf_bytes is None:
+                raise ValueError("Source PDF fallback was selected without PDF data")
+            for page_number in range(1, metadata.page_count + 1):
+                image = render_tablet_pdf_page_to_png(pdf_bytes, page=page_number)
+                yield RenderedPage(
+                    page=page_number,
+                    image=image,
+                    error=None if image is not None else "Source PDF page could not be rendered",
+                    partial=image is None,
+                )
+            return
+
         for page_number in range(1, metadata.page_count + 1):
             try:
                 if pdf_mode == "merged" and metadata.source_type == "pdf" and has_source_pdf:
@@ -301,6 +337,7 @@ def write_archive_pdf_export(
     *,
     pdf_mode: PdfMode = "merged",
     background_color: str | None = None,
+    source_pdf_bytes: bytes | None = None,
 ) -> ExportBuildResult:
     """Render and assemble a PDF from a reMarkable document archive."""
     return write_rendered_pdf_export(
@@ -311,6 +348,7 @@ def write_archive_pdf_export(
             metadata,
             pdf_mode=pdf_mode,
             background_color=background_color,
+            source_pdf_bytes=source_pdf_bytes,
         ),
     )
 

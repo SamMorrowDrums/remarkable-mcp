@@ -122,27 +122,49 @@ class TestExportToolContract:
         source.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_unknown_legacy_pdf_page_count_uses_source_fallback(self):
+    @pytest.mark.parametrize("include_archive_pdf", [True, False])
+    async def test_unknown_legacy_pdf_page_count_uses_source_fallback(self, include_archive_pdf):
         import remarkable_mcp.tools as tool_module
 
         document = _document("Legacy PDF")
         client = Mock()
         client.get_meta_items.return_value = [document]
+        source_pdf = _pdf_bytes(2)
         archive_bytes = io.BytesIO()
         with zipfile.ZipFile(archive_bytes, "w") as archive:
             archive.writestr("doc.content", json.dumps({"fileType": "pdf", "formatVersion": 1}))
-            archive.writestr("doc.pdf", _pdf_bytes(2))
+            if include_archive_pdf:
+                archive.writestr("doc.pdf", source_pdf)
         client.download.return_value = archive_bytes.getvalue()
         with (
             patch.object(tool_module, "get_rmapi", return_value=client),
             patch.object(tool_module, "get_file_type", return_value="pdf"),
-            patch.object(tool_module, "download_raw_file", return_value=_pdf_bytes(2)),
+            patch.object(tool_module, "download_raw_file", return_value=source_pdf),
         ):
             result = await mcp.call_tool("remarkable_export", {"document": document.VissibleName})
         data = _json_result(result)
         assert "_error" not in data, data
+        assert data["status"] == "complete", data
         assert data["pages"] == 2
         assert isinstance(_resource_link(result), types.ResourceLink)
+        resource = await mcp.read_resource(_resource_link(result).uri)
+        from PIL import Image
+
+        from remarkable_mcp.extract import render_tablet_pdf_page_to_png
+
+        with fitz.open(stream=resource[0].content, filetype="pdf") as exported:
+            assert len(exported) == 2
+            assert all(page.get_images() for page in exported)
+            assert all("Physical page" not in page.get_text() for page in exported)
+            first = exported[0].get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            second = exported[1].get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            assert first.samples != second.samples
+            for page_number, rendered in enumerate(exported, 1):
+                actual = rendered.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                expected_png = render_tablet_pdf_page_to_png(source_pdf, page=page_number)
+                with Image.open(io.BytesIO(expected_png)) as expected:
+                    assert (actual.width, actual.height) == expected.size
+                    assert actual.samples == expected.convert("RGB").tobytes()
 
     @pytest.mark.asyncio
     async def test_tool_metadata_describes_temporary_local_write(self):

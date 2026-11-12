@@ -2317,9 +2317,11 @@ def _publish_document_export(
                             pdf_mode=pdf_mode,
                         )
 
+                source_pdf_bytes = None
                 if resolved.page_count is None and resolved.source_type == "pdf":
                     source_pdf = download_raw_file(client, target_doc, "pdf")
                     if _is_pdf_payload(source_pdf):
+                        source_pdf_bytes = source_pdf
                         resolved = replace(resolved, page_count=_count_pdf_pages(source_pdf))
 
                 if resolved.page_count is None:
@@ -2338,6 +2340,7 @@ def _publish_document_export(
                     resolved,
                     pdf_mode=pdf_mode,
                     background_color=background_color,
+                    source_pdf_bytes=source_pdf_bytes,
                 )
                 return _DocumentExportResult(
                     build=build,
