@@ -6,6 +6,7 @@ Focused handler tests call MCPServer directly. Dual-era protocol behavior is
 covered through SDK v2's first-class in-memory Client in test_mcp_v2.py.
 """
 
+import base64
 import json
 import os
 import sys
@@ -14,6 +15,7 @@ import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -132,13 +134,13 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Cloud default: 7 read/export tools + always-on canvas + 6 write tools.
+        """Cloud default: 7 read/export tools + always-on canvas + 7 write tools.
 
         ``remarkable_author`` is SSH-only and therefore hidden in cloud mode, so
-        the default cloud surface is 14 tools.
+        the default cloud surface is 15 tools.
         """
         tools = await _list_tools()
-        assert len(tools) == 14, f"Expected 14 tools, got {len(tools)}"
+        assert len(tools) == 15, f"Expected 15 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -1600,7 +1602,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await _list_tools()
 
-        assert len(tools) == 14
+        assert len(tools) == 15
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:
@@ -3068,6 +3070,7 @@ class TestWriteTools:
 
         write_tool_names = [
             "remarkable_upload",
+            "remarkable_upload_base64",
             "remarkable_markdown_to_pdf",
             "remarkable_mkdir",
             "remarkable_move",
@@ -3097,6 +3100,7 @@ class TestWriteTools:
 
             write_tool_names = [
                 "remarkable_upload",
+                "remarkable_upload_base64",
                 "remarkable_markdown_to_pdf",
                 "remarkable_mkdir",
                 "remarkable_move",
@@ -3110,6 +3114,7 @@ class TestWriteTools:
             # Clean up: remove registered tools to not affect other tests
             for name in [
                 "remarkable_upload",
+                "remarkable_upload_base64",
                 "remarkable_markdown_to_pdf",
                 "remarkable_mkdir",
                 "remarkable_move",
@@ -3355,6 +3360,7 @@ class TestWriteTools:
                 if t.name
                 in (
                     "remarkable_upload",
+                    "remarkable_upload_base64",
                     "remarkable_markdown_to_pdf",
                     "remarkable_mkdir",
                     "remarkable_move",
@@ -3565,6 +3571,68 @@ class TestWriteTargetResolutionSkipsTrash:
         only_trashed = [trashed_folder]
         by_id = get_items_by_id(only_trashed)
         assert _resolve_parent_id("/trash/Old", by_id, only_trashed) is None
+
+
+class TestUploadBase64:
+    @staticmethod
+    def _epub_bytes():
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("mimetype", "application/epub+zip")
+        return buffer.getvalue()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("file_type", ["pdf", "epub"])
+    async def test_upload_preserves_bytes_and_destination(self, file_type):
+        file_bytes = b"%PDF-1.7\n\x00\xff\n%%EOF\n" if file_type == "pdf" else self._epub_bytes()
+        client = Mock(spec=["get_meta_items", "upload_document"])
+        client.get_meta_items.return_value = [
+            Mock(VissibleName="Reports", ID="folder-id", Parent="", is_folder=True)
+        ]
+        client.upload_document.return_value = Mock(id="pdf-id")
+
+        with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+            result = await _call_tool(
+                "remarkable_upload_base64",
+                {
+                    "content_base64": base64.b64encode(file_bytes).decode("ascii"),
+                    "document_name": "Report",
+                    "file_type": file_type,
+                    "parent_folder": "/Reports",
+                },
+            )
+
+        assert json.loads(result.content[0].text)["uploaded"] is True
+        client.upload_document.assert_called_once_with(file_bytes, "Report", file_type, "folder-id")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("file_type", "payload", "error_type"),
+        [
+            ("pdf", "%%%=", "invalid_base64"),
+            ("pdf", b"plain text", "unsupported_format"),
+            ("epub", b"%PDF-1.7", "unsupported_format"),
+            ("epub", b"plain text", "unsupported_format"),
+            ("pdf", b"%PDF-" + b"0" * (10 * 1024 * 1024 - 4), "file_too_large"),
+            ("pdf", b"%PDF-" + b"0" * (10 * 1024 * 1024 - 2), "file_too_large"),
+        ],
+    )
+    async def test_upload_rejects_invalid_payload(self, file_type, payload, error_type):
+        content_base64 = (
+            base64.b64encode(payload).decode("ascii") if isinstance(payload, bytes) else payload
+        )
+        with patch("remarkable_mcp.write_tools.get_rmapi") as get_rmapi:
+            result = await _call_tool(
+                "remarkable_upload_base64",
+                {
+                    "content_base64": content_base64,
+                    "document_name": "Report",
+                    "file_type": file_type,
+                },
+            )
+
+        assert json.loads(result.content[0].text)["_error"]["type"] == error_type
+        get_rmapi.assert_not_called()
 
 
 class TestMarkdownPDFWriteback:
