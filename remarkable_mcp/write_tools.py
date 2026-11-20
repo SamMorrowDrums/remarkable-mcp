@@ -22,6 +22,7 @@ no external Go binary required.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -32,7 +33,9 @@ import time
 import uuid
 from contextlib import contextmanager, nullcontext
 from datetime import datetime
-from typing import Annotated, Optional
+from io import BytesIO
+from typing import Annotated, Literal, Optional
+from zipfile import ZIP_STORED, BadZipFile, ZipFile
 
 from mcp.server.mcpserver import Context, Elicit, ElicitationResult, Resolve
 from mcp.types import ToolAnnotations
@@ -1916,6 +1919,90 @@ def register_write_tools():
             if callable(run_operation):
                 return await run_operation(usb_client, "upload", _impl)
         return await asyncio.to_thread(_impl)
+
+    @mcp.tool(annotations=UPLOAD_ANNOTATIONS)
+    async def remarkable_upload_base64(
+        content_base64: str,
+        document_name: str,
+        file_type: Literal["pdf", "epub"],
+        parent_folder: str = "/",
+        defer_restart: bool = False,
+    ) -> str:
+        """
+        <usecase>Upload an existing PDF or EPUB from a remote MCP client.</usecase>
+        <instructions>
+        Send the document bytes as standard Base64. The decoded file may be at most
+        10 MiB. Requires write mode.
+        </instructions>
+        <parameters>
+        - content_base64: Standard Base64 encoding of the document bytes.
+        - file_type: Format of the document, "pdf" or "epub".
+        - document_name: Display name on the tablet.
+        - parent_folder: Destination on the tablet (default: "/"). USB web ignores it.
+        - defer_restart: Skip the immediate xochitl restart in SSH mode.
+        </parameters>
+        """
+        error = _require_write_transport()
+        if error:
+            return error
+
+        max_bytes = 10 * 1024 * 1024
+        if len(content_base64) > 4 * ((max_bytes + 2) // 3):
+            return make_error(
+                error_type="file_too_large",
+                message="The decoded file may be at most 10 MiB.",
+                suggestion="Provide a smaller file and try again.",
+            )
+        try:
+            file_bytes = base64.b64decode(content_base64, validate=True)
+        except ValueError:
+            return make_error(
+                error_type="invalid_base64",
+                message="Provide the document bytes as standard Base64.",
+                suggestion="Encode the document with the standard Base64 alphabet and padding.",
+            )
+        if len(file_bytes) > max_bytes:
+            return make_error(
+                error_type="file_too_large",
+                message="The decoded file may be at most 10 MiB.",
+                suggestion="Provide a smaller file and try again.",
+            )
+        if file_type == "pdf":
+            valid_format = file_bytes.startswith(b"%PDF-")
+        else:
+            # Read only the small, uncompressed EPUB identification entry.
+            epub_mimetype = b"application/epub+zip"
+            try:
+                with ZipFile(BytesIO(file_bytes)) as archive:
+                    mimetype = archive.getinfo("mimetype")
+                    valid_format = (
+                        mimetype.compress_type == ZIP_STORED
+                        and mimetype.file_size == len(epub_mimetype)
+                        and not (mimetype.flag_bits & 1)
+                        and archive.read(mimetype) == epub_mimetype
+                    )
+            except (BadZipFile, KeyError, NotImplementedError, UnicodeError):
+                valid_format = False
+
+        if not valid_format:
+            return make_error(
+                error_type="unsupported_format",
+                message=f"The decoded file does not match the declared {file_type.upper()} format.",
+                suggestion="Check the declared file type and encode the original file again.",
+            )
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = os.path.join(temp_dir, f"document.{file_type}")
+            with open(file_path, "wb") as file:
+                file.write(file_bytes)
+            return await remarkable_upload(
+                file_path,
+                parent_folder=parent_folder,
+                document_name=document_name,
+                defer_restart=defer_restart,
+            )
 
     @mcp.tool(annotations=UPLOAD_ANNOTATIONS)
     async def remarkable_markdown_to_pdf(
