@@ -48,21 +48,19 @@ ls -l ~/.rmapi
 
 ### 3. Add the Server to Claude Desktop
 
-Open the configuration file from **Settings > Developer > Edit Config**, or in
-Terminal:
+Back up the configuration file, then open it in TextEdit:
 
 ```bash
-open -e "$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+touch "$CONFIG"
+cp "$CONFIG" "$CONFIG.bak"
+open -e "$CONFIG"
 ```
 
-Back it up before editing:
+`touch` creates the file if Claude Desktop has not created it yet.
 
-```bash
-cp "$HOME/Library/Application Support/Claude/claude_desktop_config.json" \
-   "$HOME/Library/Application Support/Claude/claude_desktop_config.json.bak"
-```
-
-Add a `remarkable` entry, using the path from step 1 as `command`:
+Add a `remarkable` entry, using the path from step 1 as `command`. If the file
+is empty, paste this whole block:
 
 ```json
 {
