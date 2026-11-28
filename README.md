@@ -227,6 +227,8 @@ Claude Desktop and many other MCP clients use a top-level `mcpServers` object an
 
 If the token file is unavailable, add `"env": {"REMARKABLE_TOKEN": "your-token"}` to the `remarkable` server entry. Consult your client's documentation if it uses a different outer key or secret-storage mechanism.
 
+On macOS, Claude Desktop may not inherit your shell's `PATH`. If the server does not start, set `command` to the absolute path printed by `which uvx`. See the [Claude Desktop setup guide](docs/claude-desktop-macos.md) for a full walkthrough.
+
 </details>
 
 ---
@@ -885,6 +887,7 @@ The cache is purely a local accelerator: deleting `REMARKABLE_CACHE_DIR` only fo
 
 | Guide | Description |
 |-------|-------------|
+| [Claude Desktop Setup (macOS)](docs/claude-desktop-macos.md) | Step-by-step cloud mode setup for the Claude desktop app |
 | [SSH Setup](docs/ssh-setup.md) | Enable developer mode and configure SSH |
 | [Google Vision Setup](docs/google-vision-setup.md) | Set up handwriting OCR |
 | [Tools Reference](docs/tools.md) | Detailed tool documentation |
